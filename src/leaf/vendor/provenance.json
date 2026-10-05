@@ -1,0 +1,53 @@
+{
+  "zippy_archive_sha256": "e773c9ea59391b6736a47dc589c7bcf23c7e40d17a64e1e2420c7a2ee96520a4",
+  "dependencies": [
+    {
+      "name": "zippy",
+      "version": "0.10.20",
+      "source": "https://github.com/guzba/zippy/tree/cd562ba",
+      "license": "MIT",
+      "build_only": true,
+      "files": {
+        "LICENSE": "3c6d1825d5de5659eb7535de14031d2d9330f72ab80f0a0386a502bf1793fc48",
+        "README.md": "2825134dbbf36c76623f629f04f5813fb945c5690203613aa4a05e747da95a44",
+        "zippy/adler32.nim": "affc76a2d4c02f8a7e932969692e119caabf8cee785cad140a3b36c66efe58b3",
+        "zippy/adler32_simd.nim": "36d265dfadce4693fdd0bd0a55e08840589d7f3cb881b9b83fbfa252618114ad",
+        "zippy/bitstreams.nim": "8edcaa4c1e6766ddae32cd3893671831b085c42b8c177652f9e978ec51c11a9e",
+        "zippy/common.nim": "8739826750693f6b08c458c0e78006804f9dedd22cbbf7026a5167688697cfee",
+        "zippy/crc.nim": "93ded011d117368456cf603202bb5dca61fa251d76f06bac64e9bc52b2c8dcfb",
+        "zippy/crc32_simd.nim": "e6b545fae6d8d9fe5882949d3826895ee3bc8edb7c0237f850bef984da32f9f5",
+        "zippy/deflate.nim": "8c8589c5fabe81a27841ddd03551f5d63d374d700ed05924c3143c7fc857845f",
+        "zippy/gzip.nim": "1c9424453ef7934ae8949afa9a8f4f5716b7532f047200c3c99570dea62801c3",
+        "zippy/inflate.nim": "93082618a4a9820e089e544cf21145cf9903f8e3bd438b003fb1fdc653902caf",
+        "zippy/internal.nim": "83b27c8cbe38692cdc8b5c587d06ca29210fb1315181d94c700625f65f4bed62",
+        "zippy/lz77.nim": "7e67b50f2c333cdec273def77c4485d07ab22a265bcf8efac2ee6e421cf75546",
+        "zippy/snappy.nim": "558fc7ce5fa9a624a3d9ad2fcfb24b8af5aef9c8838d868ea073f2b04351f400",
+        "zippy/tarballs.nim": "ac1124548ecf8aa6974ef7e0b71c6a21afa7217ab246aabd096d3338463ac01f",
+        "zippy/tarballs_v1.nim": "e619abecf21eac034354e1d9d1d57fc3b8e604b00a0071e494b0f3730c02ec85",
+        "zippy/ziparchives.nim": "8fd61b09fbb6fdbe34beb8d5fe2f30b40a0629d197c7cf71133a434d78f57fbd",
+        "zippy/ziparchives_v1.nim": "6efdd5b11ca2faa570f5884af35f8a45ed806e4e38d7d0c30b0fa1a829715b3c",
+        "zippy.nim": "8b6ad38de40d6602357dee155d94958518af75fbe98240c31d7c6c9303502fc1",
+        "zippy.nimble": "a58073364652fe2073165dd00b238861f61676173dda9ca72281205cbdee1504"
+      }
+    },
+    {
+      "name": "checksums",
+      "version": "0.2.1",
+      "source": "Nim 2.2.6 distribution: pkgs/checksums",
+      "license": "MIT",
+      "build_only": true,
+      "files": {
+        "LICENSE": "e4b16039b7396d57e971c405fa76524dcad1f631b6bf13579f01d0ce628e7ff4",
+        "README.md": "fef46b9158902a9178b23be463fe9bc94328a598c1a7d5c2f88891ad42d19021",
+        "checksums.nimble": "7e12c5e1aba501617d33288ca6c5624ef8460ec11e7249f73d0bc6ce7e74b344",
+        "private/sha_utils.nim": "7c6ba09effe93cdabd71268921847a7831a22383884ca11c7b62f220634c9c54",
+        "sha2.nim": "9221bb879f1e10daf75dd804a6afde2ad78c7d267b8b29a2cca66f8f2b69ba32"
+      }
+    }
+  ],
+  "nim_runtime_license": {
+    "version": "2.2.6",
+    "source": "Nim 2.2.6 distribution: copying.txt",
+    "sha256": "c8179122923594d5a54231b10b9fe2ca0861dcf2f0d0f525bae8be24db1893bd"
+  }
+}

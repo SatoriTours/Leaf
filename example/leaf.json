@@ -1,0 +1,14 @@
+{
+  "name": "Leaf 界面示例",
+  "identifier": "org.leaf.ui-examples",
+  "version": "0.1.0",
+  "entry": "main.nim",
+  "include": [
+    "main.nim",
+    "ui.nim",
+    "pages",
+    "stocks.nim",
+    "reports.nim",
+    "chat.nim"
+  ]
+}

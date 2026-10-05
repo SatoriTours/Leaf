@@ -1,0 +1,14 @@
+/target/
+**/target/
+/.superpowers/
+/.codex/
+/.agents/
+/.aws/
+/artifacts/
+*.core
+
+/dist/
+*.jsonl
+
+/examples/project/third-party-licenses/
+/examples/project/third-party-licenses.json

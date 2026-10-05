@@ -1,0 +1,35 @@
+name: Nim + GPUI 性能测量
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.6'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: 安装构建与图形依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config cmake libssl-dev libclang-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev \
+            libwayland-dev libvulkan-dev mesa-vulkan-drivers fonts-noto-cjk xvfb xauth
+      - name: 构建并测量真实运行时与 GPUI 帧
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          cargo build --locked -p leaf-gpui
+          nim c -d:release --out:target/nim/leaf-performance scripts/performance.nim
+          xvfb-run -a target/nim/leaf-performance --suite all --iterations 100 --warmup 100 --rounds 5 --repeat 2 --output artifacts/performance
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Nim-GPUI性能原始数据
+          path: artifacts/performance
