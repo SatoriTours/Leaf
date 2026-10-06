@@ -1,12 +1,12 @@
 # Leaf Model 基类与数据库能力设计草案
 
-Leaf 的业务 model 通过 `ApplicationRecord` 继承统一的持久化、校验、回调和状态管理能力。数据库映射与基本读写复用 Norm，应用代码使用 `leaf/model` 的稳定接口。查询条件由独立的 `Query[T]` 组合，SQL 迁移继续由 Leaf 管理。
+Leaf 的业务 model 通过 `ApplicationRecord` 继承统一的持久化、校验、回调和状态管理能力。数据库映射与基本读写复用 Norm，应用代码使用 `leaf/model` 的稳定接口。应用自动绑定当前数据库上下文，日常 model 操作无需传 db 参数。查询条件由独立的 `Query[T]` 组合，SQL 迁移继续由 Leaf 管理。
 
 本文定义拟新增接口及其行为，供实现前评审；示例尚不是当前 Leaf 的可运行 API。
 
 ## 目标与既有约束
 
-用户已选择以 Norm 为底座，要求参考 Rails model 层，并把 model 的共同操作封装到父类。成功标准是：新增业务 model 只需声明字段、校验、回调与业务方法，不再重复编写 CRUD SQL；页面能够按字段展示错误；保存失败、取消编辑、事务回滚都不破坏数据库或已展示的记录。
+用户已选择以 Norm 为底座，要求参考 Rails model 层，并把 model 的共同操作封装到父类；进一步要求日常调用不反复传递 db。成功标准是：新增业务 model 只需声明字段、校验、回调与业务方法，不再重复编写 CRUD SQL 或传递数据库连接；页面能够按字段展示错误；保存失败、取消编辑、事务回滚都不破坏数据库或已展示的记录。
 
 Leaf 当前使用 Nim 2.2.6 及以上、ORC、显式连接注入、SQLite 和版本化 SQL 迁移。现有脚手架的 model 是值类型，CRUD 位于生成的 service；新设计需要处理改用引用类型后的编辑隔离、64 位主键和脚手架兼容性。模块导入和生成命令不得打开数据库。
 
@@ -97,6 +97,44 @@ defineModel(Task, table = "tasks"):
 
 具体表名由声明指定，脚手架沿用现有复数规则。首版列名沿用声明中的字段名；没有隐式 camelCase 到 snake_case 转换。内部 id 和时间字段均进入保留名检查，使用 Nim 的标识符等价规则检测冲突。
 
+## 数据库上下文与免传参接口
+
+日常接口从当前执行上下文取得数据库连接，应用启动时配置一次。Rails 的 ConnectionHandling 提供连接管理与作用域切换，Leaf 参考这种职责，把连接选择从业务方法调用移到应用执行边界。[Rails 连接管理](https://api.rubyonrails.org/classes/ActiveRecord/ConnectionHandling.html)
+
+| 可选方式 | 使用体验 | 取舍 |
+| --- | --- | --- |
+| 应用自动绑定执行上下文 | Task.find(id)、task.save() | 推荐；调用简洁，同线程多个应用及独立测试可隔离 |
+| 进程级默认连接 | 启动时设置一个共享 db | 配置简单，但多个应用、测试和后台线程容易争用或切换错连接 |
+| 每个记录持有连接 | 已加载对象可直接 save() | 仍需要解决 Task.find 和新对象的连接选择，并延长连接生命周期 |
+
+选择应用绑定的同步执行上下文。createApplication 继续在启动边界接收或打开连接，构造页面与应用时绑定一次；返回的 Application 持有一个 executionScope 通用钩子，Runtime 在渲染、事件处理和延迟内容创建边界调用它。钩子内部执行 withDatabase(applicationDatabase)，结束后恢复前一个上下文。core 只知道通用执行钩子，不导入 ORM 或 SQLite；没有存储的应用不增加数据库依赖。
+
+不能只在 createApplication 或初次 render 时短暂绑定连接：按钮事件在稍后执行，需要单独进入相同上下文。页面 View 与 logic、model 校验回调、service 和事务内的嵌套调用均使用当前连接。Application 的渲染闭包直接调用时也绑定应用上下文；Runtime 的通用钩子负责事件与延迟内容路径，原生和 headless 运行遵守相同契约。
+
+```nim
+# 应用启动，连接配置只在这里出现
+let app = createApplication() # 打开 config/database 配置的连接
+quit(run(app))
+
+# 独立测试或维护脚本，作用域内全部操作免传 db
+proc testTaskPersistence() =
+  let testDb = openApplicationDatabase(":memory:")
+  defer: testDb.close()
+  withDatabase(testDb):
+    let task = Task.createOrRaise(title = "测试任务", done = false)
+    doAssert Task.find(task.id).title == "测试任务"
+```
+
+ModelContext 持有借用的 Database 和执行线程信息，当前上下文指针采用 threadvar，在 withDatabase 入口保存前值，在 finally 中恢复，覆盖正常返回、提前退出和异常。进入作用域不打开或关闭连接，也不自动创建事务。作用域可嵌套：退出内层后恢复外层。同线程先后处理不同应用事件时分别绑定对应连接，不存在进程级默认数据库回退。[Nim 线程局部变量](https://nim-lang.org/docs/manual.html#threads-threadvar-pragma)
+
+访问数据库时没有上下文，抛 DatabaseContextError，并提示在应用回调或 withDatabase 中调用；不静默创建数据库。build、生命周期和变更查询不需要上下文；valid 需要上下文，以统一支持读取数据库的业务校验。已保存对象仍保留数据库身份，当前连接不同则拒绝保存或重载；不能为了省参数改写另一个应用的同主键行。
+
+Query 在 query() 调用时捕获当前实际连接及身份，后续构建条件不重新选择连接。终结操作在捕获连接的 withDatabase 中执行，离开最初作用域后仍查询原数据库；连接关闭或线程不符时报错。活动事务内禁止切换到另一连接，包括执行捕获了另一连接的 Query，以免一段业务事务实际写入多个互不原子的数据库。
+
+显式 db 重载保留给底层集成与兼容，例如 Task.find(db, id)、task.save(db)；它们通过 withDatabase(db) 调用同一份公共实现，确保回调及嵌套调用也使用指定连接，遵守相同跨数据库身份和事务切换检查。脚手架与日常文档默认展示免传参接口。
+
+后台工作在所属线程打开自己的连接，再用 withDatabase 包围同步工作，不继承 UI 线程的上下文或连接。首版的 withDatabase 是同步作用域，不能跨 await 或调度器让出执行；后续支持异步时需要任务级上下文，不能将 threadvar 直接当作异步任务隔离机制。
+
 ## 共同操作与失败行为
 
 为接近 Rails 的 save 与 save! 语义，普通保存返回布尔结果，显式抛异常版本命名为 saveOrRaise。前面的接口示例据此细化；业务事务应使用抛异常版本。[Rails Persistence](https://api.rubyonrails.org/classes/ActiveRecord/Persistence.html)、[Rails 校验](https://guides.rubyonrails.org/active_record_validations.html)
@@ -104,19 +142,19 @@ defineModel(Task, table = "tasks"):
 | 拟新增接口 | 行为 |
 | --- | --- |
 | T.build(字段参数) | 构造未保存对象，不访问数据库 |
-| T.create(db, 字段参数) | 返回对象；校验失败时对象未保存且含 errors |
-| T.createOrRaise(db, 字段参数) | 返回已保存对象；校验或回调取消时抛异常 |
-| T.find(db, id) | 返回 T；不存在时抛 RecordNotFound |
-| T.findBy(db, 字段条件) | 返回 Option[T]；多条匹配取按 id 升序的第一条 |
-| T.query(db) | 返回未执行的 Query[T] |
-| record.valid(db) | 运行校验及校验回调，返回 bool，不自动保存 |
-| record.save(db) | 校验失败或 before 回调取消返回 false；成功返回 true |
-| record.saveOrRaise(db) | 校验失败抛 RecordInvalid；回调取消抛 RecordNotSaved |
-| record.update(db, 字段参数) | 赋值后执行 save，返回 bool，保留失败的输入 |
-| record.updateOrRaise(db, 字段参数) | 赋值并执行 saveOrRaise |
-| record.reload(db) | 原位重载、清除 errors 与 changes；不存在时报错 |
-| record.destroy(db) | 执行删除回调；取消返回 false，成功返回 true |
-| record.destroyOrRaise(db) | 删除取消时抛 RecordNotDestroyed |
+| T.create(字段参数) | 返回对象；校验失败时对象未保存且含 errors |
+| T.createOrRaise(字段参数) | 返回已保存对象；校验或回调取消时抛异常 |
+| T.find(id) | 返回 T；不存在时抛 RecordNotFound |
+| T.findBy(字段条件) | 返回 Option[T]；多条匹配取按 id 升序的第一条 |
+| T.query() | 捕获当前连接，返回未执行的 Query[T] |
+| record.valid() | 运行校验及校验回调，返回 bool，不自动保存 |
+| record.save() | 校验失败或 before 回调取消返回 false；成功返回 true |
+| record.saveOrRaise() | 校验失败抛 RecordInvalid；回调取消抛 RecordNotSaved |
+| record.update(字段参数) | 赋值后执行 save，返回 bool，保留失败的输入 |
+| record.updateOrRaise(字段参数) | 赋值并执行 saveOrRaise |
+| record.reload() | 原位重载、清除 errors 与 changes；不存在时报错 |
+| record.destroy() | 执行删除回调；取消返回 false，成功返回 true |
+| record.destroyOrRaise() | 删除取消时抛 RecordNotDestroyed |
 | record.isNewRecord / isPersisted / isDestroyed | 查询实例生命周期 |
 | record.changed / changes / savedChanges | 查看待保存变化与上次成功保存的变化 |
 | record.dupRecord() | 复制业务字段；重置主键、生命周期、时间字段和运行状态 |
@@ -131,14 +169,14 @@ defineModel(Task, table = "tasks"):
 
 ```nim
 let task = Task.build(title = "买牛奶", done = false)
-if task.save(db):
+if task.save():
   state.selectedId = task.id
 else:
   state.error = task.errors.fullMessages().join("\n")
 
-let saved = Task.find(db, state.selectedId)
+let saved = Task.find(state.selectedId)
 saved.done = true
-saved.saveOrRaise(db)
+saved.saveOrRaise()
 ```
 
 页面状态仍然使用独立 Draft 值对象保存输入。开始编辑时复制字段到 Draft；提交时重新查找目标记录，再赋予草稿字段并保存。UI 的列表对象只在成功提交后刷新，写入失败或取消编辑不会通过引用别名修改列表。新对象与编辑对象分别走 build 和 find，不使用 `Task(id: editingId)` 推断保存模式。
@@ -151,14 +189,14 @@ schema 2 应用的 id 页面状态和事件闭包使用 int64，schema 1 原有�
 proc unfinished*(query: Query[Task]): Query[Task] =
   query.where(it.done == false)
 
-let tasks = Task.query(db)
+let tasks = Task.query()
   .unfinished()
   .orderBy(it.id, Desc)
   .limit(20)
   .all()
 
-let total = Task.query(db).unfinished().count()
-let first = Task.query(db).unfinished().first()
+let total = Task.query().unfinished().count()
+let first = Task.query().unfinished().first()
 ```
 
 Query 是不可变的查询描述，每次 where、orderBy、limit、offset 返回新描述，避免两个 scope 分支互相污染。描述只持有连接、字段元数据和表达式树；直到 all、first、count、exists 才执行 SQL。all 返回 seq[T]，first 返回 Option[T]，firstOrRaise 不存在时抛 RecordNotFound；first 未显式排序时按 id 升序。
@@ -180,13 +218,13 @@ afterSave 表示当前事务内写入已成功，afterCommit 表示最外层事�
 ## 事务与变更追踪
 
 ```nim
-db.transaction:
-  let project = Project.createOrRaise(db, name = "家庭")
+transaction:
+  let project = Project.createOrRaise(name = "家庭")
   discard Task.createOrRaise(
-    db, title = "买牛奶", done = false, project_id = project.id)
+    title = "买牛奶", done = false, project_id = project.id)
 ```
 
-最外层 SQLite 写事务使用 BEGIN IMMEDIATE，嵌套业务事务和内部保存使用 SAVEPOINT。保存失败返回 false 时只回滚本次保存范围；需要整个业务事务失败时使用 saveOrRaise 或主动抛异常。数据库操作和事务记账均绑定同一个实际连接。
+transaction 使用当前上下文的连接；db.transaction 保留为显式入口，先绑定指定连接再执行相同事务流程。最外层 SQLite 写事务使用 BEGIN IMMEDIATE，嵌套业务事务和内部保存使用 SAVEPOINT。保存失败返回 false 时只回滚本次保存范围；需要整个业务事务失败时使用 saveOrRaise 或主动抛异常。数据库操作和事务记账均绑定同一个实际连接。
 
 每个事务范围在对象首次参与写入时登记运行状态和数据库快照。回滚恢复主键、生命周期、框架维护的时间字段、变化基线和关联缓存；保留用户提交的业务字段值供修正。事务内新建记录回滚后恢复为未保存对象，不残留已经失效的主键。内层提交将日记与提交事件交给外层，内层回滚只恢复内层范围。
 
@@ -210,19 +248,19 @@ Norm 以 2.8.7 为初始版本，lowdb 以 v0.3.0 为初始版本；安装及构
 
 脚手架清单升级为 schema 2，增加 model API 版本和时间字段约定。对 schema 1 应用，原有资源生成方式继续有效；生成器按清单版本选择模板，不在新增资源时混入新 model 接口。首版没有自动升级旧应用的命令，已有应用按文档人工迁移，并在单独验证后切换清单；原有文件和迁移历史不自动改写。
 
-schema 2 新应用生成 ApplicationRecord、model 声明、直接操作 model 的页面逻辑和 model 测试；页面组预加载 leaf/model 与业务 model。service 由跨模型业务流程按需创建，普通 CRUD 不再生成存储 service。旧 schema 1 继续使用其原有 service。运行、测试与生成文档必须说明两种清单版本的差异。
+schema 2 新应用生成 ApplicationRecord、model 声明、免传 db 操作 model 的页面逻辑和 model 测试；页面组预加载 leaf/model 与业务 model。应用执行边界自动绑定数据库上下文，独立测试使用 withDatabase。service 由跨模型业务流程按需创建，普通 CRUD 不再生成存储 service。旧 schema 1 继续使用其原有 service。运行、测试与生成文档必须说明两种清单版本的差异。
 
 ## 首版范围与后续扩展
 
-首版交付一个完整的基类与持久化闭环：上述基类、声明宏、CRUD、结构化校验、明确的生命周期回调、变更追踪、SQLite 事务、基础查询与 scope、schema 2 脚手架及三平台依赖适配。
+首版交付一个完整的基类与持久化闭环：上述基类、声明宏、应用数据库上下文、免传参 CRUD、结构化校验、明确的生命周期回调、变更追踪、SQLite 事务、基础查询与 scope、schema 2 脚手架及三平台依赖适配。
 
-关联作为后续独立增量：先使用显式 project_id 外键保存关系，再增加 belongsTo、hasMany、关联 Query 和批量 preload。声明应生成 project(db)、tasks(db) 之类的显式访问器，避免读取普通字段触发数据库访问；preload 在一个父查询加每种关联一次批量查询内加载，不能退化成逐行查询。然后再考虑 join model 的多对多、关联删除策略和嵌套保存。这些扩展不改变 Record 的共同保存入口。
+关联作为后续独立增量：先使用显式 project_id 外键保存关系，再增加 belongsTo、hasMany、关联 Query 和批量 preload。声明应生成 project()、tasks() 之类的访问方法，使用当前上下文并检查所属数据库身份，避免读取普通字段触发数据库访问；preload 在一个父查询加每种关联一次批量查询内加载，不能退化成逐行查询。然后再考虑 join model 的多对多、关联删除策略和嵌套保存。这些扩展不改变 Record 的共同保存入口。
 
-STI、多态关联、自动级联保存、隐式全局数据库、部分字段可写对象、复合主键、乐观锁、异步数据库、复杂聚合 DSL 与批量写入均不属于首版。
+STI、多态关联、自动级联保存、进程级默认数据库、部分字段可写对象、复合主键、乐观锁、异步数据库、复杂聚合 DSL 与批量写入均不属于首版。
 
 ## 模块与验证要求
 
-公共入口为 src/leaf/model.nim。实现拆分到 model/record、metadata、declarations、validation、errors、persistence、query、callbacks、changes、transactions 和 adapters/norm_sqlite；每个模块围绕单一职责，避免继续扩大 scaffold_templates。生成器的 model 声明模板与页面逻辑模板分别维护。
+公共入口为 src/leaf/model.nim。实现拆分到 model/record、context、metadata、declarations、validation、errors、persistence、query、callbacks、changes、transactions 和 adapters/norm_sqlite；每个模块围绕单一职责，避免继续扩大 scaffold_templates。core 提供不依赖数据库的 executionScope 通用钩子。生成器的 model 声明模板与页面逻辑模板分别维护。
 
 实施时必须验证以下可观察行为：
 
@@ -237,5 +275,8 @@ STI、多态关联、自动级联保存、隐式全局数据库、部分字段�
 9. 迁移与 ORM 共享连接，内存库共用，关闭连接报错、借用句柄不重复关闭、动态库一致；Linux、macOS 和 Windows 均运行验证。
 10. schema 1 应用继续增量生成；schema 2 应用实际生成、编译和 headless CRUD；迁移历史不被改写，旧记录可保留。
 11. 发布 SDK 在无 Nimble 全局缓存、无临时网络下载的环境中编译 model 应用，并包含必需的依赖源码和许可证。
+12. 原生与 headless 的初始化、渲染、延迟内容和稍后执行的事件均可免传 db；同线程两个应用交替执行时分别访问所属数据库。
+13. withDatabase 嵌套、异常和提前返回均恢复前值，独立测试不污染下一测试；没有上下文、跨线程使用和事务中切换连接明确报错。
+14. Query 离开创建作用域后继续使用捕获连接；在另一数据库上下文中执行时不被改路由，关闭连接后拒绝执行；显式重载的回调与嵌套操作使用指定连接。
 
 实现前先验证存储类型生成、继承元数据和共享连接；只有这些基础通过，才继续完整持久化和脚手架接入。后续实现计划应按这些依赖关系安排工作。
