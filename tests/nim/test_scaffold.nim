@@ -21,6 +21,13 @@ proc runChild(exe: string, args: seq[string], cwd: string): tuple[code: int, out
   (child.code, child.output.diagnosticText())
 
 suite "Application and resource scaffolding":
+  when defined(macosx):
+    test "macOS system directory aliases allow scaffolding":
+      for alias in ["/tmp", "/var", "/etc"]:
+        if symlinkExists(alias) and expandFilename(alias) == "/private" & alias:
+          let root = alias / "leaf-scaffold-path-check"
+          check guardedPath(root, "app/pages/home/logic.nim") == root / "app/pages/home/logic.nim"
+
   test "default SQLite storage survives processes and applies newly generated migrations":
     let app = base / "persistent"
     require leaf_cli.main(@["g", "scaffold", app]) == 0

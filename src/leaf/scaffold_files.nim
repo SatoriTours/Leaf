@@ -2,12 +2,19 @@
 import std/[os, strutils]
 import ./[core, project, scaffold_types]
 
+proc isSystemDirectoryAlias(path: string): bool =
+  when defined(macosx):
+    # macOS owns these aliases; /var/folders is also its default temp directory.
+    # Only the standard destination is trusted, never arbitrary user links.
+    result = path in ["/tmp", "/var", "/etc"] and expandFilename(path) == "/private" & path
+
 proc guardedPath*(root, relative: string): string =
   discard portableRelative(relative)
   var path = root
   var ancestor = absolutePath(root)
   while true:
-    if symlinkExists(ancestor): fail("scaffold path cannot be a symbolic link: " & ancestor)
+    if symlinkExists(ancestor) and not isSystemDirectoryAlias(ancestor):
+      fail("scaffold path cannot be a symbolic link: " & ancestor)
     let parent = ancestor.parentDir
     if parent == ancestor or parent.len == 0: break
     ancestor = parent
