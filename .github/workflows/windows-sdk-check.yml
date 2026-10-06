@@ -10,6 +10,10 @@ on:
         description: 在临时 SDK 中验证 DLL manifest 修复
         default: false
         type: boolean
+      rebuild_cli:
+        description: 使用当前代码重新编译临时 SDK 的 CLI 与源码
+        default: false
+        type: boolean
 permissions:
   contents: read
   actions: read
@@ -34,6 +38,7 @@ jobs:
         shell: pwsh
         env:
           REPAIR_MANIFEST: ${{ inputs.repair_manifest }}
+          REBUILD_CLI: ${{ inputs.rebuild_cli }}
         run: |
           $ErrorActionPreference = 'Stop'
           $archive = Join-Path (Get-Location) 'dist/sdk/leaf-sdk-windows-x86_64.zip'
@@ -45,6 +50,14 @@ jobs:
           if ($env:REPAIR_MANIFEST -eq 'true') {
             & $mt.FullName -nologo -manifest 'crates/leaf-gpui/resources/windows/leaf_gpui.manifest' "-outputresource:$dll;#2"
             if ($LASTEXITCODE -ne 0) { throw 'DLL manifest update failed.' }
+          }
+          if ($env:REBUILD_CLI -eq 'true') {
+            Copy-Item (Join-Path $work 'leaf-sdk/src/leaf/vendor/GPUI-NOTICES.json') 'src/leaf/vendor/GPUI-NOTICES.json' -Force
+            Copy-Item 'src/*' (Join-Path $work 'leaf-sdk/src') -Recurse -Force
+            & (Join-Path $work 'leaf-sdk/toolchain/nim/bin/nim.exe') c -d:release "--out:$work/leaf-sdk/bin/leaf.exe" src/leaf_cli.nim
+            if ($LASTEXITCODE -ne 0) { throw 'CLI compilation failed.' }
+          }
+          if ($env:REPAIR_MANIFEST -eq 'true' -or $env:REBUILD_CLI -eq 'true') {
             Compress-Archive -Path (Join-Path $work 'leaf-sdk') -DestinationPath $archive -Force
             (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash | Set-Content "$archive.sha256" -Encoding ascii
           }
