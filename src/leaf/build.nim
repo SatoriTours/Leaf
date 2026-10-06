@@ -1,6 +1,7 @@
 ## A build can be polled while the previous desktop process continues running.
 import std/[os, strutils]
 import ./[core, project, process_io, gpui_build, sdk]
+when defined(windows): import ./windows_paths
 
 const SourceRoot = currentSourcePath().parentDir.parentDir
 type BuildJob* = ref object
@@ -27,18 +28,30 @@ proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedCon
     else: absolutePath(output.addFileExt(ExeExt)))
   result.bridge = ensureGpui()
   stageGpui(result.bridge, result.binary)
+  var executable = compiler()
+  var sources = libraryPath()
+  var cache = directory / "cache"
+  var binary = result.binary
+  var entry = project.entry
+  when defined(windows):
+    createDir(cache)
+    executable = compilerPath(executable)
+    sources = compilerPath(sources)
+    cache = compilerPath(cache)
+    binary = compilerPath(binary)
+    entry = compilerPath(entry)
   # Nim expands dollar variables in path switches independently of the shell.
-  var args = @["c", "-d:release", "--mm:orc", "--path:" & libraryPath().replace("$", "$$"),
-    "--nimcache:" & (directory / "cache").replace("$", "$$"),
-    "--out:" & result.binary.replace("$", "$$")]
+  var args = @["c", "-d:release", "--mm:orc", "--path:" & sources.replace("$", "$$"),
+    "--nimcache:" & cache.replace("$", "$$"),
+    "--out:" & binary.replace("$", "$$")]
   if isolatedConfig: args.add(@["--skipParentCfg:on", "--skipUserCfg:on"])
   when defined(windows):
     let gcc = sdkGcc()
     if gcc.len > 0:
-      args.add(@["--cc:gcc", "--gcc.exe:" & gcc.replace("$", "$$"),
-        "--gcc.linkerexe:" & gcc.replace("$", "$$")])
-  args.add(project.entry)
-  result.process = startManaged(compiler(), args, project.root)
+      let path = compilerPath(gcc).replace("$", "$$")
+      args.add(@["--cc:gcc", "--gcc.exe:" & path, "--gcc.linkerexe:" & path])
+  args.add(entry)
+  result.process = startManaged(executable, args, project.root)
 
 proc pollBuild*(job: BuildJob): bool = job.process.poll()
 proc code*(job: BuildJob): int = job.process.code
