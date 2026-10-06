@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -52,12 +53,21 @@ echo "Leaf v1.2.3 ({channel}, abcdef)"
         self.assertEqual(result.returncode, 0, result.stderr)
         return self.out / ("leaf-sdk-" + self.target + self.extension)
 
-    def install(self, channel="release"):
+    def install(self, channel="release", shell="sh"):
         env = dict(os.environ, HOME=str(self.base / "home"))
-        return subprocess.run(["sh", str(ROOT / "install.sh"), "--channel", channel,
+        return subprocess.run([shell, str(ROOT / "install.sh"), "--channel", channel,
             "--prefix", str(self.base / "installed SDK"), "--bin-dir", str(self.base / "bin"),
             "--download-base", (self.base / "downloads").as_uri(), "--no-path"],
             env=env, capture_output=True, text=True)
+
+    @unittest.skipIf(os.name == "nt", "POSIX installer")
+    def test_install_under_bash(self):
+        shell = os.environ.get("LEAF_TEST_BASH", shutil.which("bash"))
+        if not shell: self.skipTest("Bash is unavailable")
+        self.package()
+        result = self.install(shell=shell)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("v1.2.3", subprocess.check_output([self.base / "bin/leaf", "--version"], text=True))
 
     @unittest.skipIf(os.name == "nt", "POSIX installer")
     def test_archive_install_and_channel_switch(self):

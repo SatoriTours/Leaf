@@ -33,9 +33,9 @@ if [ -n "$version" ]; then
     printf '%s\n' "$version" | LC_ALL=C grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail 'version must be vX.Y.Z'
 fi
 case "$(uname -s)-$(uname -m)" in
-    Linux-x86_64) target=linux-x86_64;;
-    Darwin-x86_64) target=macos-x86_64;;
-    Darwin-arm64|Darwin-aarch64) target=macos-aarch64;;
+    Linux-x86_64) target=linux-x86_64; bridge_name=libleaf_gpui.so;;
+    Darwin-x86_64) target=macos-x86_64; bridge_name=libleaf_gpui.dylib;;
+    Darwin-arm64|Darwin-aarch64) target=macos-aarch64; bridge_name=libleaf_gpui.dylib;;
     *) fail 'unsupported platform; supported: Linux x86_64, macOS Intel/Apple Silicon (Windows: install.ps1)';;
 esac
 for tool in curl tar mktemp; do command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"; done
@@ -71,7 +71,7 @@ done < "$staging/entries"
 tar -tvzf "$staging/$asset" > "$staging/details"
 if LC_ALL=C grep -Eq '^[lh]' "$staging/details"; then fail 'SDK archive must not contain links'; fi
 tar -xzf "$staging/$asset" -C "$staging"
-for file in bin/leaf src/leaf.nim toolchain/nim/bin/nim toolchain/nim/lib/system.nim sdk.json lib/"$(case "$target" in linux-*) printf libleaf_gpui.so;; *) printf libleaf_gpui.dylib;; esac)"; do
+for file in bin/leaf src/leaf.nim toolchain/nim/bin/nim toolchain/nim/lib/system.nim sdk.json "lib/$bridge_name"; do
     [ -f "$staging/leaf-sdk/$file" ] || fail "SDK file missing: $file"
 done
 "$staging/leaf-sdk/bin/leaf" --verify-sdk "$channel" "$target" "$version" || fail 'SDK metadata or executable does not match this installation'
@@ -87,7 +87,11 @@ entry_tmp=
 if [ "$update_path" = 1 ]; then
     escaped=$(printf '%s' "$bin_dir" | sed "s/'/'\\\\''/g")
     path_line="export PATH='$escaped':\"\$PATH\" # Leaf SDK"
-    for profile in "$HOME/.profile" "$(case "${SHELL:-}" in */zsh) printf '%s/.zshrc' "${ZDOTDIR:-$HOME}";; *) printf '%s/.bashrc' "$HOME";; esac)"; do
+    case "${SHELL:-}" in
+        */zsh) shell_profile=${ZDOTDIR:-$HOME}/.zshrc;;
+        *) shell_profile=$HOME/.bashrc;;
+    esac
+    for profile in "$HOME/.profile" "$shell_profile"; do
         mkdir -p "$(dirname "$profile")"
         if [ ! -f "$profile" ] || ! grep -Fqx "$path_line" "$profile"; then printf '\n%s\n' "$path_line" >> "$profile"; fi
     done

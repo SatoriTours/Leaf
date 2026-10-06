@@ -79,8 +79,13 @@ try {
     }
     $ccExtract = Join-Path $staging 'c-compiler'
     New-Item -ItemType Directory -Path $ccExtract | Out-Null
-    & "$env:SystemRoot\System32\tar.exe" -xf $ccArchive -C $ccExtract
-    if ($LASTEXITCODE -ne 0) { throw 'MinGW extraction failed.' }
+    # Older Windows tar builds convert Unicode argv paths through the ANSI code
+    # page. Keep argv ASCII; PowerShell sets the Unicode working directory itself.
+    Push-Location -LiteralPath $staging
+    try {
+        & "$env:SystemRoot\System32\tar.exe" -xf 'mingw64.7z' -C 'c-compiler'
+        if ($LASTEXITCODE -ne 0) { throw 'MinGW extraction failed.' }
+    } finally { Pop-Location }
     $ccRoot = Join-Path $ccExtract 'mingw64'
     if (-not (Test-Path -LiteralPath (Join-Path $ccRoot 'bin/gcc.exe'))) { throw 'MinGW compiler missing.' }
     Move-Item -LiteralPath $ccRoot -Destination (Join-Path $sdk 'toolchain/mingw')
