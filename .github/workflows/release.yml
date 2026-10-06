@@ -18,9 +18,13 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.6'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - id: version
         name: 校验渠道和版本 tag
-        run: python scripts/publish_sdk.py --metadata
+        run: nim c -d:release -r --out:target/nim/publish_sdk scripts/publish_sdk.nim --metadata
   build:
     needs: metadata
     strategy:
@@ -50,11 +54,9 @@ jobs:
     env:
       SDK_CHANNEL: ${{ needs.metadata.outputs.channel }}
       SDK_VERSION: ${{ needs.metadata.outputs.version }}
+      NIM_SSL_VERSION: '3'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
       - uses: jiro4989/setup-nim-action@v2
         with:
@@ -71,15 +73,30 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/prepare_windows_sdk.ps1
-      - name: Windows 测试的 Python 命令别名
+      - name: macOS HTTPS 运行库
+        if: runner.os == 'macOS'
+        run: |
+          if ! brew list --versions openssl@3 >/dev/null 2>&1; then brew install openssl@3; fi
+          openssl_prefix=$(brew --prefix openssl@3)
+          test -f "$openssl_prefix/lib/libssl.3.dylib"
+          test -f "$openssl_prefix/lib/libcrypto.3.dylib"
+          echo "LEAF_OPENSSL_LIB=$openssl_prefix/lib" >> "$GITHUB_ENV"
+      - name: Windows HTTPS 运行库和证书
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $python = (Get-Command python).Source
-          $alias = Join-Path (Split-Path $python) 'python3.exe'
-          if (-not (Test-Path $alias)) { Copy-Item $python $alias }
+          $ErrorActionPreference = 'Stop'
+          $gitRoot = Split-Path (Split-Path (Get-Command git.exe).Source -Parent) -Parent
+          $opensslBin = Join-Path $gitRoot 'mingw64/bin'
+          $certificates = Join-Path $gitRoot 'mingw64/ssl/certs/ca-bundle.crt'
+          foreach ($path in @((Join-Path $opensslBin 'libssl-3-x64.dll'), (Join-Path $opensslBin 'libcrypto-3-x64.dll'), $certificates)) {
+              if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Git HTTPS dependency missing: $path" }
+          }
+          $opensslBin >> $env:GITHUB_PATH
+          'NIM_SSL_VERSION=3-x64' >> $env:GITHUB_ENV
+          ('SSL_CERT_FILE=' + $certificates) >> $env:GITHUB_ENV
       - name: 发布与安装脚本测试
-        run: python -m unittest discover -s tests/release -v
+        run: nim c -r --out:target/nim/test_runner scripts/test.nim --release-only
       - name: 构建和测试 Unix 桥接
         if: runner.os != 'Windows'
         run: |
@@ -97,7 +114,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cargo metadata --format-version 1 --locked --filter-platform '${{ matrix.rust_target }}' > target/sdk-cargo-metadata.json
-          python scripts/collect_sdk_notices.py --metadata target/sdk-cargo-metadata.json --output src/leaf/vendor/GPUI-NOTICES.json
+          collector=target/nim/collect_sdk_notices
+          if [ '${{ runner.os }}' = Windows ]; then collector="$collector.exe"; fi
+          nim c -d:release -d:ssl -d:sslVersion="$NIM_SSL_VERSION" --out:"$collector" scripts/collect_sdk_notices.nim
+          if [ '${{ runner.os }}' = macOS ]; then
+            export DYLD_LIBRARY_PATH="$LEAF_OPENSSL_LIB${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          fi
+          "$collector" --metadata target/sdk-cargo-metadata.json --output src/leaf/vendor/GPUI-NOTICES.json
       - name: 构建 CLI 与架构回归
         env:
           LEAF_GPUI_LIBRARY: ${{ github.workspace }}/${{ matrix.bridge }}
@@ -109,19 +132,14 @@ jobs:
           nim c -r --out:target/nim/test_scaffold tests/nim/test_scaffold.nim
       - name: 组装 SDK
         run: |
-          python - <<'PY'
-          import os, subprocess, sys
-          from pathlib import Path
-          windows = os.name == 'nt'
-          args = [sys.executable, 'scripts/package_sdk.py',
-            '--nim-root', '.nim_runtime', '--cli', 'target/nim/leaf' + ('.exe' if windows else ''),
-            '--bridge', '${{ matrix.bridge }}', '--target', '${{ matrix.target }}',
-            '--channel', os.environ['SDK_CHANNEL'], '--version', os.environ['SDK_VERSION'],
-            '--commit', os.environ['GITHUB_SHA'], '--output', 'dist/sdk']
-          subprocess.run(args, check=True)
-          PY
+          cli=target/nim/leaf
+          if [ '${{ runner.os }}' = Windows ]; then cli="$cli.exe"; fi
+          nim c -d:release -r --out:target/nim/package_sdk scripts/package_sdk.nim \
+            --nim-root .nim_runtime --cli "$cli" --bridge '${{ matrix.bridge }}' \
+            --target '${{ matrix.target }}' --channel "$SDK_CHANNEL" --version "$SDK_VERSION" \
+            --commit "$GITHUB_SHA" --output dist/sdk
       - name: 原生安装器与重定位验证
-        run: python scripts/verify_sdk_install.py --target '${{ matrix.target }}' --channel "$SDK_CHANNEL" --version "$SDK_VERSION"
+        run: nim c -d:release -r --out:target/nim/verify_sdk_install scripts/verify_sdk_install.nim --target '${{ matrix.target }}' --channel "$SDK_CHANNEL" --version "$SDK_VERSION"
       - uses: actions/upload-artifact@v4
         with:
           name: sdk-${{ matrix.target }}
@@ -140,7 +158,11 @@ jobs:
           pattern: sdk-*
           path: dist/sdk
           merge-multiple: true
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.6'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: 发布正式版或滚动 beta
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python scripts/publish_sdk.py --assets dist/sdk
+        run: nim c -d:release -r --out:target/nim/publish_sdk scripts/publish_sdk.nim --assets dist/sdk

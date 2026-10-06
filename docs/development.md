@@ -27,6 +27,8 @@ watch 在后台编译候选，失败保留旧程序。候选在 GPUI 首次显�
 ```sh
 cargo test --workspace --locked
 nim c -r --out:target/nim/test_runner scripts/test.nim
+# 仅执行 SDK 归档、安装与发布工具回归
+nim c -r --out:target/nim/test_runner scripts/test.nim --release-only
 nim c -r --out:target/nim/native_test scripts/native_test.nim
 nim c -d:release -r --out:target/nim/benchmark benchmarks/runtime.nim
 ```

@@ -1,6 +1,6 @@
 import ./cleanup_support
-import std/[unittest, os, json, strutils, tempfiles, tables, strtabs]
-import leaf/[project, package_files, process_io, build, scaffold_files, scaffold_types]
+import std/[unittest, os, json, strutils, tempfiles, tables, strtabs, algorithm]
+import leaf/[project, package_files, process_io, build, scaffold_files, scaffold_types, sqlite]
 import leaf_cli
 
 let base = createTempDir("leaf-scaffold-", "")
@@ -73,11 +73,10 @@ else: doAssert false
       let ran = runChild(binary, @[mode], app)
       checkpoint ran.output
       check ran.code == 0
-    let inspected = runChild(findExe("python3"), @["-c",
-      "import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); assert db.execute('select title from notes').fetchone()[0]=='persistent note'; assert db.execute('select count(*) from leaf_schema_migrations').fetchone()[0]==2",
-      app / "target/testing.sqlite3"], app)
-    checkpoint inspected.output
-    check inspected.code == 0
+    let inspected = openDatabase(app / "target/testing.sqlite3")
+    defer: inspected.close()
+    check inspected.query("select title from notes")[0][0].asString == "persistent note"
+    check inspected.query("select count(*) from leaf_schema_migrations")[0][0].asInt == 2
 
   test "CLI generates a portable complete application and dry run writes nothing":
     let preview = base / "preview"
@@ -344,27 +343,20 @@ echo "generated application ready"
         app / "tests" / test], app)
       checkpoint tested.output
       check tested.code == 0
-    let sql = """
-import pathlib, sqlite3, sys
-root = pathlib.Path(sys.argv[1])
-db = sqlite3.connect(':memory:')
-for file in sorted((root / 'db/migrations').glob('*.up.sql')):
-    db.executescript(file.read_text())
-db.execute('INSERT INTO notes (title, archived) VALUES (?, ?)', ('note', 0))
-try:
-    db.execute('INSERT INTO notes (title, archived) VALUES (?, ?)', ('bad', 2))
-except sqlite3.IntegrityError:
-    pass
-else:
-    raise AssertionError('bool constraint missing')
-db.execute('INSERT INTO metrics (count, amount) VALUES (?, ?)', (42, 1.5))
-for file in sorted((root / 'db/migrations').glob('*.down.sql'), reverse=True):
-    db.executescript(file.read_text())
-assert not db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
-"""
-    let migrated = runChild(findExe("python3"), @["-c", sql, app], app)
-    checkpoint migrated.output
-    check migrated.code == 0
+    let migrated = openDatabase(":memory:")
+    defer: migrated.close()
+    var up, down: seq[string]
+    for path in walkFiles(app / "db/migrations/*.up.sql"): up.add(path)
+    for path in walkFiles(app / "db/migrations/*.down.sql"): down.add(path)
+    up.sort()
+    down.sort(SortOrder.Descending)
+    for path in up: migrated.executeScript(readFile(path))
+    discard migrated.execute("INSERT INTO notes (title, archived) VALUES (?, ?)", [dbValue("note"), dbValue(0)])
+    expect DatabaseError:
+      discard migrated.execute("INSERT INTO notes (title, archived) VALUES (?, ?)", [dbValue("bad"), dbValue(2)])
+    discard migrated.execute("INSERT INTO metrics (count, amount) VALUES (?, ?)", [dbValue(42), dbValue(1.5)])
+    for path in down: migrated.executeScript(readFile(path))
+    check migrated.query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").len == 0
     discard collectFiles(readProject(app))
 
   when defined(posix):

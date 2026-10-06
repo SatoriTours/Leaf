@@ -100,7 +100,7 @@ when isMainModule: quit(run(app))
 
 ## 测试
 
-完整回归还需要 Python 3.12+（用标准库独立校验流式发布归档）；Linux 桌面测试需要 Xvfb 和 xdotool。
+回归测试与 SDK 发布工具全部使用 Nim；流式归档由独立 Nim 读取器校验。Linux 桌面测试需要 Xvfb 和 xdotool。
 
 ```sh
 cargo test --workspace --locked

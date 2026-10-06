@@ -30,8 +30,6 @@ jobs:
           nim c -d:release --out:target/nim/leaf src/leaf_cli.nim
       - name: Nim 核心和工具回归
         run: nim c -r --out:target/nim/test_runner scripts/test.nim
-      - name: SDK 归档、安装与发布脚本测试
-        run: python3 -m unittest discover -s tests/release -v
       - name: 真实 Nim + GPUI 窗口交互
         env:
           LIBGL_ALWAYS_SOFTWARE: '1'

@@ -10,7 +10,7 @@
 | GPUI Kit 控件与 C ABI | `cargo test --workspace --locked` | 9 项测试通过 |
 | Rust 静态检查 | `cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check` | 通过 |
 | 真实 GPUI 窗口 | `nim c -r --out:target/nim/native_test scripts/native_test.nim` | 鼠标点击、输入、Enter、就绪与关闭通过；首屏列表失败不报告就绪 |
-| CLI 与多模块发布 | `leaf pack examples/project --target linux --output dist` | tar.gz 与 SHA256 生成，独立 Python 标准库验证归档 |
+| CLI 与多模块发布 | `leaf pack examples/project --target linux --output dist` | tar.gz 与 SHA256 生成，独立读取器验证归档 |
 | 发布包搬迁 | 解压到独立目录，从 `/tmp` 运行，清除框架路径覆盖 | 资源读取、两次 headless 点击、真实窗口点击与关闭通过 |
 | 桥接库加载 | 检查搬迁后窗口进程的加载映射 | 使用随包 `libleaf_gpui.so`，没有加载 GTK 库 |
 

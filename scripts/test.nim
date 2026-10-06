@@ -8,15 +8,24 @@ proc main(): int =
     stderr.writeLine("Nim compiler not found; put nim on PATH or set NIM")
     return 1
   createDir(root / "target" / "nim")
+  var directories = @["nim", "release"]
+  if paramCount() > 0:
+    if commandLineParams() != @["--release-only"]:
+      stderr.writeLine("Usage: test_runner [--release-only]")
+      return 1
+    directories = @["release"]
   var tests: seq[string]
-  for path in walkFiles(root / "tests" / "nim" / "test_*.nim"):
-    tests.add(path)
+  for directory in directories:
+    for path in walkFiles(root / "tests" / directory / "test_*.nim"):
+      tests.add(path)
   tests.sort()
   if tests.len == 0:
     stderr.writeLine("No Nim test suites found")
     return 1
   for test in tests:
-    let output = root / "target" / "nim" / test.extractFilename.changeFileExt(ExeExt)
+    let output = root / "target" / "nim" / test.parentDir.extractFilename /
+      test.extractFilename.changeFileExt(ExeExt)
+    createDir(output.parentDir)
     var args = @["c", "-r", "--path:" & root / "src", "--out:" & output]
     args.add(test)
     let process = startProcess(compiler, workingDir = root,
@@ -26,6 +35,5 @@ proc main(): int =
     process.close()
     if code != 0: return code
   stdout.writeLine("Passed all " & $tests.len & " Nim test suites")
-
 
 when isMainModule: quit(main())

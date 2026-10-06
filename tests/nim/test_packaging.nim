@@ -4,14 +4,7 @@ when defined(posix): import std/posix
 import leaf/[core, project, pack, package_files, checksum]
 import ../../src/leaf/vendor/zippy/zippy/ziparchives
 
-proc extractTar(path, destination: string) =
-  # The streaming writer emits concatenated gzip members. Python's standard
-  # reader validates all members; Zippy's reader supports only a single member.
-  let python = findExe("python3")
-  doAssert python.len > 0, "python3 is required for independent archive validation"
-  let script = "import sys,tarfile; tarfile.open(sys.argv[1], 'r:gz').extractall(sys.argv[2], filter='data')"
-  let (output, code) = execCmdEx(quoteShellCommand(@[python, "-c", script, path, destination]))
-  doAssert code == 0, output
+import ./archive_reader
 
 let root = createTempDir("leaf-packaging-", "")
 removeDirectoryOnExit(root)
