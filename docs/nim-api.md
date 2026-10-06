@@ -6,6 +6,50 @@ import leaf
 
 `Application(title, width, height, render)` 定义应用；`render` 接收 `BuildContext`，返回 `Node`。`run(app)` 默认打开 GPUI 窗口，命令行 `--headless` / `--check` 使用相同 Nim 业务逻辑。
 
+推荐用 `view:` 描述界面，括号只用于短表达式，组件层级由缩进表示：
+
+```nim
+proc render(ctx: BuildContext): Node =
+  view:
+    column:
+      styles: {"padding": "24", "gap": "12"}
+      text "待办事项"
+      input draft:
+        key: "entry"
+        placeholder: "输入事项"
+        onChange(e): draft = e.value
+      row:
+        for item in items:
+          taskView(item)
+      button "添加":
+        key: "add"
+        onClick(e):
+          addTask(draft)
+          draft = ""
+
+let app = Application(title: "Todo", width: 720, height: 560, render: render)
+```
+
+`view:` 返回一个 `Node`，必须恰好有一个根组件。组件块的属性使用 `name: value`，事件块使用 `onClick(e):`、`onChange(e):` 或 `onSubmit(e):`；`e` 是可自行命名的 `Event` 参数。已有回调可写成 `onClick: callback`。
+
+`styles:` 可以接收样式表字面量（自动调用 `style`）或已有 `Styles`，例如 `styles: grow()`。样式放在组件块开头，子组件逐行排列，不需要 `@[...]` 或逗号。属性只放在组件块的直接层级，条件样式可通过表达式指定。
+
+布局内支持普通 Nim 的 `let`、`var`、`if`、`when`、`case`、`for`、`while` 和 `block`；节点与节点序列表达式会加入子组件，返回 `void` 的调用可用于普通计算。已有 `Node` 和自定义组件可直接放入布局。自定义容器只需接收 `children: seq[Node]` 参数，例如 `card:` 内可嵌套组件。动态子节点也可写成 `children: nodes`，但不能同时嵌套子组件。
+
+`view:` 在编译期展开为以下普通构造器，保留 Nim 类型检查与原有运行时行为。单独定义 `render` 后传给 `Application`，避免将匿名函数放在跨多行的构造器括号内。
+
+需要构建 `seq[Node]` 时使用 `views:`，其中可排列多个根组件，用法与布局内部相同。例如：
+
+```nim
+let actions = views:
+  button "保存":
+    key: "save"
+    onClick(e): save()
+  button "取消":
+    key: "cancel"
+    onClick(e): cancel()
+```
+
 | 构造器 | 内容 |
 | --- | --- |
 | `column(children)` / `row(children)` | 纵向或横向布局 |

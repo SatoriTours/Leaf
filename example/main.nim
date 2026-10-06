@@ -11,8 +11,12 @@ type Gallery = ref object
   reports: Reports
   chat: Chat
 proc navigationButton(state: Gallery, id, name: string): Node =
-  button(name, key = "nav_" & id, styles = style({"width": "full"}),
-    variant = (if state.active == id: "primary" else: "ghost"), onClick = proc(e: Event) = state.active = id)
+  view:
+    button name:
+      key: "nav_" & id
+      styles: {"width": "full"}
+      variant: (if state.active == id: "primary" else: "ghost")
+      onClick(e): state.active = id
 proc render(state: Gallery, ctx: BuildContext): Node =
   var navigation: seq[Node] = @[title("Leaf / STUDIO", size = 20), label("常用界面试验台"), separator()]
   for (id, name, detail) in [("dashboard", "01  数据概览", "统计卡片 / 图表 / 列表"),
@@ -31,10 +35,21 @@ proc render(state: Gallery, ctx: BuildContext): Node =
     of "reports": state.reports.render(ctx)
     of "chat": state.chat.render(ctx)
     else: raise newException(UiError, "unknown page: " & state.active)
-  line(@[stack(navigation, "sidebar", 18, style({"width": "218", "height": "full", "padding": "20", "background": Surface, "overflow": "scroll"})),
-    stack(@[content], "content", styles = grow())], gap = 0, styles = style({"height": "full", "background": Background, "color": Ink}))
+  view:
+    line:
+      gap: 0
+      styles: {"height": "full", "background": Background, "color": Ink}
+      stack navigation:
+        key: "sidebar"
+        gap: 18
+        styles: {"width": "218", "height": "full", "padding": "20", "background": Surface, "overflow": "scroll"}
+      stack:
+        key: "content"
+        styles: grow()
+        content
 proc galleryApp*(startPage = "dashboard"): Application =
   let state = Gallery(active: startPage, dashboard: newDashboard(), board: newBoard(), settings: newSettings(),
     signup: newSignup(), stocks: newStocks(), reports: newReports(), chat: newChat())
-  Application(title: "Leaf · 常用界面示例", width: 1240, height: 860, render: proc(ctx: BuildContext): Node = state.render(ctx))
+  proc render(ctx: BuildContext): Node = state.render(ctx)
+  Application(title: "Leaf · 常用界面示例", width: 1240, height: 860, render: render)
 when isMainModule: quit(run(galleryApp()))

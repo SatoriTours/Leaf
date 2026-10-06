@@ -22,19 +22,36 @@ proc validEmail*(value: string): bool =
 proc label*(value: string, key = ""): Node = text(value, key, style({"color": Muted, "font_size": "13"}))
 proc title*(value: string, key = "", size = 18): Node =
   text(value, key, style({"font_size": $size, "weight": "bold"}))
-proc stack*(children: seq[Node], key = "", gap = 12, styles = default(Styles)): Node =
+proc stack*(children: seq[Node], key = "", gap = 12, styles: Styles = default(Styles)): Node =
   column(children, key, merged(style({"width": "full", "gap": $gap}), styles))
-proc line*(children: seq[Node], key = "", gap = 12, styles = default(Styles)): Node =
+proc line*(children: seq[Node], key = "", gap = 12, styles: Styles = default(Styles)): Node =
   row(children, key, merged(style({"width": "full", "gap": $gap}), styles))
-proc card*(children: seq[Node], key = "", styles = default(Styles)): Node =
-  stack(children, key, styles = merged(style({"padding": "20", "gap": "16", "background": Surface,
-    "border_width": "1", "border_color": Border, "radius": "14"}), styles))
+proc card*(children: seq[Node], key = "", styles: Styles = default(Styles)): Node =
+  let base = style({"padding": "20", "gap": "16", "background": Surface,
+    "border_width": "1", "border_color": Border, "radius": "14"})
+  view:
+    stack:
+      key: key
+      styles: merged(base, styles)
+      children: children
 proc page*(heading, description: string, children: seq[Node], height = 850): Node =
-  stack(@[stack(@[stack(@[title(heading, size = 28), label(description)], gap = 8)] & children,
-    "page_content", 24, style({"min_height": $height}))],
-    styles = style({"padding": "32", "height": "full", "min_height": "0", "overflow": "scroll", "color": Ink}))
+  view:
+    stack:
+      styles: {"padding": "32", "height": "full", "min_height": "0", "overflow": "scroll", "color": Ink}
+      stack:
+        key: "page_content"
+        gap: 24
+        styles: {"min_height": $height}
+        stack:
+          gap: 8
+          title(heading, size = 28)
+          label(description)
+        children
 proc segment*(height: float64, width = "full", color = "", key = "", align = "start"): Node =
-  var styles = style({"height": $height, "min_height": $height, "width": width, "justify": align})
-  if color.len > 0: styles["background"] = color
-  column(@[], key = key, styles = styles)
+  var segmentStyle = style({"height": $height, "min_height": $height, "width": width, "justify": align})
+  if color.len > 0: segmentStyle["background"] = color
+  view:
+    column:
+      key: key
+      styles: segmentStyle
 proc grow*(): Styles = style({"flex_grow": "1", "min_width": "0"})

@@ -39,17 +39,22 @@ CLI 会增量构建 GPUI 桥接库，并将它复制到应用可执行文件旁�
 import leaf
 
 var count = 0
-let app = Application(title: "Nim + GPUI", width: 640, height: 480,
-  render: proc(ctx: BuildContext): Node =
-    column(@[
-      text("计数：" & $count),
-      button("增加", key = "add", onClick = proc(e: Event) = inc count)
-    ], styles = style({"padding": "24", "gap": "12"})))
+
+proc render(ctx: BuildContext): Node =
+  view:
+    column:
+      styles: {"padding": "24", "gap": "12"}
+      text "计数：" & $count
+      button "增加":
+        key: "add"
+        onClick(e): inc count
+
+let app = Application(title: "Nim + GPUI", width: 640, height: 480, render: render)
 
 when isMainModule: quit(run(app))
 ```
 
-组件包括 Column、Row、Text、Button、Input、Checkbox、Switch、Progress、Tag、Separator、Spinner 和 VirtualList。输入框按稳定 key 复用 GPUI Kit `InputState`；虚拟列表按视口向 Nim 请求行，避免创建全部十万项控件。事件更新失败时保留上一份成功界面，并显示错误信息。
+`view:` 用缩进表达组件树，属性使用 `styles:`、`key:` 等写法；事件块 `onClick(e):` 接收 `Event`，布局中可直接使用 `if`、`for` 和子组件。组件包括 Column、Row、Text、Button、Input、Checkbox、Switch、Progress、Tag、Separator、Spinner 和 VirtualList。输入框按稳定 key 复用 GPUI Kit `InputState`；虚拟列表按视口向 Nim 请求行，避免创建全部十万项控件。事件更新失败时保留上一份成功界面，并显示错误信息。
 
 ## 开发与发布
 
