@@ -22,9 +22,13 @@ proc loadGpui*(path=""):GpuiApi =
     getAppDir()/GpuiLibraryName] & (if installed.len > 0: @[
       installed/"lib"/GpuiLibraryName] else: @[
       FrameworkRoot/"target/release"/GpuiLibraryName, FrameworkRoot/"target/debug"/GpuiLibraryName])
+  var failures: seq[string]
   for name in candidates:
-    let library=openNativeLibrary(name)
-    if library==nil:continue
+    var error: string
+    let library=openNativeLibrary(name, error)
+    if library==nil:
+      failures.add(name & " (" & error & ")")
+      continue
     let abi=cast[typeof(result.abi)](symAddr(library,"leaf_gpui_abi_version"))
     let run=cast[typeof(result.run)](symAddr(library,"leaf_gpui_run"))
     let frames=cast[typeof(result.frames)](symAddr(library,"leaf_gpui_run_frames"))
@@ -36,5 +40,5 @@ proc loadGpui*(path=""):GpuiApi =
       cachedApi=result
       cachedOverride=getEnv("LEAF_GPUI_LIBRARY")
     return
-  fail("GPUI bridge could not be loaded: " & candidates.join(", ") &
+  fail("GPUI bridge could not be loaded: " & failures.join(", ") &
     "; run cargo build -p leaf-gpui or set LEAF_GPUI_LIBRARY")
