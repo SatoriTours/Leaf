@@ -138,19 +138,22 @@ proc asset*(relative: string): string =
         break
   resolve(root / "assets", relative)
 
-proc initProject*(path: string) =
-  if fileExists(path) or dirExists(path): fail("refusing to overwrite existing project: " & path)
-  let name = path.normalizedPath.extractFilename
+proc newProjectConfig*(name, entry: string, included: seq[string]): JsonNode =
+  ## Shared manifest naming for the minimal init and full application scaffold.
   discard portableRelative(name)
   var slug = ""
   for c in name:
     slug.add(if c.isAlphaNumeric and ord(c) < 128: c.toLowerAscii else: '-')
   if slug.len == 0 or not slug[0].isAlphaAscii: slug = "app-" & slug
+  %*{"name": name, "identifier": "org.example." & slug,
+    "version": "0.1.0", "entry": entry, "include": included}
+
+proc initProject*(path: string) =
+  if fileExists(path) or dirExists(path): fail("refusing to overwrite existing project: " & path)
+  let config = newProjectConfig(path.normalizedPath.extractFilename, "src/main.nim", @["src", "assets"])
   createDir(path / "src")
   createDir(path / "assets")
-  writeFile(path / "leaf.json", pretty(%*{
-    "name": name, "identifier": "org.example." & slug,
-    "version": "0.1.0", "entry": "src/main.nim", "include": ["src", "assets"]}) & "\n")
+  writeFile(path / "leaf.json", pretty(config) & "\n")
   writeFile(path / "assets" / "message.txt", "多文件应用 · 资源随发布包迁移\n")
   writeFile(path / "src" / "main.nim", MainTemplate)
   writeFile(path / "src" / "app.nim", AppTemplate)

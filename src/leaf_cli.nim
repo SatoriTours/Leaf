@@ -1,6 +1,6 @@
 ## Developer CLI: native Nim applications are compiled before execution.
 import std/[os, json, strutils, strtabs]
-import leaf/[core, project, build, doctor, developer_options, diagnostics, watch, process_io, pack]
+import leaf/[core, project, build, doctor, developer_options, diagnostics, watch, process_io, pack, scaffold]
 export build
 
 proc execute(exe: string, args: seq[string], workingDir: string): int =
@@ -21,6 +21,10 @@ proc main*(args: seq[string]): int =
     if args.len == 0 or args[0] in ["--help", "-h"]:
       stdout.writeLine("""Leaf Nim developer tools
   leaf init DIRECTORY              Create a native Nim application
+  leaf g scaffold DIRECTORY [--dry-run] Create a full page-group application
+  leaf g scaffold MODEL FIELD:TYPE... --project DIRECTORY [--dry-run]
+                                   Add a resource with CRUD pages, routes and SQL
+  leaf generate scaffold ...       Alias for leaf g scaffold
   leaf build PROJECT [--output EXE] Compile a release application
   leaf pack PROJECT --target TARGET [--binary EXE] [--output DIR]
   leaf doctor [--json]              Show the local build environment
@@ -35,6 +39,11 @@ Release TARGET: linux, macos, windows or all. Foreign targets need native binari
 """)
       return 0
     case args[0]
+    of "g", "generate":
+      if args.len < 3 or args[1] != "scaffold":
+        fail("usage: leaf g scaffold DIRECTORY | MODEL FIELD:TYPE... --project DIRECTORY [--dry-run]")
+      for action in generateScaffold(parseScaffoldOptions(args[2..^1])):
+        stdout.writeLine(action)
     of "init":
       if args.len != 2: fail("usage: leaf init DIRECTORY")
       initProject(args[1])

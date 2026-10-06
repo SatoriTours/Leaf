@@ -67,3 +67,15 @@ let actions = views:
 列表最多十万项，行通过 `builder(index)` 延迟构建。`rowHeight > 0` 使用固定行高，零使用变量行高；`estimatedHeight` 提供初始估计。输入框应使用稳定 key，并根据 `onChange` 更新受控值。
 
 完整例子见 `examples/counter.nim`、`examples/todo.nim`、`examples/kit.nim` 与 `example/main.nim`。
+
+## 页面组与桌面路由
+
+`import leaf` 同时导出 `PageGroup`、`PageDefinition`、`Route` 和 `Router`。页面组的 render 接收 `BuildContext` 与 View 名称；`PageDefinition` 声明允许的 View 及创建工厂。`newRouter(routes, pages, initial)` 校验配置，按首次渲染惰性创建页面组，切换路由复用状态。
+
+`navigate(router, nameOrPath)` 切换静态路由；`currentRoute(router)` 返回当前 Route，`routes(router)` 返回有序配置，`renderPage(router, ctx)` 构建当前 View。导航放在事件回调中，利用 Leaf 的事件后刷新。完整应用和资源模板使用相同接口，见[应用架构与脚手架](scaffolding.md)。
+
+## SQLite 存储
+
+`import leaf/sqlite` 提供 `openDatabase(path)`、`close()`、`execute(sql, values)`、`query(sql, values)`、`lastInsertId` 和 `migrate(migrations)`。`dbValue` 绑定字符串、整数、浮点数与布尔值，查询值通过 `asString`、`asInt`、`asFloat`、`asBool` 读取；`SqlValue(kind: sqlNull)` 表示 NULL。`execute` 返回受影响行数。`execute`/`query` 只接受单条 SQL，并检查参数数量；可信迁移脚本使用 `executeScript`。
+
+`Migration(version, name, sql)` 定义一个版本，`migrate` 接收完整迁移历史并按版本应用尚未执行的 SQL，每个版本事务提交。连接在所属线程使用；显式关闭后的操作会抛出 `DatabaseError`。完整应用模板在启动时配置连接与迁移，并将连接传给所有页面组与服务。
