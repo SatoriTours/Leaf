@@ -17,6 +17,14 @@ suite "Unicode native library loading":
   test "missing libraries return no handle":
     check openNativeLibrary("/missing/leaf-native-library") == nil
 
+  test "load failures include platform diagnostics":
+    var error: string
+    check openNativeLibrary("/missing/leaf-native-library", error) == nil
+    check error.len > 0
+    when defined(windows): check "Windows error" in error
+    check openNativeLibrary("invalid\0path", error) == nil
+    check "NUL" in error
+
   when defined(linux):
     test "system library fixtures are discovered in distribution multiarch directories":
       let root = createTempDir("leaf-multiarch-", "")

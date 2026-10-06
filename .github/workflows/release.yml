@@ -121,12 +121,38 @@ jobs:
             export DYLD_LIBRARY_PATH="$LEAF_OPENSSL_LIB${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
           fi
           "$collector" --metadata target/sdk-cargo-metadata.json --output src/leaf/vendor/GPUI-NOTICES.json
+      - name: Windows 桥接加载诊断
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          & $dumpbin.FullName /dependents '${{ matrix.bridge }}'
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class LeafDllProbe {
+            [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+            public static extern IntPtr LoadLibrary(string path);
+            [DllImport("kernel32.dll")]
+            public static extern bool FreeLibrary(IntPtr module);
+          }
+          '@
+          $handle = [LeafDllProbe]::LoadLibrary((Resolve-Path '${{ matrix.bridge }}').Path)
+          if ($handle -eq [IntPtr]::Zero) {
+            $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            Write-Host "Windows error ${code}: $([ComponentModel.Win32Exception]::new($code).Message)"
+          } else {
+            Write-Host 'GPUI DLL loads before packaging'
+            [LeafDllProbe]::FreeLibrary($handle) | Out-Null
+          }
       - name: 构建 CLI 与架构回归
         env:
           LEAF_GPUI_LIBRARY: ${{ github.workspace }}/${{ matrix.bridge }}
         run: |
           nim c -d:release --out:target/nim/leaf src/leaf_cli.nim
           nim c -r --out:target/nim/test_sdk tests/nim/test_sdk.nim
+          nim c -r --out:target/nim/test_native_library tests/nim/test_native_library.nim
           nim c -r --out:target/nim/test_sqlite tests/nim/test_sqlite.nim
           nim c -r --out:target/nim/test_routing tests/nim/test_routing.nim
           nim c -r --out:target/nim/test_scaffold tests/nim/test_scaffold.nim
@@ -141,6 +167,7 @@ jobs:
       - name: 原生安装器与重定位验证
         run: nim c -d:release -r --out:target/nim/verify_sdk_install scripts/verify_sdk_install.nim --target '${{ matrix.target }}' --channel "$SDK_CHANNEL" --version "$SDK_VERSION"
       - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && hashFiles('dist/sdk/*') != '' }}
         with:
           name: sdk-${{ matrix.target }}
           path: dist/sdk/*
