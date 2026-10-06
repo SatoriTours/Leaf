@@ -20,7 +20,7 @@ def verify(args):
         if os.name == "nt":
             toolchains = mirror / "toolchains"
             toolchains.mkdir()
-            for filename in ("mingw64.7z", "mingw64.7z.sha256"):
+            for filename in ("mingw64.7z", "mingw64.7z.sha256", "7zr.exe"):
                 shutil.copy2(Path(os.environ["RUNNER_TEMP"]) / "leaf-mingw" / filename, toolchains / filename)
             command = ["pwsh", "-NoProfile", "-File", str(ROOT / "install.ps1"), "-Channel", args.channel,
                 "-Prefix", str(prefix), "-BinDir", str(bin_dir), "-DownloadBase", mirror.as_uri(), "-NoPath"]
@@ -39,6 +39,13 @@ def verify(args):
         # A second installation should replace the entry without disturbing old builds.
         subprocess.run(command, check=True)
         before = entry.read_bytes() if os.name == "nt" else entry.readlink()
+        if os.name == "nt":
+            extractor = toolchains / "7zr.exe"
+            original = extractor.read_bytes()
+            extractor.write_bytes(b"broken extractor")
+            assert subprocess.run(command).returncode != 0
+            assert before == entry.read_bytes()
+            extractor.write_bytes(original)
         extension = ".zip" if os.name == "nt" else ".tar.gz"
         archive = location / ("leaf-sdk-" + args.target + extension)
         archive.write_bytes(b"broken update")

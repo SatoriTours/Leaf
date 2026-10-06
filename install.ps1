@@ -79,13 +79,18 @@ try {
     }
     $ccExtract = Join-Path $staging 'c-compiler'
     New-Item -ItemType Directory -Path $ccExtract | Out-Null
-    # Older Windows tar builds convert Unicode argv paths through the ANSI code
-    # page. Keep argv ASCII; PowerShell sets the Unicode working directory itself.
-    Push-Location -LiteralPath $staging
-    try {
-        & "$env:SystemRoot\System32\tar.exe" -xf 'mingw64.7z' -C 'c-compiler'
-        if ($LASTEXITCODE -ne 0) { throw 'MinGW extraction failed.' }
-    } finally { Pop-Location }
+    # Windows tar cannot decode this archive's LZMA codec. Fetch the standalone
+    # Unicode-capable extractor from its publisher and verify its pinned hash.
+    $extractor = Join-Path $staging '7zr.exe'
+    $extractorUrl = if ($DownloadBase.StartsWith('file://')) { "$DownloadBase/toolchains/7zr.exe" }
+        else { 'https://github.com/ip7z/7zip/releases/download/26.04/7zr.exe' }
+    Get-LeafDownload $extractorUrl $extractor
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $extractor).Hash -ne
+        '256feca8e274e5da655e2a284fabafd9f554365eb164862089dacd4e8276d282') {
+        throw '7-Zip checksum mismatch; existing installation kept.'
+    }
+    & $extractor x $ccArchive "-o$ccExtract" -y
+    if ($LASTEXITCODE -ne 0) { throw 'MinGW extraction failed.' }
     $ccRoot = Join-Path $ccExtract 'mingw64'
     if (-not (Test-Path -LiteralPath (Join-Path $ccRoot 'bin/gcc.exe'))) { throw 'MinGW compiler missing.' }
     Move-Item -LiteralPath $ccRoot -Destination (Join-Path $sdk 'toolchain/mingw')

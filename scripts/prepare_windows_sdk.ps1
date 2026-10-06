@@ -3,6 +3,12 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $work = Join-Path $env:RUNNER_TEMP 'leaf-mingw'
 New-Item -ItemType Directory -Force -Path $work | Out-Null
+$extractor = Join-Path $work '7zr.exe'
+Invoke-WebRequest -UseBasicParsing 'https://github.com/ip7z/7zip/releases/download/26.04/7zr.exe' -OutFile $extractor
+if ((Get-FileHash -Algorithm SHA256 -LiteralPath $extractor).Hash -ne
+    '256feca8e274e5da655e2a284fabafd9f554365eb164862089dacd4e8276d282') {
+    throw '7-Zip checksum mismatch.'
+}
 $archive = Join-Path $work 'mingw64.7z'
 Invoke-WebRequest -UseBasicParsing 'https://nim-lang.org/download/mingw64.7z' -OutFile $archive
 $checksumFile = Join-Path $work 'mingw64.7z.sha256'
