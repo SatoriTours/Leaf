@@ -1,6 +1,6 @@
 ## Developer CLI: native Nim applications are compiled before execution.
 import std/[os, json, strutils, strtabs]
-import leaf/[core, project, build, doctor, developer_options, diagnostics, watch, process_io, pack, scaffold]
+import leaf/[core, project, build, doctor, developer_options, diagnostics, watch, process_io, pack, scaffold, sdk]
 export build
 
 proc execute(exe: string, args: seq[string], workingDir: string): int =
@@ -28,6 +28,7 @@ proc main*(args: seq[string]): int =
   leaf build PROJECT [--output EXE] Compile a release application
   leaf pack PROJECT --target TARGET [--binary EXE] [--output DIR]
   leaf doctor [--json]              Show the local build environment
+  leaf --version                   Show SDK version and channel
   leaf --check PROJECT             Compile and validate the application
   leaf --headless [EVENTS] PROJECT  Compile and run ordered events
   leaf PROJECT                     Compile and open a GPUI + GPUI Kit desktop window
@@ -39,6 +40,12 @@ Release TARGET: linux, macos, windows or all. Foreign targets need native binari
 """)
       return 0
     case args[0]
+    of "--version", "-v":
+      if args.len != 1: fail("usage: leaf --version")
+      stdout.writeLine(sdkVersion())
+    of "--verify-sdk":
+      if args.len notin [3, 4]: fail("usage: leaf --verify-sdk CHANNEL TARGET [VERSION]")
+      verifySdk(args[1], args[2], if args.len == 4: args[3] else: "")
     of "g", "generate":
       if args.len < 3 or args[1] != "scaffold":
         fail("usage: leaf g scaffold DIRECTORY | MODEL FIELD:TYPE... --project DIRECTORY [--dry-run]")

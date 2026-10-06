@@ -8,6 +8,30 @@ Leaf 用 **Nim** 定义桌面应用的组件、状态和事件，由 **GPUI** �
 
 ## 快速开始
 
+安装 SDK（正式版）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/SatoriTours/Leaf/main/install.sh | sh
+```
+
+安装 beta：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/SatoriTours/Leaf/main/install.sh | sh -s -- --channel beta
+```
+
+SDK 包含 CLI、Leaf 源码、Nim 编译器和预编译 GPUI 桥接库；Windows 安装器会自动安装 C 编译器。安装后打开新终端：
+
+```sh
+leaf g scaffold my-app
+leaf g scaffold Note title:string archived:bool --project my-app
+leaf my-app
+```
+
+首次发布成功后下载命令才可用。Windows PowerShell 命令、自定义安装与系统依赖见[安装说明](docs/installation.md)。main 推送自动构建 beta，`vX.Y.Z` tag 自动构建正式版。
+
+从源码开发 Leaf：
+
 需要 **Nim 2.2.6+、Rust 1.92+、C/C++ 编译器**。固定使用 **GPUI Kit 0.7.0**，其 GPUI 快照版本由 Kit 和 `Cargo.lock` 锁定。[GPUI Kit 上游](https://github.com/longbridge/gpui-kit)
 
 Ubuntu/Debian 的构建与窗口依赖：

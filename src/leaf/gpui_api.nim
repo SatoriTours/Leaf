@@ -1,6 +1,6 @@
 ## GPUI Kit bridge is loaded only when a desktop window is requested.
 import std/[dynlib,os,strutils]
-import ./[core,native_library]
+import ./[core,native_library,sdk]
 type
   GpuiCallback* = proc(context:pointer,data:ptr uint8,len:csize_t):cstring {.cdecl.}
   GpuiApi* = ref object
@@ -17,9 +17,11 @@ var cachedOverride:string
 proc loadGpui*(path=""):GpuiApi =
   if cachedApi!=nil and path.len==0 and cachedOverride==getEnv("LEAF_GPUI_LIBRARY"):return cachedApi
   let override=if path.len>0:path else:getEnv("LEAF_GPUI_LIBRARY")
+  let installed = sdkRoot()
   let candidates=if override.len>0: @[override] else: @[
-    getAppDir()/GpuiLibraryName,FrameworkRoot/"target/release"/GpuiLibraryName,
-    FrameworkRoot/"target/debug"/GpuiLibraryName]
+    getAppDir()/GpuiLibraryName] & (if installed.len > 0: @[
+      installed/"lib"/GpuiLibraryName] else: @[
+      FrameworkRoot/"target/release"/GpuiLibraryName, FrameworkRoot/"target/debug"/GpuiLibraryName])
   for name in candidates:
     let library=openNativeLibrary(name)
     if library==nil:continue

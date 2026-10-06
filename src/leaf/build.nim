@@ -1,6 +1,6 @@
 ## A build can be polled while the previous desktop process continues running.
 import std/[os, strutils]
-import ./[core, project, process_io, gpui_build]
+import ./[core, project, process_io, gpui_build, sdk]
 
 const SourceRoot = currentSourcePath().parentDir.parentDir
 type BuildJob* = ref object
@@ -9,12 +9,14 @@ type BuildJob* = ref object
   bridge: string
 
 proc libraryPath*(): string =
-  result = getEnv("LEAF_LIBRARY", SourceRoot)
+  let installed = sdkRoot()
+  result = getEnv("LEAF_LIBRARY", if installed.len > 0: installed / "src" else: SourceRoot)
   if not fileExists(result / "leaf.nim"):
     fail("Leaf sources not found; set LEAF_LIBRARY to the installed src directory")
 
 proc compiler*(): string =
-  result = getEnv("NIM", findExe("nim"))
+  let bundled = sdkCompiler()
+  result = getEnv("NIM", if bundled.len > 0: bundled else: findExe("nim"))
   if result.len == 0 or not fileExists(result):
     fail("Nim compiler not found; install Nim 2.2.6+ or set NIM")
 
@@ -30,6 +32,11 @@ proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedCon
     "--nimcache:" & (directory / "cache").replace("$", "$$"),
     "--out:" & result.binary.replace("$", "$$")]
   if isolatedConfig: args.add(@["--skipParentCfg:on", "--skipUserCfg:on"])
+  when defined(windows):
+    let gcc = sdkGcc()
+    if gcc.len > 0:
+      args.add(@["--cc:gcc", "--gcc.exe:" & gcc.replace("$", "$$"),
+        "--gcc.linkerexe:" & gcc.replace("$", "$$")])
   args.add(project.entry)
   result.process = startManaged(compiler(), args, project.root)
 

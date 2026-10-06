@@ -6,6 +6,8 @@
 /.aws/
 /artifacts/
 *.core
+__pycache__/
+*.pyc
 
 /dist/
 *.jsonl

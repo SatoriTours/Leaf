@@ -1,6 +1,6 @@
 ## Environment inspection never initializes a display or requires a project.
 import std/[os, json, monotimes, times]
-import ./[build, gpui_api, process_io]
+import ./[build, gpui_api, process_io, sdk]
 
 proc version(exe: string, args: seq[string]): JsonNode =
   if exe.len == 0 or not fileExists(exe): return newJNull()
@@ -19,11 +19,16 @@ proc version(exe: string, args: seq[string]): JsonNode =
   except CatchableError as error: result = %error.msg
 
 proc doctorReport*(): JsonNode =
-  result = %*{"implementation": "nim", "nim": getEnv("NIM", findExe("nim")),
-    "cc": findExe("cc"), "platform": hostOS, "architecture": hostCPU,
+  var nim: string
+  try: nim = compiler()
+  except CatchableError: discard
+  let bundledCc = sdkGcc()
+  let cc = if bundledCc.len > 0: bundledCc else: findExe("cc")
+  result = %*{"implementation": "nim", "nim": nim,
+    "cc": cc, "platform": hostOS, "architecture": hostCPU,
     "desktop_backend": "gpui", "gpui_kit": "0.7.0",
-    "tools": {"nim": version(getEnv("NIM", findExe("nim")), @["--version"]),
-      "cc": version(findExe("cc"), @["--version"]),
+    "tools": {"nim": version(nim, @["--version"]),
+      "cc": version(cc, @["--version"]),
       "cargo": version(findExe("cargo", followSymlinks = false), @["--version"]),
       "rustc": version(findExe("rustc", followSymlinks = false), @["--version"])}}
   when defined(linux): result["graphical_session"] = %(getEnv("DISPLAY").len > 0 or getEnv("WAYLAND_DISPLAY").len > 0)

@@ -1,0 +1,146 @@
+name: Leaf SDK 发布
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+# Serialize each channel. Pending beta builds may be superseded; running ones finish.
+concurrency:
+  group: leaf-sdk-${{ startsWith(github.ref, 'refs/tags/') && github.ref || 'beta' }}
+  cancel-in-progress: false
+jobs:
+  metadata:
+    runs-on: ubuntu-24.04
+    outputs:
+      channel: ${{ steps.version.outputs.channel }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: 校验渠道和版本 tag
+        run: python scripts/publish_sdk.py --metadata
+  build:
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x86_64
+            rust_target: x86_64-unknown-linux-gnu
+            bridge: target/release/libleaf_gpui.so
+          - runner: macos-15-intel
+            target: macos-x86_64
+            rust_target: x86_64-apple-darwin
+            bridge: target/release/libleaf_gpui.dylib
+          - runner: macos-14
+            target: macos-aarch64
+            rust_target: aarch64-apple-darwin
+            bridge: target/release/libleaf_gpui.dylib
+          - runner: windows-2022
+            target: windows-x86_64
+            rust_target: x86_64-pc-windows-msvc
+            bridge: target/x86_64-pc-windows-msvc/release/leaf_gpui.dll
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      SDK_CHANNEL: ${{ needs.metadata.outputs.channel }}
+      SDK_VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.6'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Linux 系统依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config cmake libssl-dev libclang-dev \
+            libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libx11-xcb-dev libwayland-dev libvulkan-dev libsqlite3-0
+      - name: Windows C 编译链
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/prepare_windows_sdk.ps1
+      - name: Windows 测试的 Python 命令别名
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $python = (Get-Command python).Source
+          $alias = Join-Path (Split-Path $python) 'python3.exe'
+          if (-not (Test-Path $alias)) { Copy-Item $python $alias }
+      - name: 发布与安装脚本测试
+        run: python -m unittest discover -s tests/release -v
+      - name: 构建和测试 Unix 桥接
+        if: runner.os != 'Windows'
+        run: |
+          cargo test --workspace --locked
+          cargo build --release --locked -p leaf-gpui
+      - name: 构建和测试 Windows 桥接
+        if: runner.os == 'Windows'
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: '-C target-feature=+crt-static'
+        run: |
+          cargo test --workspace --locked --target x86_64-pc-windows-msvc
+          cargo build --release --locked -p leaf-gpui --target x86_64-pc-windows-msvc
+      - name: 收集当前平台依赖的许可证
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo metadata --format-version 1 --locked --filter-platform '${{ matrix.rust_target }}' > target/sdk-cargo-metadata.json
+          python scripts/collect_sdk_notices.py --metadata target/sdk-cargo-metadata.json --output src/leaf/vendor/GPUI-NOTICES.json
+      - name: 构建 CLI 与架构回归
+        env:
+          LEAF_GPUI_LIBRARY: ${{ github.workspace }}/${{ matrix.bridge }}
+        run: |
+          nim c -d:release --out:target/nim/leaf src/leaf_cli.nim
+          nim c -r --out:target/nim/test_sdk tests/nim/test_sdk.nim
+          nim c -r --out:target/nim/test_sqlite tests/nim/test_sqlite.nim
+          nim c -r --out:target/nim/test_routing tests/nim/test_routing.nim
+          nim c -r --out:target/nim/test_scaffold tests/nim/test_scaffold.nim
+      - name: 组装 SDK
+        run: |
+          python - <<'PY'
+          import os, subprocess, sys
+          from pathlib import Path
+          windows = os.name == 'nt'
+          args = [sys.executable, 'scripts/package_sdk.py',
+            '--nim-root', '.nim_runtime', '--cli', 'target/nim/leaf' + ('.exe' if windows else ''),
+            '--bridge', '${{ matrix.bridge }}', '--target', '${{ matrix.target }}',
+            '--channel', os.environ['SDK_CHANNEL'], '--version', os.environ['SDK_VERSION'],
+            '--commit', os.environ['GITHUB_SHA'], '--output', 'dist/sdk']
+          subprocess.run(args, check=True)
+          PY
+      - name: 原生安装器与重定位验证
+        run: python scripts/verify_sdk_install.py --target '${{ matrix.target }}' --channel "$SDK_CHANNEL" --version "$SDK_VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-${{ matrix.target }}
+          path: dist/sdk/*
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    needs: [metadata, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sdk-*
+          path: dist/sdk
+          merge-multiple: true
+      - name: 发布正式版或滚动 beta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/publish_sdk.py --assets dist/sdk

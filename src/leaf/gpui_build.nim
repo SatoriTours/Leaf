@@ -1,6 +1,6 @@
 ## Build one GPUI bridge and copy it beside each application executable.
 import std/os
-import ./[core,gpui_api,process_io]
+import ./[core,gpui_api,process_io,sdk]
 proc gpuiLibraryName*(target:string):string =
   case target
   of "windows":"leaf_gpui.dll"
@@ -12,6 +12,8 @@ proc ensureGpui*():string =
   if override.len>0:
     if not fileExists(override):fail("LEAF_GPUI_LIBRARY does not exist")
     return absolutePath(override)
+  let bundled = sdkFile("lib" / GpuiLibraryName)
+  if bundled.len > 0 and getEnv("LEAF_GPUI_ROOT").len == 0: return bundled
   let root=getEnv("LEAF_GPUI_ROOT",FrameworkRoot)
   if not fileExists(root/"Cargo.toml"):fail("GPUI bridge sources not found; set LEAF_GPUI_ROOT or LEAF_GPUI_LIBRARY")
   # Rustup selects Cargo by argv[0]; retain the cargo symlink name.

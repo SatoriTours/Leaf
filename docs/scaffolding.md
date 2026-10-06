@@ -115,7 +115,7 @@ leaf g scaffold Contact name:string active:bool --project my-app --dry-run
 
 `app/generated/migrations.nim` 在编译时读取并嵌入 `.up.sql`，应用启动时按版本执行待应用的迁移。`leaf_schema_migrations` 记录已应用版本、名称和 SQL；重复启动不重复执行，已应用迁移被修改或从应用移除时会报错。每个版本在事务中执行，失败会回滚该版本。迁移文件不要自行写 BEGIN、COMMIT、ROLLBACK 或 SAVEPOINT；事务由执行器管理。新增资源后重新构建/启动即可建表，生成命令本身不打开数据库。`.down.sql` 可用于人工维护，不会在启动时自动回滚，也没有独立的 `leaf db migrate` 命令。
 
-Leaf 提供显式的 `leaf/sqlite` 模块，依赖目标系统 SQLite 动态库：Linux `libsqlite3.so.0`、macOS `libsqlite3.dylib`、Windows `sqlite3.dll`。Windows 发布需自行提供该 DLL；当前打包器不会自动收集 SQLite。没有导入存储模块的原有应用不增加此依赖。
+Leaf 提供显式的 `leaf/sqlite` 模块，依赖目标系统 SQLite 动态库：Linux `libsqlite3.so.0`、macOS `libsqlite3.dylib`、Windows 系统 `winsqlite3.dll`。Windows 应用使用系统 SQLite。没有导入存储模块的原有应用不增加此依赖。
 
 需要外部接口或后台工作时，将业务 API 适配放入 `app/clients/`、后台工作放入 `app/jobs/`、定时规则放入 `config/schedules.nim`、维护命令放入 `lib/tasks/`。后台执行与 UI 回传仍需实现；后台工作应使用自己的数据库连接，不跨线程共享页面连接。
 

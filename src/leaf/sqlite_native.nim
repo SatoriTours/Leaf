@@ -1,6 +1,6 @@
 ## Small binding to SQLite's stable C API; no compiler headers are required.
 when defined(windows):
-  const SQLiteLibrary = "sqlite3.dll"
+  const SQLiteLibrary = "winsqlite3.dll"
 elif defined(macosx):
   const SQLiteLibrary = "libsqlite3.dylib"
 else:
