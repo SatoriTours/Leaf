@@ -89,9 +89,10 @@ proc normalizeTitle(task: Task) =
 defineModel(Task, table = "tasks"):
   validates title, presence = true, maxLength = 200
   beforeValidation normalizeTitle
+  scope unfinished, it.done == false
 ```
 
-`defineAbstractModel` 也接受规则和回调块，子类按继承顺序获得应用公共规则。声明在编译期完成，不产生导入时注册或数据库访问。字段、规则和回调签名在编译期检查；不支持的持久化字段类型直接给出定位到声明的错误。
+`defineAbstractModel` 也接受规则、回调和 scope 块，子类按继承顺序获得应用公共规则。scope 声明同时生成模型类型和 Query[T] 的入口，共用一份条件表达式，因此可写 Task.unfinished 和 Task.where(...).unfinished。声明在编译期完成，不产生导入时注册或数据库访问。字段、规则和回调签名在编译期检查；不支持的持久化字段类型直接给出定位到声明的错误。
 
 首版字段支持 string、bool、int、int64、float、DateTime 及这些标量的 Option。长度规则按 Unicode 码点数计算。原有脚手架的 string 必填与 trim、float 必须有限规则保留，但 trim 作为生成的 beforeValidation 回调明确声明，避免所有业务字符串都被默认修改。
 
@@ -129,7 +130,7 @@ ModelContext 持有借用的 Database 和执行线程信息，当前上下文指
 
 访问数据库时没有上下文，抛 DatabaseContextError，并提示在应用回调或 withDatabase 中调用；不静默创建数据库。build、生命周期和变更查询不需要上下文；valid 需要上下文，以统一支持读取数据库的业务校验。已保存对象仍保留数据库身份，当前连接不同则拒绝保存或重载；不能为了省参数改写另一个应用的同主键行。
 
-Query 在 query() 调用时捕获当前实际连接及身份，后续构建条件不重新选择连接。终结操作在捕获连接的 withDatabase 中执行，离开最初作用域后仍查询原数据库；连接关闭或线程不符时报错。活动事务内禁止切换到另一连接，包括执行捕获了另一连接的 Query，以免一段业务事务实际写入多个互不原子的数据库。
+Query 在模型类型的 where、orderBy、limit、offset 或 scope 入口调用时捕获当前实际连接及身份，后续构建条件不重新选择连接。用户不必调用 query()，内部通过统一的查询构造过程完成绑定。终结操作在捕获连接的 withDatabase 中执行，离开最初作用域后仍查询原数据库；连接关闭或线程不符时报错。活动事务内禁止切换到另一连接，包括执行捕获了另一连接的 Query，以免一段业务事务实际写入多个互不原子的数据库。
 
 显式 db 重载保留给底层集成与兼容，例如 Task.find(db, id)、task.save(db)；它们通过 withDatabase(db) 调用同一份公共实现，确保回调及嵌套调用也使用指定连接，遵守相同跨数据库身份和事务切换检查。脚手架与日常文档默认展示免传参接口。
 
@@ -146,7 +147,17 @@ Query 在 query() 调用时捕获当前实际连接及身份，后续构建条�
 | T.createOrRaise(字段参数) | 返回已保存对象；校验或回调取消时抛异常 |
 | T.find(id) | 返回 T；不存在时抛 RecordNotFound |
 | T.findBy(字段条件) | 返回 Option[T]；多条匹配取按 id 升序的第一条 |
-| T.query() | 捕获当前连接，返回未执行的 Query[T] |
+| T.findByOrRaise(字段条件) | 返回 T；不存在时抛 RecordNotFound |
+| T.where(字段条件或表达式) | 捕获当前连接，返回未执行的 Query[T] |
+| T.orderBy(字段表达式, Asc 或 Desc) | 直接开始可组合的排序查询 |
+| T.limit(n) / T.offset(n) | 直接开始可组合的分页查询 |
+| T.first / T.last | 返回 Option[T]；按有效排序取第一条或最后一条 |
+| T.first(n) / T.last(n) | 返回 seq[T]，最多 n 条，保持有效排序顺序 |
+| T.firstOrRaise / T.lastOrRaise | 返回 T；不存在时抛 RecordNotFound |
+| T.all | 执行查询，返回 seq[T] |
+| T.count / T.exists | 直接查询数量或是否有记录 |
+| T.exists(id) | 检查指定主键是否存在，返回 bool |
+| T.ids / T.pluck(字段表达式) | 返回主键列表或所选字段值列表，不构造 model 对象 |
 | record.valid() | 运行校验及校验回调，返回 bool，不自动保存 |
 | record.save() | 校验失败或 before 回调取消返回 false；成功返回 true |
 | record.saveOrRaise() | 校验失败抛 RecordInvalid；回调取消抛 RecordNotSaved |
@@ -185,25 +196,50 @@ schema 2 应用的 id 页面状态和事件闭包使用 int64，schema 1 原有�
 
 ## 查询对象与 Scope
 
-```nim
-proc unfinished*(query: Query[Task]): Query[Task] =
-  query.where(it.done == false)
+Rails 的模型类型可以直接调用 first、last 和 where，条件查询仍返回可组合的 Relation。Leaf 采用模型类型入口和独立查询描述的结构，取消公开示例中的 query() 起始步骤。[Rails 查询入口](https://guides.rubyonrails.org/active_record_querying.html)、[Rails 首尾查找](https://api.rubyonrails.org/classes/ActiveRecord/FinderMethods.html)
 
-let tasks = Task.query()
-  .unfinished()
+```nim
+let firstTask = Task.first
+let lastTask = Task.last
+let firstThree = Task.first(3)
+let lastThree = Task.last(3)
+
+# 简单等值条件，字段名称及值类型在编译期检查
+let tasks = Task.where(done = false).all
+let task = Task.where(done = false, title = "买牛奶").first
+
+# 比较、组合条件使用表达式
+let tasks = Task.where((it.done == false) and (it.id > 10'i64))
   .orderBy(it.id, Desc)
   .limit(20)
-  .all()
+  .all
 
-let total = Task.query().unfinished().count()
-let first = Task.query().unfinished().first()
+# defineModel 中声明的 scope 也可直接作为起点
+let tasks = Task.unfinished.orderBy(it.id, Desc).all
+let total = Task.unfinished.count
+let first = Task.unfinished.first
+
+# 只读取值，不构造可保存的业务对象
+let ids = Task.where(done = false).ids
+let titles = Task.where(done = false).pluck(it.title)
+let summaries = Task.where(done = false).pluck(it.id, it.title)
 ```
 
-Query 是不可变的查询描述，每次 where、orderBy、limit、offset 返回新描述，避免两个 scope 分支互相污染。描述只持有连接、字段元数据和表达式树；直到 all、first、count、exists 才执行 SQL。all 返回 seq[T]，first 返回 Option[T]，firstOrRaise 不存在时抛 RecordNotFound；first 未显式排序时按 id 升序。
+模型类型和 Query[T] 同时提供 where、orderBy、limit、offset、first、last、count、exists、ids、pluck 以及声明的 scope。类型入口只是创建查询或委托执行的共享包装，不复制 SQL 逻辑，不要求业务 model 手写转发过程。无额外参数的入口支持 Nim 的点调用简写，如 Task.first、Task.last、Task.count；Task.first() 等括号写法同样支持。泛型实例操作保留具体 T，不通过擦除后的 Record 推断表结构。
 
-where 表达式首版支持比较、and、or、not、IN 与 NULL 判断；字段必须属于 T，值必须与字段类型兼容。所有值参数绑定，标识符取自编译期字段清单并引用，任意 Nim 函数和原始 SQL 片段不能混入表达式。参数中的中文、引号和 NUL 按原值保留。limit 与 offset 拒绝负数；重复调用替换原值。where 叠加 AND，orderBy 依次追加排序。
+Query 是不可变的查询描述，每次 where、orderBy、limit、offset 返回新描述，避免两个 scope 分支互相污染。描述只持有连接、字段元数据和表达式树；直到 all、first、last、count、exists、ids、pluck 才执行 SQL。all 返回 seq[T]，不再接受数据库查询链；需要条件或排序时先调用 where、scope 或 orderBy。这里与 Rails 的 all 返回 Relation 有所区别，Leaf 的执行边界保持显式。
 
-count 与 exists 对 where 条件执行统计，忽略排序、分页。需要统计当前分页结果时显式使用 all().len。保留受控的参数化 rawQuery 适配入口供复杂 SQL，首版不提供批量 updateAll 或 deleteAll，以免同时引入绕过校验、回调和实例状态的第二套写入规则。
+单条 first 和 last 返回 Option[T]，firstOrRaise 和 lastOrRaise 不存在时抛 RecordNotFound。未指定排序时按 id 升序，因此 first 是最小 id、last 是最大 id，不代表最早或最近更新。显式排序后按该排序取首尾；为保证相同排序值的分页稳定，尚未包含 id 的排序自动在末尾补 id 升序。last 反转所有有效排序项来查询末尾，返回多条时恢复原排序顺序，不能只反转某一个排序字段。
+
+first(n) 和 last(n) 返回最多 n 条，n 为 0 返回空列表，为负数报 ModelUsageError。若已有 limit 或 offset，先确定该查询描述的分页范围，再取范围内的首尾；不将 last 简化成忽略分页的全表最大 id。没有分页时通过反向排序和 LIMIT 获取末尾，不加载整表。findBy 继续采用 Leaf 的 id 升序首条约定；Rails find_by 本身没有隐含排序，这项差异须在接口文档中注明。
+
+ids 返回 seq[int64]。pluck 单字段返回 seq[字段类型]，多个不同字段返回带字段名的 tuple 列表；可空字段仍是 Option。它们只读取指定数据库列，不构造部分字段的可写 T，并遵守查询排序和分页。调用后不能继续拼接数据库条件。[Rails 字段读取](https://guides.rubyonrails.org/active_record_querying.html#pluck)
+
+where 提供两种形式：命名字段参数用于等值 AND 条件，表达式用于比较、and、or、not、IN 与 NULL 判断。字段必须属于 T，值必须与字段类型兼容；可空字段的 none 映射 IS NULL。命名参数重载不接受任意字符串作为列名，也不与表达式形式在同一次调用中混用，混合场景使用链式 where。所有值参数绑定，标识符取自编译期字段清单并引用。
+
+文本匹配提供预定义 contains、startsWith、endsWith 查询函数，生成 SQL LIKE 并转义输入中的百分号、下划线及转义字符；遵循 SQLite LIKE 的大小写语义，不承诺 Unicode 大小写折叠。它们和 isNull 属于允许的查询函数，其他任意 Nim 函数和原始 SQL 片段不能混入表达式。参数中的中文、引号和 NUL 按原值保留。limit 与 offset 拒绝负数；重复调用替换原值。where 叠加 AND，orderBy 依次追加排序。
+
+count 与 exists 对 where 条件执行统计，忽略排序、分页；这是 Leaf 首版的明确约定，不承诺与 Rails 对所有分页查询的统计语义一致。需要统计当前分页结果时显式使用 all().len。保留受控的参数化 rawQuery 适配入口供复杂 SQL，首版不提供批量 updateAll 或 deleteAll，以免同时引入绕过校验、回调和实例状态的第二套写入规则。
 
 ## 校验回调与保存流程
 
@@ -278,5 +314,8 @@ STI、多态关联、自动级联保存、进程级默认数据库、部分字�
 12. 原生与 headless 的初始化、渲染、延迟内容和稍后执行的事件均可免传 db；同线程两个应用交替执行时分别访问所属数据库。
 13. withDatabase 嵌套、异常和提前返回均恢复前值，独立测试不污染下一测试；没有上下文、跨线程使用和事务中切换连接明确报错。
 14. Query 离开创建作用域后继续使用捕获连接；在另一数据库上下文中执行时不被改路由，关闭连接后拒绝执行；显式重载的回调与嵌套操作使用指定连接。
+15. 模型类型直接调用 where、first、last、orderBy、count 和 scope，与 Query[T] 同名操作共享行为；带括号和点调用简写都通过编译验证。
+16. first/last 的默认主键排序、显式多字段排序、相同排序值、首尾 n 条、分页范围、空表和负数参数均符合约定；last 不查询整表。
+17. 命名字段 where、表达式 where、文本转义、模型类型和查询对象上的 scope 均可组合；ids 与 pluck 只返回所选值，不产生可保存的半加载对象。
 
 实现前先验证存储类型生成、继承元数据和共享连接；只有这些基础通过，才继续完整持久化和脚手架接入。后续实现计划应按这些依赖关系安排工作。
