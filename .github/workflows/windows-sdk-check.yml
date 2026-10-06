@@ -1,0 +1,55 @@
+name: Windows SDK 快速验证
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 提供 Windows SDK 构建产物的 workflow run ID
+        required: true
+        type: string
+      repair_manifest:
+        description: 在临时 SDK 中验证 DLL manifest 修复
+        default: false
+        type: boolean
+permissions:
+  contents: read
+  actions: read
+jobs:
+  verify:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 准备编译链镜像
+        shell: pwsh
+        run: ./scripts/prepare_windows_sdk.ps1
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-windows-x86_64
+          path: dist/sdk
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: 检查 DLL manifest 与安装回归
+        shell: pwsh
+        env:
+          REPAIR_MANIFEST: ${{ inputs.repair_manifest }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path (Get-Location) 'dist/sdk/leaf-sdk-windows-x86_64.zip'
+          $work = Join-Path $env:RUNNER_TEMP 'leaf-sdk-check'
+          Expand-Archive -LiteralPath $archive -DestinationPath $work
+          $metadata = Get-Content (Join-Path $work 'leaf-sdk/sdk.json') -Raw | ConvertFrom-Json
+          $dll = Join-Path $work 'leaf-sdk/lib/leaf_gpui.dll'
+          $mt = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\mt.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if ($env:REPAIR_MANIFEST -eq 'true') {
+            & $mt.FullName -nologo -manifest 'crates/leaf-gpui/resources/windows/leaf_gpui.manifest' "-outputresource:$dll;#2"
+            if ($LASTEXITCODE -ne 0) { throw 'DLL manifest update failed.' }
+            Compress-Archive -Path (Join-Path $work 'leaf-sdk') -DestinationPath $archive -Force
+            (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash | Set-Content "$archive.sha256" -Encoding ascii
+          }
+          & $mt.FullName -nologo "-inputresource:$dll;#2" "-out:$work/dll.manifest"
+          if ($LASTEXITCODE -ne 0) { throw 'DLL manifest resource 2 is missing.' }
+          Get-Content "$work/dll.manifest"
+          python scripts/verify_sdk_install.py --target windows-x86_64 --channel $metadata.channel --version $metadata.version
+          if ($LASTEXITCODE -ne 0) { throw 'Native SDK verification failed.' }
