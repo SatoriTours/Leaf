@@ -18,8 +18,11 @@ def smoke(sdk, headless_only=False):
         project = root / "smoke-app"
         env["LEAF_DATABASE_PATH"] = str(root / "application.sqlite3")
         def run(*args):
-            return subprocess.run([str(cli), *map(str, args)], cwd=root, env=env,
-                                  text=True, encoding="utf-8", check=True, capture_output=True).stdout
+            result = subprocess.run([str(cli), *map(str, args)], cwd=root, env=env,
+                                    text=True, encoding="utf-8", errors="replace", capture_output=True)
+            if result.returncode:
+                raise RuntimeError(f"Leaf command {args} failed ({result.returncode}):\n{result.stdout}{result.stderr}")
+            return result.stdout
         print(run("--version"), end="")
         metadata = json.loads((sdk / "sdk.json").read_text(encoding="utf-8"))
         assert metadata["channel"] in run("--version")
