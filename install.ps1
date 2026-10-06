@@ -106,7 +106,7 @@ try {
         'set "_leaf_exit=%ERRORLEVEL%"' + "`r`n" + 'chcp %_leaf_cp% >nul' + "`r`n" + 'exit /b %_leaf_exit%' + "`r`n"
     [IO.File]::WriteAllText($entryTemp, $command, (New-Object Text.UTF8Encoding $false))
     $entryPath = Join-Path $BinDir 'leaf.cmd'
-    if (Test-Path -LiteralPath $entryPath) { [IO.File]::Replace($entryTemp, $entryPath, $null) }
+    if (Test-Path -LiteralPath $entryPath) { [IO.File]::Replace($entryTemp, $entryPath, [NullString]::Value) }
     else { [IO.File]::Move($entryTemp, $entryPath) }
     $entryTemp = $null
     if (-not $NoPath) {
