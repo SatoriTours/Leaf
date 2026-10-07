@@ -511,12 +511,23 @@ proc setCommitter*(runtime: Runtime, committer: RuntimeCommitter) =
   ## must later uninstall only its own hook.
   discard runtime.installCommitter(committer)
 
-proc clearCommitter*(runtime: Runtime, owner: uint64) =
-  ## Uninstall the committer only when it is still the one identified by
-  ## `owner`. A stale session can never remove another session's hook.
-  if owner == 0 or runtime.committerOwner != owner: return
+proc clearCommitterImpl(runtime: Runtime, owner: uint64): bool =
+  if owner == 0 or runtime.committerOwner != owner: return false
+  if runtime.isCandidate: fail("candidate runtime cannot uninstall a committer")
+  if runtime.inUpdate: fail("cannot uninstall committer during update")
   runtime.committer = nil
   runtime.committerOwner = 0
+  true
+
+proc clearCommitter*(runtime: Runtime, owner: uint64) =
+  ## Uninstall the committer only when it is still the one identified by
+  ## `owner`. A stale session can never remove another session's hook. The
+  ## actual uninstall runs inside the application execution scope and is
+  ## rejected during an update or on a candidate, exactly like installation.
+  if owner == 0 or runtime.committerOwner != owner: return
+  var cleared: bool
+  inExecutionScope(runtime): cleared = runtime.clearCommitterImpl(owner)
+  discard cleared
 
 proc prepareSnapshotImpl(runtime: Runtime, preparer: RuntimePreparer) =
   if runtime.isCandidate: fail("candidate runtime cannot prepare")
@@ -561,12 +572,22 @@ proc setPreparer*(runtime: Runtime, preparer: RuntimePreparer) =
   ## Backward-compatible entry point.
   discard runtime.installPreparer(preparer)
 
-proc clearPreparer*(runtime: Runtime, owner: uint64) =
-  ## Uninstall the preparer only when it is still the one identified by
-  ## `owner`.
-  if owner == 0 or runtime.preparerOwner != owner: return
+proc clearPreparerImpl(runtime: Runtime, owner: uint64): bool =
+  if owner == 0 or runtime.preparerOwner != owner: return false
+  if runtime.isCandidate: fail("candidate runtime cannot uninstall a preparer")
+  if runtime.inUpdate: fail("cannot uninstall preparer during update")
   runtime.preparer = nil
   runtime.preparerOwner = 0
+  true
+
+proc clearPreparer*(runtime: Runtime, owner: uint64) =
+  ## Uninstall the preparer only when it is still the one identified by
+  ## `owner`. The actual uninstall runs inside the application execution scope
+  ## and is rejected during an update or on a candidate.
+  if owner == 0 or runtime.preparerOwner != owner: return
+  var cleared: bool
+  inExecutionScope(runtime): cleared = runtime.clearPreparerImpl(owner)
+  discard cleared
 
 proc find*(runtime: Runtime, key: string): MountedNode =
   if key in runtime.index: return runtime.index[key]

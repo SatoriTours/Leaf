@@ -445,7 +445,7 @@ suite "Recording backend sessions":
     check recB.applyCalls > 1
     dispose(sessionB)
 
-  test "dispose during a commit defers safely and remains retryable":
+  test "busy dispose is explicitly rejected and remains retryable":
     var count = 0
     var sessionRef: BackendSession
     proc render(ctx: BuildContext): Node =
@@ -459,14 +459,18 @@ suite "Recording backend sessions":
     let recording = newRecordingBackend(fullCapabilities())
     let session = attachBackend(runtime, recording.backend, makeHost())
     sessionRef = session
-    var raised = false
+    var message = ""
     try:
       discard runtime.dispatch("go", Event(kind: click))
-    except UiError:
-      raised = true
-    check not raised
+    except UiError as error:
+      message = error.msg
+    # A single close request during a commit is explicitly rejected, not lost.
+    check "dispose" in message
     check recording.disposeCalls == 0
     check not session.disposed
+    check runtime.committerOwner != 0
+    check runtime.preparerOwner != 0
+    # Retrying on a safe tick completes the release.
     dispose(session)
     check session.disposed
     check recording.disposeCalls == 1
@@ -630,3 +634,99 @@ suite "Recording backend sessions":
     check "discard" in message
     check runtime.snapshot.toJson() == before
     check not session.faulted
+
+  test "failed teardown invalidates events and rows until retried":
+    var items = @["a", "b"]
+    var count = 0
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        virtualList("list", items, proc(index: int): Node =
+          text(items[index], key = "row")),
+        text($count, key = "count"),
+        button("go", key = "go", onClick = proc(e: Event) = inc count)], key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let listHandle = session.handleFor(runtime.find("list").id)
+    let goHandle = session.handleFor(runtime.find("go").id)
+    var source = runtime.find("list").node.listSource
+    discard session.requestRows(listHandle, source.generation, 0, 1)
+    let before = runtime.snapshot.toJson()
+    check session.enqueue(userEvent(session, goHandle, 1, Event(kind: click)))
+
+    recording.failDispose = true
+    expect UiError:
+      dispose(session)
+    check not session.disposed
+    # Teardown started: the old queue is invalidated and new events, drains and
+    # row requests cannot reach business state.
+    check session.queuedEvents == 0
+    check not session.enqueue(userEvent(session, goHandle, 2, Event(kind: click)))
+    session.drainEvents()
+    check count == 0
+    source = runtime.find("list").node.listSource
+    expect UiError:
+      discard session.requestRows(listHandle, source.generation, 0, 2)
+    check runtime.snapshot.toJson() == before
+    check not runtime.eventsFrozen
+
+    # Clearing the injected failure lets the same close request finish.
+    recording.failDispose = false
+    dispose(session)
+    check session.disposed
+    check recording.disposeCalls == 2
+
+  test "conditional clear keeps update guard and execution scope":
+    var depth = 0
+    var scopeCalls = 0
+    proc scope(body: proc() {.closure.}) =
+      inc depth
+      inc scopeCalls
+      try: body()
+      finally: dec depth
+    var count = 0
+    var busyRejected = false
+    var sessionRef: BackendSession
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        text($count, key = "count"),
+        button("go", key = "go", onClick = proc(e: Event) =
+          inc count
+          try:
+            sessionRef.runtime.clearCommitter(sessionRef.runtime.committerOwner)
+          except UiError:
+            busyRejected = true
+          try:
+            sessionRef.runtime.clearPreparer(sessionRef.runtime.preparerOwner)
+          except UiError:
+            busyRejected = true)], key = "root")
+
+    let runtime = newRuntime(Application(title: "scope", width: 640, height: 480,
+      render: render, executionScope: scope))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    sessionRef = session
+    let applyCalls = recording.applyCalls
+    check runtime.dispatch("go", Event(kind: click))
+    check busyRejected
+    check recording.applyCalls > applyCalls
+    check runtime.committerOwner != 0
+    check runtime.preparerOwner != 0
+
+    # A failed owner leaves the hook untouched.
+    let committerToken = runtime.committerOwner
+    runtime.clearCommitter(committerToken + 1000)
+    check runtime.committerOwner == committerToken
+
+    # A valid-owner clear runs inside the application execution scope.
+    let scopeBefore = scopeCalls
+    runtime.clearCommitter(committerToken)
+    check runtime.committerOwner == 0
+    check scopeCalls == scopeBefore + 1
+    let preparerToken = runtime.preparerOwner
+    runtime.clearPreparer(preparerToken)
+    check runtime.preparerOwner == 0
+    check scopeCalls == scopeBefore + 2
+    check depth == 0
+    dispose(session)

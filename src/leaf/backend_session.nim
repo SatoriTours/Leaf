@@ -46,6 +46,7 @@ type
     disposed: bool
     faulted: bool
     frozen: bool
+    closing: bool
     draining: bool
 
 proc runtime*(session: BackendSession): Runtime = session.runtime
@@ -53,6 +54,7 @@ proc sessionId*(session: BackendSession): uint64 = session.sessionId
 proc mountGeneration*(session: BackendSession): uint64 = session.mountGeneration
 proc queuedEvents*(session: BackendSession): int = session.queue.len
 proc disposed*(session: BackendSession): bool = session.disposed
+proc closing*(session: BackendSession): bool = session.closing
 proc faulted*(session: BackendSession): bool = session.faulted
 proc frozen*(session: BackendSession): bool = session.frozen
 proc capabilityIssues*(session: BackendSession): seq[CapabilityIssue] = session.issues
@@ -244,13 +246,20 @@ proc attachBackend*(runtime: Runtime, backend: Backend, host: HostContext,
   session
 
 proc dispose*(session: BackendSession) =
-  ## Teardown. Refuses without side effects while a Runtime update/commit is in
-  ## progress, so a later call can still complete. Only removes hooks this
-  ## session installed, and only marks itself disposed after the backend
-  ## releases its resources; a throwing backend dispose stays retryable.
+  ## Teardown. A request made while a Runtime update/commit is in progress is
+  ## rejected with a catchable `UiError`, so the host can retry on a safe tick
+  ## instead of losing the close request silently. Once teardown starts the
+  ## session is event-ineligible: the queue is invalidated and
+  ## enqueue/drain/requestRows stop touching business state. Only hooks this
+  ## session installed are removed, and a throwing backend dispose leaves the
+  ## session retryable (it is not marked disposed).
   if session == nil or session.disposed: return
   if session.runtime != nil and session.runtime.installingUpdate:
-    return
+    fail("cannot dispose backend session during a runtime update; retry on a safe tick")
+  session.closing = true
+  session.queue.setLen(0)
+  session.lastQueued = 0
+  session.lastProcessed = 0
   if session.runtime != nil:
     if session.committerToken != 0:
       session.runtime.clearCommitter(session.committerToken)
@@ -260,7 +269,6 @@ proc dispose*(session: BackendSession) =
       session.preparerToken = 0
   if session.backend != nil and session.backend.dispose != nil:
     session.backend.dispose()
-  session.queue.setLen(0)
   session.viewports.clear()
   session.disposed = true
 
@@ -269,7 +277,8 @@ proc enqueue*(session: BackendSession, envelope: EventEnvelope): bool =
   ## the source. Wrong session/generation, dead handles, future revisions and
   ## non-monotonic or already processed sequences are rejected; an old observed
   ## revision alone is not a reason to reject.
-  if session == nil or session.disposed or session.faulted: return false
+  if session == nil or session.disposed or session.faulted or session.closing:
+    return false
   if envelope.source == sourceSetter: return false
   if envelope.session != session.sessionId: return false
   if envelope.mountGeneration != session.mountGeneration: return false
@@ -308,7 +317,9 @@ proc drainEvents*(session: BackendSession) =
   ## without touching the queue or its sequence bookkeeping, so genuine user
   ## events queued during apply survive for a drain after publication. The
   ## committer never dispatches queued events before publication.
-  if session == nil or session.disposed or session.faulted or session.frozen: return
+  if session == nil or session.disposed or session.faulted or session.frozen or
+      session.closing:
+    return
   if session.draining: return
   if session.runtime != nil and session.runtime.installingUpdate: return
   session.draining = true
@@ -327,6 +338,7 @@ proc requestRows*(session: BackendSession, listHandle: NodeHandle,
   ## Materialize a list viewport. The tracked viewport is replaced only after a
   ## successful commit, so a rejected request cannot corrupt visible tracking.
   if session == nil or session.disposed: fail("session is disposed")
+  if session.closing: fail("session is closing")
   if session.faulted: fail("session is faulted")
   if not session.entities.hasKey(listHandle):
     fail("unknown list handle: " & $listHandle)
