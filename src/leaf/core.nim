@@ -90,9 +90,15 @@ type
     rowClock: uint64
     validator: SnapshotValidator
     preparer: RuntimePreparer
+    committer: RuntimeCommitter
+    revision: uint64
+    eventsFrozen: bool
+    frozenReason: string
+    isCandidate: bool
     descriptionBytes: int
     diagnostics: Diagnostics
   RuntimePreparer* = proc(candidate: Runtime) {.closure.}
+  RuntimeCommitter* = proc(accepted: Runtime, candidate: Runtime) {.closure.}
 
 proc fail*(message: string) {.noreturn.} =
   raise newException(UiError, message)
@@ -284,7 +290,59 @@ template inExecutionScope(runtime: Runtime, body: untyped) =
   else:
     runtime.app.executionScope(proc() = body)
 
+proc acceptedRevision*(runtime: Runtime): uint64 = runtime.revision
+
+proc eventsFrozen*(runtime: Runtime): bool = runtime.eventsFrozen
+
+proc freezeEvents*(runtime: Runtime, reason: string) =
+  ## Permanently freeze business dispatch after an unrecoverable backend
+  ## failure. A1 deliberately provides no automatic thaw.
+  runtime.eventsFrozen = true
+  runtime.frozenReason = reason
+
+proc safeDump(runtime: Runtime) =
+  if runtime.diagnostics == nil: return
+  try:
+    runtime.dump()
+  except CatchableError as error:
+    stderr.writeLine("leaf: post-commit dump failed: " & error.msg)
+
+proc candidateFrom(runtime: Runtime): Runtime =
+  ## Isolated staging copy of the currently accepted description. The mount
+  ## structure is shared read-only; list preparation rebuilds changed paths
+  ## instead of mutating shared MountedNodes. The candidate carries no
+  ## committer, so nested preparation never recurses into the outer gate.
+  Runtime(app: runtime.app, current: runtime.current, index: runtime.index,
+    keys: runtime.keys, rowCaches: runtime.rowCaches, counters: runtime.counters,
+    rowClock: runtime.rowClock, validator: runtime.validator,
+    descriptionBytes: runtime.descriptionBytes, isCandidate: true)
+
+proc gateAndPublish(runtime: Runtime, candidate: Runtime) =
+  ## The single publish boundary. The committer observes the candidate and may
+  ## reject it by raising before any accepted state changes; the proposed
+  ## accepted revision is `accepted.revision + 1`. A successful publication
+  ## advances the accepted revision by exactly one.
+  candidate.revision = runtime.revision + 1
+  if runtime.committer != nil:
+    runtime.committer(runtime, candidate)
+  runtime.current = candidate.current
+  runtime.index = move(candidate.index)
+  runtime.keys = move(candidate.keys)
+  runtime.rowCaches = move(candidate.rowCaches)
+  runtime.rowClock = candidate.rowClock
+  runtime.counters = candidate.counters
+  runtime.descriptionBytes = candidate.descriptionBytes
+  runtime.revision = candidate.revision
+
+proc postCommitDiagnostics(runtime: Runtime) =
+  ## Diagnostics run after acceptance. Their failure must never look like a
+  ## rejected commit; Diagnostics reports IO errors on stderr itself.
+  if runtime.diagnostics == nil: return
+  runtime.diagnostics.record("render", "ok", %*{"nodes": runtime.counters.mountedNodes})
+  runtime.safeDump()
+
 proc refreshImpl(runtime: Runtime): bool =
+  if runtime.isCandidate: fail("candidate runtime cannot render")
   if runtime.inUpdate: fail("reentrant runtime update")
   runtime.inUpdate = true
   let ctx = runtime.context
@@ -314,41 +372,25 @@ proc refreshImpl(runtime: Runtime): bool =
     if runtime.validator != nil: runtime.validator(snapshot)
     # Stage lazy renderer content in an isolated candidate. Preparation may
     # materialize lists and fail without changing the published event index.
-    if runtime.preparer != nil:
-      let candidate = Runtime(app: runtime.app, current: snapshot,
-        index: move(index), keys: move(keys), rowCaches: move(rowCaches),
-        counters: runtime.counters, rowClock: runtime.rowClock, validator: runtime.validator,
-        descriptionBytes: descriptionBytes)
-      candidate.counters.cachedItems = cachedItems
-      candidate.counters.cachedRowBytes = cachedBytes
-      candidate.counters.mountedNodes = count
-      candidate.counters.treeBytes = bytes
-      runtime.preparer(candidate)
-      runtime.current = candidate.current
-      runtime.index = move(candidate.index)
-      runtime.keys = move(candidate.keys)
-      runtime.rowCaches = move(candidate.rowCaches)
-      runtime.rowClock = candidate.rowClock
-      runtime.counters = candidate.counters
-    else:
-      runtime.current = snapshot
-      runtime.index = move(index)
-      runtime.keys = move(keys)
-      runtime.rowCaches = move(rowCaches)
-      runtime.counters.cachedItems = cachedItems
-      runtime.counters.cachedRowBytes = cachedBytes
-      runtime.counters.mountedNodes = count
-      runtime.counters.treeBytes = bytes
-    runtime.descriptionBytes = descriptionBytes
+    # The backend gate runs after preparation and before publication; a
+    # rejected candidate leaves snapshot, index, caches and revision untouched.
+    var candidate = Runtime(app: runtime.app, current: snapshot,
+      index: move(index), keys: move(keys), rowCaches: move(rowCaches),
+      counters: runtime.counters, rowClock: runtime.rowClock, validator: runtime.validator,
+      descriptionBytes: descriptionBytes, isCandidate: true)
+    candidate.counters.cachedItems = cachedItems
+    candidate.counters.cachedRowBytes = cachedBytes
+    candidate.counters.mountedNodes = count
+    candidate.counters.treeBytes = bytes
+    if runtime.preparer != nil: runtime.preparer(candidate)
+    runtime.gateAndPublish(candidate)
     ctx.previous = move(ctx.candidate)
     inc runtime.counters.renders
     runtime.counters.builtNodes += uint64(count)
     runtime.counters.cacheHits += uint64(ctx.hits)
     runtime.counters.cacheMisses += uint64(ctx.misses)
     runtime.counters.cachedSubtrees = ctx.previous.len
-    if runtime.diagnostics != nil:
-      runtime.diagnostics.record("render", "ok", %*{"nodes": runtime.counters.mountedNodes})
-      runtime.dump()
+    runtime.postCommitDiagnostics()
     result = true
   except CatchableError as error:
     if runtime.diagnostics != nil: runtime.diagnostics.record("render", "error", %*{"message": error.msg})
@@ -395,23 +437,38 @@ proc setValidatorImpl(runtime: Runtime, validator: SnapshotValidator) =
 proc setValidator*(runtime: Runtime, validator: SnapshotValidator) =
   inExecutionScope(runtime): runtime.setValidatorImpl(validator)
 
+proc setCommitter*(runtime: Runtime, committer: RuntimeCommitter) =
+  ## Install the backend commit hook. The first non-nil install mounts the
+  ## already accepted description into an isolated candidate and calls the
+  ## committer with `accepted = nil`; it performs no business render and does
+  ## not advance the accepted revision. A non-nil hook cannot be replaced
+  ## silently: unload the session hook with nil first. A failing install
+  ## leaves both the hook and the accepted description unchanged.
+  if runtime.isCandidate: fail("candidate runtime cannot install a committer")
+  if runtime.inUpdate: fail("cannot replace committer during update")
+  if committer == nil:
+    runtime.committer = nil
+    return
+  if runtime.committer != nil:
+    fail("committer already installed; unload the existing session first")
+  var candidate = runtime.candidateFrom()
+  runtime.inUpdate = true
+  try:
+    committer(nil, candidate)
+  finally:
+    runtime.inUpdate = false
+  runtime.committer = committer
+
 proc prepareSnapshotImpl(runtime: Runtime, preparer: RuntimePreparer) =
+  if runtime.isCandidate: fail("candidate runtime cannot prepare")
   if runtime.inUpdate: fail("cannot replace preparer during update")
   if preparer != nil:
-    let candidate = Runtime(app: runtime.app, current: runtime.current,
-      index: runtime.index, keys: runtime.keys, rowCaches: runtime.rowCaches,
-      counters: runtime.counters, rowClock: runtime.rowClock, validator: runtime.validator,
-      descriptionBytes: runtime.descriptionBytes)
+    var candidate = runtime.candidateFrom()
     runtime.inUpdate = true
     try:
       preparer(candidate)
-      runtime.current = candidate.current
-      runtime.index = move(candidate.index)
-      runtime.keys = move(candidate.keys)
-      runtime.rowCaches = move(candidate.rowCaches)
-      runtime.counters = candidate.counters
-      runtime.rowClock = candidate.rowClock
-      runtime.dump()
+      runtime.gateAndPublish(candidate)
+      runtime.safeDump()
     finally: runtime.inUpdate = false
 
 proc prepareSnapshot(runtime: Runtime, preparer: RuntimePreparer) =
@@ -434,6 +491,9 @@ proc find*(runtime: Runtime, key: string): MountedNode =
   runtime.keys[key][0]
 
 proc dispatchImpl(runtime: Runtime, key: string, event: Event): bool =
+  if runtime.eventsFrozen:
+    fail("business events are frozen: " & runtime.frozenReason)
+  if runtime.isCandidate: fail("candidate runtime cannot dispatch business events")
   if runtime.inUpdate: fail("reentrant event dispatch")
   let n = runtime.find(key).description
   if n.inactive: return false
@@ -459,9 +519,9 @@ proc dispatch*(runtime: Runtime, key: string, event: Event): bool =
   inExecutionScope(runtime): completed = runtime.dispatchImpl(key, event)
   completed
 
-proc materializeImpl(runtime: Runtime, key: string, first, finish: int,
-                  protected: seq[int] = @[]): seq[MountedNode] =
-  ## A complete list viewport is committed atomically. Only visible/protected
+proc materializeInto(runtime: Runtime, key: string, first, finish: int,
+                  protected: seq[int]): seq[MountedNode] =
+  ## Apply a complete list viewport to a staging runtime. Only visible/protected
   ## rows are mounted; up to 128 rows stay warm, without live event handlers.
   if runtime.inUpdate: fail("reentrant list request")
   let target = runtime.find(key)
@@ -579,6 +639,20 @@ proc materializeImpl(runtime: Runtime, key: string, first, finish: int,
     for mounted in descendants:
       if mounted.itemIndex >= first and mounted.itemIndex < finish: result.add(mounted)
     runtime.dump()
+  finally:
+    runtime.inUpdate = false
+
+proc materializeImpl(runtime: Runtime, key: string, first, finish: int,
+                  protected: seq[int] = @[]): seq[MountedNode] =
+  ## The accepted viewport travels through the same commit gate as refresh and
+  ## prepare; a rejected list candidate leaves accepted rows and stats intact.
+  if runtime.inUpdate: fail("reentrant list request")
+  var candidate = runtime.candidateFrom()
+  runtime.inUpdate = true
+  try:
+    result = materializeInto(candidate, key, first, finish, protected)
+    runtime.gateAndPublish(candidate)
+    runtime.safeDump()
   finally:
     runtime.inUpdate = false
 
