@@ -520,14 +520,29 @@ function Set-CallerUtf8($Value) {
 }
 $cert = Join-Path $FixtureRoot 'valid CA 中文.pem'
 $key = Join-Path $FixtureRoot 'generated test key.pem'
+$generationErrors = Join-Path $FixtureRoot 'generation stderr.log'
+$keyCheckErrors = Join-Path $FixtureRoot 'key validation stderr.log'
+$keyCheckOutput = Join-Path $FixtureRoot 'key validation stdout.log'
 $generationUtf8 = [Environment]::GetEnvironmentVariable('OPENSSL_WIN32_UTF8', 'Process')
 try {
     $env:OPENSSL_WIN32_UTF8 = '1'
-    $generationOutput = & $OpenSsl req -x509 -newkey rsa:2048 -nodes -subj '/CN=Leaf Test CA' -days 1 -keyout $key -out $cert 2>&1 | Out-String
+    # OpenSSL's private-file writer uses narrow open() on Windows. Send only
+    # the private key to stdout; PowerShell 7.4+ preserves its bytes and opens
+    # this Unicode path itself. Keep stderr separate and never log key bytes.
+    & $OpenSsl req -x509 -newkey rsa:2048 -nodes -subj '/CN=Leaf Test CA' -days 1 -keyout - -out $cert 1> $key 2> $generationErrors
+    $generationExit = $LASTEXITCODE
+    if ($generationExit -eq 0) {
+        & $OpenSsl pkey -in $key -noout 1> $keyCheckOutput 2> $keyCheckErrors
+        $keyCheckExit = $LASTEXITCODE
+    }
 } finally {
     Set-CallerUtf8 $generationUtf8
 }
-Assert ($LASTEXITCODE -eq 0) ("Test certificate generation failed; exit=[$LASTEXITCODE]; executable=[$OpenSsl]; cert=[$cert]; output=[$generationOutput]")
+$generationOutput = [IO.File]::ReadAllText($generationErrors)
+Assert ($generationExit -eq 0) ("Test certificate generation failed; exit=[$generationExit]; executable=[$OpenSsl]; cert=[$cert]; stderr=[$generationOutput]")
+$keyCheckDiagnostic = [IO.File]::ReadAllText($keyCheckErrors)
+Assert ($keyCheckExit -eq 0) ("Generated key could not be parsed; exit=[$keyCheckExit]; key=[$key]; stderr=[$keyCheckDiagnostic]")
+Assert ((Get-Item -LiteralPath $keyCheckOutput).Length -eq 0) 'pkey -noout unexpectedly emitted stdout'
 AssertEqual ([Environment]::GetEnvironmentVariable('OPENSSL_WIN32_UTF8', 'Process')) ($generationUtf8) 'Certificate generation did not restore caller UTF8 setting'
 Assert ((Test-Path Env:OPENSSL_WIN32_UTF8) -eq ($null -ne $generationUtf8)) 'Certificate generation changed UTF8 environment presence'
 Assert (Test-Path -LiteralPath $key -PathType Leaf) 'Chinese-directory key was not generated'
@@ -623,6 +638,8 @@ Assert (@($allCalls | Where-Object { $_.utf8 -cne '1' }).Count -eq 0) 'Invalid C
         "-FixtureRoot",base,"-OpenSsl",openssl,"-OpenSslProbe",getAppFilename()])
       checkpoint executed.output
       check executed.exitCode==0
+      check "-----BEGIN PRIVATE KEY-----" notin executed.output
+      check "-----BEGIN RSA PRIVATE KEY-----" notin executed.output
 
   test "real Application discovery selects first Git path and honors explicit override":
     let pwsh=findExe("pwsh")
