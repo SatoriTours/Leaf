@@ -11,6 +11,9 @@ fn main() {
         let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
             .join("resources/windows/leaf_gpui.manifest");
         println!("cargo:rustc-cdylib-link-arg=/MANIFEST:EMBED,ID=2");
-        println!("cargo:rustc-cdylib-link-arg=/MANIFESTINPUT:{}", manifest.display());
+        println!(
+            "cargo:rustc-cdylib-link-arg=/MANIFESTINPUT:{}",
+            manifest.display()
+        );
     }
 }

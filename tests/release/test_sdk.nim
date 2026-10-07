@@ -523,17 +523,56 @@ function Set-CallerUtf8($Value) {
 }
 $cert = Join-Path $FixtureRoot 'valid CA 中文.pem'
 $key = Join-Path $FixtureRoot 'generated test key.pem'
+$generationErrors = Join-Path $FixtureRoot 'generation stderr.log'
+$keyCheckErrors = Join-Path $FixtureRoot 'key validation stderr.log'
+$keyCheckOutput = Join-Path $FixtureRoot 'key validation stdout.log'
 $generationUtf8 = [Environment]::GetEnvironmentVariable('OPENSSL_WIN32_UTF8', 'Process')
 try {
     $env:OPENSSL_WIN32_UTF8 = '1'
-    $generationOutput = & $OpenSsl req -x509 -newkey rsa:2048 -nodes -subj '/CN=Leaf Test CA' -days 1 -keyout $key -out $cert 2>&1 | Out-String
+    # OpenSSL's private-file writer uses narrow open() on Windows. Send only
+    # the private key to stdout; PowerShell 7.4+ preserves its bytes and opens
+    # this Unicode path itself. Keep stderr separate and never log key bytes.
+    & $OpenSsl req -x509 -newkey rsa:2048 -nodes -subj '/CN=Leaf Test CA' -days 1 -keyout - -out $cert 1> $key 2> $generationErrors
+    $generationExit = $LASTEXITCODE
 } finally {
     Set-CallerUtf8 $generationUtf8
 }
-Assert ($LASTEXITCODE -eq 0) ("Test certificate generation failed; exit=[$LASTEXITCODE]; executable=[$OpenSsl]; cert=[$cert]; output=[$generationOutput]")
+$generationOutput = [IO.File]::ReadAllText($generationErrors)
+Assert ($generationExit -eq 0) ("Test certificate generation failed; exit=[$generationExit]; executable=[$OpenSsl]; cert=[$cert]; stderr=[$generationOutput]")
 AssertEqual ([Environment]::GetEnvironmentVariable('OPENSSL_WIN32_UTF8', 'Process')) ($generationUtf8) 'Certificate generation did not restore caller UTF8 setting'
 Assert ((Test-Path Env:OPENSSL_WIN32_UTF8) -eq ($null -ne $generationUtf8)) 'Certificate generation changed UTF8 environment presence'
 Assert (Test-Path -LiteralPath $key -PathType Leaf) 'Chinese-directory key was not generated'
+$keyContent = [IO.File]::ReadAllText($key)
+$damagedKey = Join-Path $FixtureRoot 'damaged test key.pem'
+$damagedContent = $keyContent -replace '(?m)^[A-Za-z0-9+/=]+\r?$', 'invalid!'
+Assert ($damagedContent -cne $keyContent) 'Damaged key fixture did not change key data'
+[IO.File]::WriteAllText($damagedKey, $damagedContent, [Text.UTF8Encoding]::new($false))
+try {
+foreach ($keyCallerUtf8 in @($null, 'caller original value')) {
+    Set-CallerUtf8 $keyCallerUtf8
+    foreach ($keyCase in @(@{ Path = $key; Valid = $true }, @{ Path = $damagedKey; Valid = $false })) {
+        try {
+            $env:OPENSSL_WIN32_UTF8 = '1'
+            # The provider's filename loader calls ANSI stat before BIO fopen.
+            # Read the original Unicode path in PowerShell; omit -in for stdin.
+            [IO.File]::ReadAllText($keyCase.Path) | & $OpenSsl pkey -noout 1> $keyCheckOutput 2> $keyCheckErrors
+            $keyCheckExit = $LASTEXITCODE
+        } finally {
+            Set-CallerUtf8 $keyCallerUtf8
+        }
+        AssertEqual ([Environment]::GetEnvironmentVariable('OPENSSL_WIN32_UTF8', 'Process')) ($keyCallerUtf8) 'Key validation did not restore caller UTF8 setting'
+        Assert ((Test-Path Env:OPENSSL_WIN32_UTF8) -eq ($null -ne $keyCallerUtf8)) 'Key validation changed UTF8 environment presence'
+        Assert ((Get-Item -LiteralPath $keyCheckOutput).Length -eq 0) 'pkey -noout unexpectedly emitted stdout'
+        $keyCheckDiagnostic = [IO.File]::ReadAllText($keyCheckErrors)
+        Assert ($keyCheckDiagnostic -notmatch '-----BEGIN .*PRIVATE KEY-----') 'pkey stderr leaked private key PEM'
+        Assert (($keyCheckExit -eq 0) -eq $keyCase.Valid) ("Key stdin validation returned wrong exit=[$keyCheckExit]; key=[$($keyCase.Path)]; stderr=[$keyCheckDiagnostic]")
+        ('Key stdin validation; valid=[' + $keyCase.Valid + ']; exit=[' + $keyCheckExit + ']; stdout empty; UTF8 restored; no PEM leakage')
+    }
+}
+} finally {
+    Set-CallerUtf8 $generationUtf8
+}
+Assert ([IO.File]::ReadAllText($key) -ceq $keyContent) 'Key validation changed original key contents'
 $runtime = [pscustomobject]@{
     OpenSslBin = Split-Path $OpenSsl -Parent
     OpenSslExecutable = $OpenSsl
@@ -626,6 +665,8 @@ Assert (@($allCalls | Where-Object { $_.utf8 -cne '1' }).Count -eq 0) 'Invalid C
         "-FixtureRoot",base,"-OpenSsl",openssl,"-OpenSslProbe",getAppFilename()])
       checkpoint executed.output
       check executed.exitCode==0
+      check "-----BEGIN PRIVATE KEY-----" notin executed.output
+      check "-----BEGIN RSA PRIVATE KEY-----" notin executed.output
 
   test "real Application discovery selects first Git path and honors explicit override":
     let pwsh=findExe("pwsh")
