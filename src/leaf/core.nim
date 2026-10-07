@@ -60,10 +60,12 @@ type
     hits, misses: int
     building: bool
   RenderProc* = proc(context: BuildContext): Node {.closure.}
+  ExecutionScope* = proc(body: proc() {.closure.}) {.closure.}
   Application* = object
     title*: string
     width*, height*: int
     render*: RenderProc
+    executionScope*: ExecutionScope
   PerformanceStats* = object
     renders*, builtNodes*, cacheHits*, cacheMisses*, dispatches*: uint64
     builtItems*, rowCacheHits*: uint64
@@ -276,7 +278,13 @@ proc dump(runtime: Runtime) =
   if runtime.diagnostics != nil and runtime.diagnostics.dumpFile.len > 0:
     runtime.diagnostics.snapshot(runtime.current.toJson())
 
-proc refresh*(runtime: Runtime): bool =
+template inExecutionScope(runtime: Runtime, body: untyped) =
+  if runtime.app.executionScope == nil:
+    body
+  else:
+    runtime.app.executionScope(proc() = body)
+
+proc refreshImpl(runtime: Runtime): bool =
   if runtime.inUpdate: fail("reentrant runtime update")
   runtime.inUpdate = true
   let ctx = runtime.context
@@ -350,6 +358,11 @@ proc refresh*(runtime: Runtime): bool =
     ctx.candidate.clear()
     runtime.inUpdate = false
 
+proc refresh*(runtime: Runtime): bool =
+  var completed: bool
+  inExecutionScope(runtime): completed = runtime.refreshImpl()
+  completed
+
 proc newRuntime*(app: Application, validator: SnapshotValidator = nil,
                  diagnostics: Diagnostics = nil): Runtime =
   if app.render == nil: fail("application needs a render function")
@@ -372,14 +385,17 @@ proc setDiagnostics*(runtime: Runtime, diagnostics: Diagnostics) =
 proc diagnostic*(runtime: Runtime, phase, status: string, details: JsonNode) =
   runtime.diagnostics.record(phase, status, details)
 
-proc setValidator*(runtime: Runtime, validator: SnapshotValidator) =
+proc setValidatorImpl(runtime: Runtime, validator: SnapshotValidator) =
   ## A renderer can validate its constraints before a runtime transaction
   ## publishes state. Validate the current snapshot before attaching it.
   if runtime.inUpdate: fail("cannot replace validator during update")
   if validator != nil: validator(runtime.current)
   runtime.validator = validator
 
-proc prepareSnapshot(runtime: Runtime, preparer: RuntimePreparer) =
+proc setValidator*(runtime: Runtime, validator: SnapshotValidator) =
+  inExecutionScope(runtime): runtime.setValidatorImpl(validator)
+
+proc prepareSnapshotImpl(runtime: Runtime, preparer: RuntimePreparer) =
   if runtime.inUpdate: fail("cannot replace preparer during update")
   if preparer != nil:
     let candidate = Runtime(app: runtime.app, current: runtime.current,
@@ -398,6 +414,9 @@ proc prepareSnapshot(runtime: Runtime, preparer: RuntimePreparer) =
       runtime.dump()
     finally: runtime.inUpdate = false
 
+proc prepareSnapshot(runtime: Runtime, preparer: RuntimePreparer) =
+  inExecutionScope(runtime): runtime.prepareSnapshotImpl(preparer)
+
 proc prepare*(runtime: Runtime) =
   ## Reprepare a viewport without rendering business state, atomically.
   runtime.prepareSnapshot(runtime.preparer)
@@ -414,7 +433,7 @@ proc find*(runtime: Runtime, key: string): MountedNode =
   if runtime.keys[key].len != 1: fail("ambiguous key: " & key & "; use full node ID")
   runtime.keys[key][0]
 
-proc dispatch*(runtime: Runtime, key: string, event: Event): bool =
+proc dispatchImpl(runtime: Runtime, key: string, event: Event): bool =
   if runtime.inUpdate: fail("reentrant event dispatch")
   let n = runtime.find(key).description
   if n.inactive: return false
@@ -435,7 +454,12 @@ proc dispatch*(runtime: Runtime, key: string, event: Event): bool =
       runtime.diagnostics.record("event", "error", %*{"key": key, "kind": $event.kind, "message": error.msg})
     raise
 
-proc materialize*(runtime: Runtime, key: string, first, finish: int,
+proc dispatch*(runtime: Runtime, key: string, event: Event): bool =
+  var completed: bool
+  inExecutionScope(runtime): completed = runtime.dispatchImpl(key, event)
+  completed
+
+proc materializeImpl(runtime: Runtime, key: string, first, finish: int,
                   protected: seq[int] = @[]): seq[MountedNode] =
   ## A complete list viewport is committed atomically. Only visible/protected
   ## rows are mounted; up to 128 rows stay warm, without live event handlers.
@@ -557,6 +581,12 @@ proc materialize*(runtime: Runtime, key: string, first, finish: int,
     runtime.dump()
   finally:
     runtime.inUpdate = false
+
+proc materialize*(runtime: Runtime, key: string, first, finish: int,
+                  protected: seq[int] = @[]): seq[MountedNode] =
+  var rows: seq[MountedNode]
+  inExecutionScope(runtime): rows = runtime.materializeImpl(key, first, finish, protected)
+  rows
 
 proc kindName*(kind: NodeKind): string =
   case kind

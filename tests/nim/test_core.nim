@@ -5,6 +5,28 @@ proc app(render: RenderProc): Application =
   Application(title: "测试", width: 640, height: 480, render: render)
 
 suite "Native Nim component runtime":
+  test "generic execution scope surrounds render and later callbacks":
+    var active = false
+    var rendered, handled: int
+    proc scope(body: proc() {.closure.}) =
+      let previous = active
+      active = true
+      try: body()
+      finally: active = previous
+    proc render(ctx: BuildContext): Node =
+      doAssert active
+      inc rendered
+      button("Event", key = "event", onClick = proc(e: Event) =
+        doAssert active
+        inc handled)
+    let runtime = newRuntime(Application(title: "scope", width: 640, height: 480,
+      render: render, executionScope: scope))
+    check not active
+    check runtime.dispatch("event", Event(kind: click))
+    check rendered == 2
+    check handled == 1
+    check not active
+
   test "state belongs to each application and events use typed values":
     var a, b = 0
     proc counter(value: ptr int): Runtime =
