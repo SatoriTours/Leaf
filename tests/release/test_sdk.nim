@@ -380,3 +380,66 @@ foreach ($case in $invalid) {
         "-FixtureRoot",base,"-OpenSsl",openssl])
       checkpoint executed.output
       check executed.exitCode==0
+
+  test "real Application discovery selects first Git path and honors explicit override":
+    let pwsh=findExe("pwsh")
+    if pwsh.len==0:
+      checkpoint "PowerShell unavailable; multiple Git Application discovery not verified"
+      skip()
+    else:
+      let base=createTempDir("leaf Git discovery 中文 space ", "")
+      defer:removeDir(base)
+      let gitRoot=base/"Git 中文 spaces"
+      for directory in ["bin", "cmd", "mingw64/bin"]:
+        let bin=gitRoot/directory
+        createDir(bin)
+        let git=bin/"git.exe"
+        writeFile(git,"#!/bin/sh\nexit 0\n")
+        when not defined(windows):
+          setFilePermissions(git,{fpUserRead,fpUserWrite,fpUserExec})
+      let testScript=base/"discovery_tests.ps1"
+      writeFile(testScript, """
+param([string]$Helper, [string]$GitRoot)
+$ErrorActionPreference = 'Stop'
+. $Helper
+function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
+$bins = @('bin', 'cmd', 'mingw64/bin') | ForEach-Object { Join-Path $GitRoot $_ }
+$expected = Join-Path $bins[0] 'git.exe'
+$previousPath = $env:PATH
+try {
+    $env:PATH = $bins -join [IO.Path]::PathSeparator
+    # Genuine Application objects discovered from executable fixture files,
+    # not mocked Get-Command objects or joined path strings.
+    $applications = @(Get-Command git.exe -CommandType Application)
+    Assert ($applications.Count -eq 3) 'Fixture did not discover all three Git Applications'
+    Assert ($applications[0].Source -eq $expected) 'Application order differs from PATH order'
+    'Discovered three real Git Applications: ' + ($applications.Source -join '; ')
+    $selected = Resolve-LeafGitExecutable
+    Assert ($selected -is [string]) 'Discovery did not return one path string'
+    Assert ($selected -eq $expected) 'Discovery did not select first Application before taking Source'
+    Assert (Test-Path -LiteralPath $selected -PathType Leaf) 'Selected Git path does not exist'
+    # Feed discovery into the unchanged supported-layout selector.
+    $runtimeBin = Join-Path $GitRoot 'mingw64/bin'
+    $cert = Join-Path $GitRoot 'mingw64/etc/ssl/certs/ca-bundle.crt'
+    New-Item -ItemType Directory -Force (Split-Path $cert -Parent) | Out-Null
+    foreach ($file in @('libssl-3-x64.dll', 'libcrypto-3-x64.dll', 'openssl.exe')) {
+        Set-Content -LiteralPath (Join-Path $runtimeBin $file) 'layout fixture bytes'
+    }
+    Set-Content -LiteralPath $cert 'layout fixture CA bytes'
+    Assert ((Get-LeafGitHttpsRuntime -GitExecutable $selected).OpenSslBin -eq $runtimeBin) 'Discovered Git did not resolve legacy layout'
+    'First Application selected; legacy layout resolved'
+    $env:PATH = @($bins[1], $bins[0], $bins[2]) -join [IO.Path]::PathSeparator
+    Assert ((Resolve-LeafGitExecutable) -eq (Join-Path $bins[1] 'git.exe')) 'Reordered PATH did not select its first Application'
+    $env:PATH = $bins[2]
+    Assert ((Resolve-LeafGitExecutable) -eq (Join-Path $bins[2] 'git.exe')) 'Single Application discovery failed'
+    $env:PATH = ''
+    Assert ((Resolve-LeafGitExecutable -GitExecutable $expected) -eq $expected) 'Explicit GitExecutable was not preserved with empty PATH'
+    'Reordered/single discovery and explicit override passed'
+} finally {
+    $env:PATH = $previousPath
+}
+""")
+      let executed=runCommand(pwsh,@["-NoProfile","-File",testScript,
+        "-Helper",RepositoryRoot/"scripts/prepare_windows_https.ps1","-GitRoot",gitRoot])
+      checkpoint executed.output
+      check executed.exitCode==0

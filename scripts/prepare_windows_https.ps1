@@ -3,6 +3,12 @@
 param([string]$GitExecutable)
 $ErrorActionPreference = 'Stop'
 
+function Resolve-LeafGitExecutable {
+    param([string]$GitExecutable)
+    if ($GitExecutable) { return $GitExecutable }
+    return (Get-Command git.exe -CommandType Application | Select-Object -First 1).Source
+}
+
 function Get-LeafGitHttpsRuntime {
     param([Parameter(Mandatory)][string]$GitExecutable)
     if (-not (Test-Path -LiteralPath $GitExecutable -PathType Leaf)) {
@@ -86,7 +92,7 @@ function Publish-LeafGitHttpsEnvironment {
 
 if ($MyInvocation.InvocationName -ne '.') {
     if (-not $IsWindows) { throw 'Windows HTTPS preparation requires a Windows runner.' }
-    if (-not $GitExecutable) { $GitExecutable = (Get-Command git.exe -CommandType Application).Source }
+    $GitExecutable = Resolve-LeafGitExecutable -GitExecutable $GitExecutable
     $runtime = Get-LeafGitHttpsRuntime -GitExecutable $GitExecutable
     # Validate loading both libraries, the OpenSSL 3 executable and the CA bundle
     # before publishing environment values to later jobs/steps. No TLS bypass.
