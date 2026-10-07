@@ -10,14 +10,14 @@ proc logicCode(resource: ResourceSpec): string =
   result.add("  State = ref object\n    draft: Draft\n    panel: Panel\n    editingId, selectedId: int64\n    error: string\n\nproc toDraft(value: " & m & "): Draft =\n")
   for field in resource.fields:
     result.add("  result." & field.name & " = " & (if field.kind in ["bool", "string"]: "" else: "$") & "value." & field.name & "\n")
-  result.add("\nproc back(state: State) =\n  state.panel = listPanel\n  state.error = \"\"\n\nproc beginNew(state: State) =\n  state.draft = Draft()\n  state.editingId = 0\n  state.error = \"\"\n  state.panel = editorPanel\n\nproc beginEdit(state: State, id: int64) =\n  state.draft = toDraft(" & m & ".find(id))\n  state.editingId = id\n  state.error = \"\"\n  state.panel = editorPanel\n\nproc show(state: State, id: int64) =\n  discard " & m & ".find(id)\n  state.selectedId = id\n  state.panel = detailPanel\n\nproc remove(state: State, id: int64) =\n  try:\n    " & m & ".find(id).destroyOrRaise()\n    state.back()\n  except CatchableError as error: state.error = error.msg\n\nproc submit(state: State) =\n  try:\n    let value = if state.editingId == 0: " & m & ".build() else: " & m & ".find(state.editingId)\n")
+  result.add("\nproc back(state: State) =\n  state.panel = listPanel\n  state.error = \"\"\n\nproc beginNew(state: State) =\n  state.draft = Draft()\n  state.editingId = 0\n  state.error = \"\"\n  state.panel = editorPanel\n\nproc beginEdit(state: State, id: int64) =\n  state.draft = toDraft(" & m & ".find(id))\n  state.editingId = id\n  state.error = \"\"\n  state.panel = editorPanel\n\nproc show(state: State, id: int64) =\n  discard " & m & ".find(id)\n  state.selectedId = id\n  state.panel = detailPanel\n\nproc remove(state: State, id: int64) =\n  try:\n    " & m & ".find(id).destroyOrRaise()\n    state.back()\n  except PostCommitError as error:\n    state.back()\n    state.error = error.msg\n  except CatchableError as error: state.error = error.msg\n\nproc submit(state: State) =\n  try:\n    let value = if state.editingId == 0: " & m & ".build() else: " & m & ".find(state.editingId)\n")
   for field in resource.fields:
     let expression = case field.kind
       of "int": "parseInt(state.draft." & field.name & ".strip())"
       of "float": "parseFloat(state.draft." & field.name & ".strip())"
       else: "state.draft." & field.name
     result.add("    value." & field.name & " = " & expression & "\n")
-  result.add("    if value.save():\n      state.draft = Draft()\n      state.editingId = 0\n      state.back()\n    else: state.error = value.errors.fullMessages.join(\"\\n\")\n  except CatchableError as error: state.error = error.msg\n\n")
+  result.add("    if value.save():\n      state.draft = Draft()\n      state.editingId = 0\n      state.back()\n    else: state.error = errors(value).fullMessages.join(\"\\n\")\n  except PostCommitError as error:\n    state.draft = Draft()\n    state.editingId = 0\n    state.back()\n    state.error = error.msg\n  except CatchableError as error: state.error = error.msg\n\n")
 
 proc listCode(resource: ResourceSpec): string =
   let p = resource.plural

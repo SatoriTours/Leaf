@@ -3,7 +3,7 @@ import leaf/model
 import leaf/model/[metadata, record]
 import leaf/model/adapters/norm_sqlite
 import leaf/sqlite
-import ./model_fixtures
+import ./[model_fixtures, model_compile_support]
 
 type ScalarRecord = ref object of Record
   text: string
@@ -94,3 +94,9 @@ suite "model declarations":
       checkpoint output
       check code != 0
       check "invalid.nim" in output
+
+  test "legal business field names do not collide with generated parameters or getters":
+    for field in ["modelType", "errors", "originalValues", "isDestroyed"]:
+      let compiled = compileModelFailure("type Good = ref object of Record\n  " & field & ": string\ndefineModel(Good, table=\"good\")\nlet value = Good.build(" & field & "=\"business\")\nvalue.saveOrRaise()\nvalue.reload()\nvalue.destroyOrRaise()")
+      checkpoint compiled.output
+      check compiled.code == 0

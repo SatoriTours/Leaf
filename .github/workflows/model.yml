@@ -31,4 +31,4 @@ jobs:
           git archive HEAD | tar -x -C target/model-source-archive
           cd target/model-source-archive
           export NIM="$(command -v nim)"
-          nim c -r --skipUserCfg:on --skipParentCfg:on --out:target/nim/model_runner scripts/test.nim --model-only
+          nim c -r --skipUserCfg:on --skipParentCfg:on --nimcache:target/nim/runner-cache --out:target/nim/model_runner scripts/test.nim --model-only

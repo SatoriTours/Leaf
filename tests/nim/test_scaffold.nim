@@ -216,6 +216,7 @@ else: doAssert false
     require leaf_cli.main(@["g", "scaffold", app]) == 0
     for name in ["Node", "State", "PageDefinition", "Draft", "Panel", "System", "ValueError", "Database", "SqlValue", "Migration"]:
       require leaf_cli.main(@["g", "scaffold", name, "label:string", "--project", app]) == 0
+    require leaf_cli.main(@["g", "scaffold", "Issue", "errors:string", "changed:bool", "--project", app]) == 0
     let binary = app / "target/check".addFileExt(ExeExt)
     createDir(binary.parentDir)
     let compiled = runChild(compiler(), @["c", "--path:" & sourceRoot,
@@ -225,7 +226,7 @@ else: doAssert false
     let checked = runChild(binary, @["--check"], app)
     checkpoint checked.output
     check checked.code == 0
-    for name in ["databases", "sql_values", "migrations"]:
+    for name in ["databases", "sql_values", "migrations", "issues"]:
       let tested = runChild(compiler(), @["c", "-r", "--path:" & sourceRoot,
         "--nimcache:" & app / "target/test-cache", "--out:" & app / "target" / name,
         app / "tests" / ("test_" & name & ".nim")], app)

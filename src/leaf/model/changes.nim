@@ -1,22 +1,23 @@
+import ./record as record_state
 import std/options
 import ../sqlite
-import ./[record, metadata]
+import ./[metadata]
 export FieldChange, ChangeSet
 
 proc changes*[T: Record](record: T): ChangeSet =
   mixin modelFields, modelValues
   record.requireRecord()
   let current = modelValues(record)
-  let previous = record.originalValues
+  let previous = record_state.originalValues(record)
   for field in modelFields(T):
     if field.frameworkManaged: continue
     let value = current.valueFor(field.name)
-    let original = if record.isNewRecord: none(SqlValue)
+    let original = if record_state.isNewRecord(record): none(SqlValue)
       else: some(previous.valueFor(field.name))
     if original.isNone or not sqlite.`==`(original.get, value):
       result.add(FieldChange(field: field.name, before: original, after: some(value)))
 
-proc changed*[T: Record](record: T): bool = record.changes.len > 0
+proc changed*[T: Record](record: T): bool = changes(record).len > 0
 
 proc dupRecord*[T: Record](record: T): T =
   mixin modelValues, modelFields, assignModelValues

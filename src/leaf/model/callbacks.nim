@@ -1,4 +1,5 @@
-import ./[record, metadata]
+import ./record as record_state
+import ./[metadata]
 
 type
   OperationKind* = enum createOperation, updateOperation, destroyOperation
@@ -24,7 +25,7 @@ proc runCallbacks*(record: Record, phase: CallbackPhase, event: ModelEvent = nil
 
 proc invokeCallback*[T: Record](record: T, phase: CallbackPhase,
                                callback: proc(record: T) {.closure.}) =
-  if phase.isBefore and record.operationAborted: return
+  if phase.isBefore and record_state.operationAborted(record): return
   record.setCancellationAllowed(phase.isBefore)
   try: callback(record)
   finally: record.setCancellationAllowed(false)

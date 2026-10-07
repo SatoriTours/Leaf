@@ -1,6 +1,8 @@
+import ./changes as dirty_tracking
+import ./record as record_state
 import std/[sequtils, strutils, options, times]
 import ../sqlite
-import ./[record, metadata, context, errors, changes, callbacks, validation, transactions]
+import ./[metadata, context, errors, callbacks, validation, transactions]
 import ./adapters/norm_sqlite
 
 proc selectedColumns*[T: Record](_: typedesc[T]): string =
@@ -20,11 +22,11 @@ proc find*[T: Record](_: typedesc[T], db: Database, id: int64): T =
 
 proc writtenChanges[T: Record](record: T, values: FieldValues): ChangeSet =
   mixin modelFields
-  let baseline = record.originalValues
+  let baseline = record_state.originalValues(record)
   for field in modelFields(T):
     if field.name == "id": continue
     let value = values.valueFor(field.name)
-    let previous = if record.isNewRecord: none(SqlValue) else: some(baseline.valueFor(field.name))
+    let previous = if record_state.isNewRecord(record): none(SqlValue) else: some(baseline.valueFor(field.name))
     if previous.isNone or not sqlite.`==`(previous.get, value):
       result.add(FieldChange(field: field.name, before: previous, after: some(value)))
 
@@ -37,7 +39,7 @@ proc queueCallbacks[T: Record](record: T, event: ModelEvent) =
 proc save*[T: Record](record: T): bool =
   mixin modelTable, modelValues, toStorage, runCallbacks
   record.requireRecord()
-  if record.isDestroyed: raise newException(ModelUsageError, "cannot save a destroyed record")
+  if record_state.isDestroyed(record): raise newException(ModelUsageError, "cannot save a destroyed record")
   let db = currentDatabase()
   record.beginOperation(db)
   try:
@@ -48,23 +50,23 @@ proc save*[T: Record](record: T): bool =
       if not validateInOperation(record):
         frame.rollbackFrame()
         return false
-      let inserting = record.isNewRecord
+      let inserting = record_state.isNewRecord(record)
       runCallbacks(record, beforeSavePhase)
-      if not record.operationAborted:
+      if not record_state.operationAborted(record):
         runCallbacks(record, if inserting: beforeCreatePhase else: beforeUpdatePhase)
-      if record.operationAborted:
+      if record_state.operationAborted(record):
         frame.rollbackFrame()
         return false
-      let dirty = record.changes
+      let dirty = dirty_tracking.changes(record)
       when T is TimestampedRecord:
         if inserting:
           let timestamp = now().toTime.toUnixFloat.fromUnixFloat.utc
           record.created_at = some(timestamp)
           record.updated_at = some(timestamp)
         else:
-          record.created_at = fieldFromValue(record.originalValues.valueFor("created_at"), Option[DateTime])
+          record.created_at = fieldFromValue(record_state.originalValues(record).valueFor("created_at"), Option[DateTime])
           record.updated_at = if dirty.len > 0: some(now().toTime.toUnixFloat.fromUnixFloat.utc)
-            else: fieldFromValue(record.originalValues.valueFor("updated_at"), Option[DateTime])
+            else: fieldFromValue(record_state.originalValues(record).valueFor("updated_at"), Option[DateTime])
       let values = modelValues(record)
       let delta = writtenChanges(record, values)
       if inserting:
@@ -101,8 +103,8 @@ proc save*[T: Record](record: T): bool =
 
 proc saveOrRaise*[T: Record](record: T) =
   if not record.save():
-    if record.operationAborted: raise newException(RecordNotSaved, "save cancelled by before callback")
-    raise newException(RecordInvalid, record.errors.fullMessages.join("\n"))
+    if record_state.operationAborted(record): raise newException(RecordNotSaved, "save cancelled by before callback")
+    raise newException(RecordInvalid, record_state.errors(record).fullMessages.join("\n"))
 
 proc save*[T: Record](record: T, db: Database): bool =
   withDatabase(db): result = record.save()
@@ -112,7 +114,7 @@ proc saveOrRaise*[T: Record](record: T, db: Database) =
 proc reload*[T: Record](record: T) =
   mixin modelValues, assignModelValues
   record.requireRecord()
-  if not record.isPersisted: raise newException(ModelUsageError, "reload requires a persisted record")
+  if not record_state.isPersisted(record): raise newException(ModelUsageError, "reload requires a persisted record")
   let db = currentDatabase()
   record.beginOperation(db)
   try:
@@ -120,7 +122,7 @@ proc reload*[T: Record](record: T) =
     let values = modelValues(loaded)
     assignModelValues(record, values)
     record.markLoaded(db, loaded.id, values)
-    record.errors.clear()
+    record_state.errors(record).clear()
   finally: record.endOperation()
 proc reload*[T: Record](record: T, db: Database) =
   withDatabase(db): record.reload()
@@ -128,7 +130,7 @@ proc reload*[T: Record](record: T, db: Database) =
 proc destroy*[T: Record](record: T): bool =
   mixin modelTable, runCallbacks
   record.requireRecord()
-  if record.isDestroyed: raise newException(ModelUsageError, "record is already destroyed")
+  if record_state.isDestroyed(record): raise newException(ModelUsageError, "record is already destroyed")
   let db = currentDatabase()
   record.beginOperation(db)
   try:
@@ -137,10 +139,10 @@ proc destroy*[T: Record](record: T): bool =
       let state = captureState(record)
       enlist(record, proc() = restoreState(record, state))
       runCallbacks(record, beforeDestroyPhase)
-      if record.operationAborted:
+      if record_state.operationAborted(record):
         frame.rollbackFrame()
         return false
-      if record.isPersisted:
+      if record_state.isPersisted(record):
         if db.executeAffected("DELETE FROM " & quoteIdentifier(modelTable(T)) & " WHERE \"id\"=?", @[dbValue(record.id)]) != 1:
           raise newException(RecordNotFound, "record disappeared before destroy")
         record.queueCallbacks(newModelEvent(destroyOperation, @[]))

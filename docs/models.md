@@ -126,7 +126,7 @@ withDatabase(db):
 
 默认 id ASC；显式排序在没有 id 时补 id ASC，形成稳定排序。last 会反转全部排序并加 LIMIT，返回列表时恢复原顺序。已有 limit/offset 时先限定原窗口，再取首尾。n=0 返回空列表，负数报 ModelUsageError；重复 limit/offset 替换旧值，重复 orderBy 追加。
 
-count/exists 统计筛选条件，忽略排序和分页。Query 是不可变描述，分支不会污染原查询；它捕获建立时的连接，离开作用域后仍可执行终结操作。若在另一连接的活动事务内执行、连接已关闭或跨线程，则拒绝。字段名如 count 会遮蔽 Nim 的点简写，可用 `count(Metric)` 消除歧义。
+count/exists 统计筛选条件，忽略排序和分页。Query 是不可变描述，分支不会污染原查询；它捕获建立时的连接，离开作用域后仍可执行终结操作。若在另一连接的活动事务内执行、连接已关闭或跨线程，则拒绝。同名业务字段会遮蔽 Nim 的点简写，例如 count 用 `count(Metric)`，errors 用 `errors(task)`；内部持久化始终使用框架状态，不受这些字段影响。
 
 rawQuery 是独立受控入口，调用方必须选齐所有持久列，且按模型声明映射顺序排列；按类型和列数校验结果。不要用它构造部分模型或拼接用户输入。
 
@@ -155,6 +155,6 @@ withDatabase(db):
 
 每次 save/destroy 自带事务范围，覆盖校验和普通回调。外层用 BEGIN IMMEDIATE，嵌套用 SAVEPOINT。普通退出或提前 return 提交，异常回滚；false 只撤销当前操作的内部 savepoint，OrRaise 传播异常可使外层回滚。
 
-回滚恢复框架管理的 id、生命周期、时间和 baseline，保留业务输入与 errors。afterCommit 到最外层提交后才执行；每次成功 SQL 写入保留独立事件，按操作顺序派发。提交后通知失败仍执行剩余通知，汇总成 PostCommitError，committed 为 true；数据库已提交，不再回滚。afterRollback 在状态恢复后执行，其错误不掩盖原始失败。
+回滚恢复框架管理的 id、生命周期、时间和 baseline，保留业务输入与 errors。直接通过底层 SQL 修改记录后，需 reload 更新对象快照。afterCommit 到最外层提交后才执行；每次成功 SQL 写入保留独立事件，按操作顺序派发。提交后通知失败仍执行剩余通知，汇总成 PostCommitError，committed 为 true；数据库已提交，不再回滚；页面应完成成功保存后的草稿清理和跳转，再显示通知错误，避免把已提交创建当作未保存重试。afterRollback 在状态恢复后执行，其错误不掩盖原始失败。
 
 首版不包括关联、自动 schema 建表、连接池、异步 ORM、批量写入及乐观锁；后续可以在当前 Record/Query 接口上增量增加。

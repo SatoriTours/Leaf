@@ -10,6 +10,9 @@ proc addTask(state: HomeState) =
       state.draft = ""
       state.error = ""
     else: state.error = task.errors.fullMessages.join("\n")
+  except PostCommitError as error:
+    state.draft = ""
+    state.error = error.msg
   except CatchableError as error: state.error = error.msg
 
 proc toggleTask(state: HomeState, id: int64, done: bool) =
@@ -18,12 +21,14 @@ proc toggleTask(state: HomeState, id: int64, done: bool) =
     task.done = done
     if task.save(): state.error = ""
     else: state.error = task.errors.fullMessages.join("\n")
+  except PostCommitError as error: state.error = error.msg
   except CatchableError as error: state.error = error.msg
 
 proc removeTask(state: HomeState, id: int64) =
   try:
     Task.find(id).destroyOrRaise()
     state.error = ""
+  except PostCommitError as error: state.error = error.msg
   except CatchableError as error: state.error = error.msg
 
 proc visibleTasks(state: HomeState, query: string): seq[Task] =

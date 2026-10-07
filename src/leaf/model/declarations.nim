@@ -179,7 +179,10 @@ macro defineModel*(T: typedesc, table: static[string], body: untyped = nil): unt
   seen.incl("id")
   let storage = genSym(nskType, $symbol & "Storage")
   var recordList = newNimNode(nnkRecList)
-  var params = @[symbol, newIdentDefs(ident"modelType", newTree(nnkBracketExpr, ident"typedesc", symbol))]
+  var receiverName = "modelType"
+  while fields.anyIt(normalized($it[0]) == normalized(receiverName)):
+    receiverName.add("Receiver")
+  var params = @[symbol, newIdentDefs(genSym(nskParam, receiverName), newTree(nnkBracketExpr, ident"typedesc", symbol))]
   var constructor = newTree(nnkObjConstr, symbol)
   var fieldList = newNimNode(nnkBracket)
   var values = newNimNode(nnkBracket)
@@ -248,7 +251,9 @@ macro defineModel*(T: typedesc, table: static[string], body: untyped = nil): unt
     var creation = newStmtList(newAssignment(ident"result", constructor.copyNimTree))
     if operation == "create": creation.add(newTree(nnkDiscardStmt, newCall(bindSym"save", ident"result")))
     else: creation.add(newCall(bindSym"saveOrRaise", ident"result"))
-    result.add(newProc(newTree(nnkPostfix, ident"*", ident(operation)), params.mapIt(it.copyNimTree), creation))
+    var creationParams = params.mapIt(it.copyNimTree)
+    creationParams[1][0] = genSym(nskParam, receiverName)
+    result.add(newProc(newTree(nnkPostfix, ident"*", ident(operation)), creationParams, creation))
 
 proc assignAndSave(record: NimNode, arguments: NimNode, raising: bool): NimNode {.compileTime.} =
   let symbol = modelSymbol(record)

@@ -90,3 +90,50 @@ suite "model scaffold versions":
       expect CatchableError:
         discard generateScaffold(ScaffoldOptions(target: "Note", project: app, fields: @["title:string"]))
       check not fileExists(app / "app/models/note.nim")
+
+  test "generated resource editor completes committed writes even when notifications fail":
+    let app = base / "notifications"
+    discard generateScaffold(ScaffoldOptions(target: app))
+    discard generateScaffold(ScaffoldOptions(target: "Note", project: app, fields: @["title:string"]))
+    let modelPath = app / "app/models/note.nim"
+    var declaration = readFile(modelPath)
+    declaration = declaration.replace("defineModel(Note,", "proc notify(record: Note, event: ModelEvent) =\n  raise newException(ValueError, \"notification unavailable\")\n\ndefineModel(Note,")
+    declaration = declaration.replace("  beforeValidation normalize", "  beforeValidation normalize\n  afterCommit notify")
+    writeFile(modelPath, declaration)
+    let testPath = app / "tests/notifications.nim"
+    writeFile(testPath, """
+import std/strutils
+import leaf
+import ../app/application
+import ../config/database
+let db = openApplicationDatabase(":memory:")
+let rt = newRuntime(createApplication(db))
+proc click(key: string) = doAssert rt.dispatch(key, Event(kind: click))
+proc change(key, value: string) = doAssert rt.dispatch(key, Event(kind: change, value: value))
+click("nav_notes")
+click("notes_new")
+change("notes_field_title", "Committed note")
+click("notes_save")
+doAssert db.query("SELECT COUNT(*) FROM notes")[0][0].asInt64 == 1'i64
+doAssert rt.find("notes_title_1").node.text == "Committed note"
+doAssert "committed" in rt.find("notes_error").node.text
+click("notes_edit_1")
+change("notes_field_title", "Committed update")
+click("notes_save")
+doAssert rt.find("notes_title_1").node.text == "Committed update"
+doAssert db.query("SELECT COUNT(*) FROM notes")[0][0].asInt64 == 1'i64
+click("notes_delete_1")
+doAssert db.query("SELECT COUNT(*) FROM notes")[0][0].asInt64 == 0'i64
+doAssert rt.find("notes_empty").node.text.len > 0
+doAssert "committed" in rt.find("notes_error").node.text
+db.close()
+""")
+    let binary = app / "target/notifications".addFileExt(ExeExt)
+    createDir(binary.parentDir)
+    let source = currentSourcePath().parentDir.parentDir.parentDir / "src"
+    let child = startManaged(compiler(), @["c", "-r", "--path:" & source,
+      "--nimcache:" & app / "target/cache", "--out:" & binary, testPath], app)
+    while not child.poll(): sleep(10)
+    checkpoint child.output.diagnosticText()
+    check child.code == 0
+    child.close()

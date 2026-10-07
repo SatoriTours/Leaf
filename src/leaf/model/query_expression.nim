@@ -72,6 +72,12 @@ proc hasFieldReference(node: NimNode): bool {.compileTime.} =
 proc compilePredicateNode*(symbol, expression: NimNode): NimNode {.compileTime.} =
   var node = expression
   while node.kind == nnkPar and node.len == 1: node = node[0]
+  # Normalize Nim method syntax into the same field/function representation.
+  if node.kind in {nnkCall, nnkCommand} and node[0].kind == nnkDotExpr:
+    let head = node[0]
+    var normalized = newCall(head[1], head[0])
+    for i in 1..<node.len: normalized.add(node[i])
+    node = normalized
   case node.kind
   of nnkInfix:
     let operator = $node[0]

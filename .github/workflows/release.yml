@@ -87,6 +87,10 @@ jobs:
         run: ./scripts/prepare_windows_https.ps1
       - name: 发布与安装脚本测试
         run: nim c -r --out:target/nim/test_runner scripts/test.nim --release-only
+      - name: Model 与 headless 应用回归
+        run: |
+          export NIM="$(command -v nim)"
+          nim c -r --out:target/nim/model_runner scripts/test.nim --model-only
       - name: 构建和测试 Unix 桥接
         if: runner.os != 'Windows'
         run: |

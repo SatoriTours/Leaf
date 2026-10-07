@@ -106,11 +106,11 @@ leaf g scaffold Contact name:string active:bool --project my-app --dry-run
 
 ## 数据与项目配置
 
-默认服务使用 SQLite。模型负责类型与校验，服务通过参数化 SQL 读写数据库；已保存记录在退出或 watch 替换进程后保留。草稿、搜索条件和显示设置属于页面状态，重启后重置。id 使用 SQLite AUTOINCREMENT，删除后不会复用旧 id。
+默认 Model 使用 SQLite，类型声明与公共持久化层共同负责校验和参数化读写；已保存记录在退出或 watch 替换进程后保留。草稿、搜索条件和显示设置属于页面状态，重启后重置。schema 2 的 int64 id 使用 INTEGER PRIMARY KEY，删除后可能复用；schema 1 继续使用原 service 与 AUTOINCREMENT。
 
-`config/database.nim` 默认使用 `getDataDir() / <应用名> / application.sqlite3`，导入配置不会打开数据库。`createApplication()` 打开一份连接、执行迁移，再传给页面工厂和服务。连接由引用持有，释放时关闭；自建连接也可显式调用 `close()`。数据库父目录首次打开时自动创建。
+`config/database.nim` 默认使用 `getDataDir() / <应用名> / application.sqlite3`，导入配置不会打开数据库。`createApplication()` 打开一份连接、执行迁移，再为页面创建、渲染和事件绑定连接作用域。连接由引用持有，释放时关闭；自建连接也可显式调用 `close()`。数据库父目录首次打开时自动创建。
 
-可以设置 `LEAF_DATABASE_PATH=/absolute/path/application.sqlite3` 覆盖路径；测试使用 `openApplicationDatabase(":memory:")` 获得隔离的 SQLite 数据库，再传给 `createApplication(connection)` 或服务构造函数。`--check` 也会初始化数据库，检查时请使用独立测试路径。
+可以设置 `LEAF_DATABASE_PATH=/absolute/path/application.sqlite3` 覆盖路径；测试使用 `openApplicationDatabase(":memory:")` 获得隔离的 SQLite 数据库，再传给 `createApplication(connection)`。schema 1 也保留 service 构造函数。`--check` 也会初始化数据库，检查时请使用独立测试路径。
 
 `app/generated/migrations.nim` 在编译时读取并嵌入 `.up.sql`，应用启动时按版本执行待应用的迁移。`leaf_schema_migrations` 记录已应用版本、名称和 SQL；重复启动不重复执行，已应用迁移被修改或从应用移除时会报错。每个版本在事务中执行，失败会回滚该版本。迁移文件不要自行写 BEGIN、COMMIT、ROLLBACK 或 SAVEPOINT；事务由执行器管理。新增资源后重新构建/启动即可建表，生成命令本身不打开数据库。`.down.sql` 可用于人工维护，不会在启动时自动回滚，也没有独立的 `leaf db migrate` 命令。
 

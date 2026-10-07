@@ -106,6 +106,7 @@ suite "direct model queries":
       discard NullableQuery.createOrRaise(label = some("value"))
       check NullableQuery.where(label = none(string)).count == 1'i64
       check NullableQuery.where(isNull(it.label)).count == 1'i64
+      check NullableQuery.where(it.label.isNull()).count == 1'i64
       check NullableQuery.where(it.label != none(string)).count == 1'i64
       check NullableQuery.pluck(it.label) == @[none(string), some("value")]
 
@@ -117,6 +118,9 @@ suite "direct model queries":
       discard Task.createOrRaise(title = "100%_\\done")
       discard Task.createOrRaise(title = "100XXdone")
       check Task.where(contains(it.title, "%_\\")).count == 1'i64
+      check Task.where(it.title.contains("%_\\")).count == 1'i64
+      check Task.where(it.title.startsWith("100%")).count == 1'i64
+      check Task.where(it.title.endsWith("\\done")).count == 1'i64
       check Task.where(startsWith(it.title, "100%")).count == 1'i64
       check Task.where(endsWith(it.title, "\\done")).count == 1'i64
       discard Task.createOrRaise(title = "ABC")
