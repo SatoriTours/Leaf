@@ -1,6 +1,7 @@
 import std/[unittest, json, os, tempfiles]
 import leaf
-import leaf/diagnostics
+import leaf/[diagnostics, sqlite]
+import leaf/model/context
 
 proc app(render: RenderProc): Application =
   Application(title: "提交门", width: 640, height: 480, render: render)
@@ -203,3 +204,165 @@ suite "Runtime candidate commit gate and accepted revision":
     check runtime.find("count").node.text == "1"
     check clicks == 1
     diagnostics.close()
+
+  test "first committer install runs inside the application execution scope":
+    var depth = 0
+    var observed = -1
+
+    proc scope(body: proc() {.closure.}) =
+      inc depth
+      try: body()
+      finally: dec depth
+
+    proc render(ctx: BuildContext): Node = text("x", key = "x")
+
+    let runtime = newRuntime(Application(title: "scope", width: 640, height: 480,
+      render: render, executionScope: scope))
+    runtime.setCommitter(proc(accepted: Runtime, candidate: Runtime) =
+      if accepted == nil: observed = depth)
+    check observed == 1
+    check depth == 0
+
+  test "first committer install sees the model database context":
+    let database = openDatabase(":memory:")
+    defer: database.close()
+    var observed = false
+
+    proc scope(body: proc() {.closure.}) =
+      withDatabase(database): body()
+
+    proc render(ctx: BuildContext): Node = text("x", key = "x")
+
+    let runtime = newRuntime(Application(title: "model", width: 640, height: 480,
+      render: render, executionScope: scope))
+    runtime.setCommitter(proc(accepted: Runtime, candidate: Runtime) =
+      if accepted == nil:
+        observed = currentDatabase() == database)
+    check observed
+
+  test "first committer install candidate carries the accepted revision":
+    var candidateRevision = 0'u64
+    var proposedRevision = 0'u64
+
+    proc render(ctx: BuildContext): Node = text("x", key = "x")
+
+    let runtime = newRuntime(app(render))
+    check runtime.refresh()
+    let accepted = runtime.acceptedRevision
+    check accepted >= 2
+    runtime.setCommitter(proc(acceptedRuntime: Runtime, candidate: Runtime) =
+      if acceptedRuntime == nil:
+        candidateRevision = candidate.acceptedRevision
+        proposedRevision = candidate.proposedRevision)
+    check candidateRevision == accepted
+    check proposedRevision == 0
+    check runtime.acceptedRevision == accepted
+
+  test "successful first install publishes prepared rows":
+    var backendRows = -1
+    var backendProposed = 0'u64
+
+    proc render(ctx: BuildContext): Node =
+      column(@[virtualList("items", @["a", "b"],
+        proc(index: int): Node = text("row " & $index, key = "row"))])
+
+    let runtime = newRuntime(app(render))
+    let accepted = runtime.acceptedRevision
+    check runtime.find("items").children.len == 0
+    runtime.setCommitter(proc(acceptedRuntime: Runtime, candidate: Runtime) =
+      if acceptedRuntime != nil: return
+      discard candidate.materialize("items", 0, 1)
+      backendRows = candidate.find("items").children.len
+      backendProposed = candidate.proposedRevision)
+    check backendRows == 1
+    check backendProposed == accepted + 1
+    check runtime.find("items").children.len == 1
+    check runtime.acceptedRevision == backendProposed
+    # The published index resolves the prepared row for business events.
+    check runtime.find("a").node.text == "row 0"
+
+  test "failed first install leaves the accepted description untouched":
+    proc render(ctx: BuildContext): Node =
+      column(@[virtualList("items", @["a", "b"],
+        proc(index: int): Node = text("row " & $index, key = "row"))])
+
+    let runtime = newRuntime(app(render))
+    let accepted = runtime.acceptedRevision
+    let before = runtime.snapshot.toJson()
+    expect UiError:
+      runtime.setCommitter(proc(acceptedRuntime: Runtime, candidate: Runtime) =
+        if acceptedRuntime != nil: return
+        discard candidate.materialize("items", 0, 1)
+        raise newException(UiError, "mount failed"))
+    check runtime.find("items").children.len == 0
+    check runtime.snapshot.toJson() == before
+    check runtime.acceptedRevision == accepted
+    # A failed install does not retain the hook.
+    runtime.setCommitter(proc(acceptedRuntime: Runtime, candidate: Runtime) = discard)
+
+  test "candidate preparation during commit keeps the proposed revision stable":
+    var proposedBefore, proposedAfter = 0'u64
+    var acceptedAfter = 0'u64
+    var commits = 0
+
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        virtualList("items", @["a", "b"],
+          proc(index: int): Node = text("row " & $index, key = "row")),
+        button("go", key = "go", onClick = proc(e: Event) = discard)])
+
+    let runtime = newRuntime(app(render))
+    runtime.setCommitter(proc(acceptedRuntime: Runtime, candidate: Runtime) =
+      if acceptedRuntime == nil: return
+      inc commits
+      proposedBefore = candidate.proposedRevision
+      discard candidate.materialize("items", 0, 1)
+      proposedAfter = candidate.proposedRevision
+      acceptedAfter = candidate.acceptedRevision)
+    let accepted = runtime.acceptedRevision
+    check runtime.dispatch("go", Event(kind: click))
+    check commits == 1
+    check acceptedAfter == accepted
+    check proposedBefore == accepted + 1
+    check proposedAfter == proposedBefore
+    check runtime.acceptedRevision == accepted + 1
+    check runtime.find("items").children.len == 1
+
+  test "no-op preparer does not publish or advance the accepted revision":
+    var commits = 0
+
+    proc render(ctx: BuildContext): Node =
+      column(@[virtualList("items", @["a", "b"],
+        proc(index: int): Node = text("row " & $index, key = "row"))])
+
+    let runtime = newRuntime(app(render))
+    runtime.setCommitter(proc(acceptedRuntime: Runtime, candidate: Runtime) =
+      if acceptedRuntime != nil: inc commits)
+    let accepted = runtime.acceptedRevision
+    let before = runtime.snapshot.toJson()
+    runtime.setPreparer(proc(candidate: Runtime) = discard)
+    check runtime.acceptedRevision == accepted
+    check commits == 0
+    check runtime.snapshot.toJson() == before
+    runtime.prepare()
+    check runtime.acceptedRevision == accepted
+    check commits == 0
+    runtime.setPreparer(nil)
+    check runtime.acceptedRevision == accepted
+
+  test "preparer with prepared rows publishes exactly once":
+    var commits = 0
+
+    proc render(ctx: BuildContext): Node =
+      column(@[virtualList("items", @["a", "b"],
+        proc(index: int): Node = text("row " & $index, key = "row"))])
+
+    let runtime = newRuntime(app(render))
+    runtime.setCommitter(proc(acceptedRuntime: Runtime, candidate: Runtime) =
+      if acceptedRuntime != nil: inc commits)
+    let accepted = runtime.acceptedRevision
+    runtime.setPreparer(proc(candidate: Runtime) =
+      discard candidate.materialize("items", 0, 1))
+    check commits == 1
+    check runtime.acceptedRevision == accepted + 1
+    check runtime.find("items").children.len == 1

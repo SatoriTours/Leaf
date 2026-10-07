@@ -92,6 +92,8 @@ type
     preparer: RuntimePreparer
     committer: RuntimeCommitter
     revision: uint64
+    proposed: uint64
+    stagingChanged: bool
     eventsFrozen: bool
     frozenReason: string
     isCandidate: bool
@@ -292,6 +294,10 @@ template inExecutionScope(runtime: Runtime, body: untyped) =
 
 proc acceptedRevision*(runtime: Runtime): uint64 = runtime.revision
 
+proc proposedRevision*(runtime: Runtime): uint64 = runtime.proposed
+
+proc stagingChanged*(runtime: Runtime): bool = runtime.stagingChanged
+
 proc eventsFrozen*(runtime: Runtime): bool = runtime.eventsFrozen
 
 proc freezeEvents*(runtime: Runtime, reason: string) =
@@ -315,16 +321,20 @@ proc candidateFrom(runtime: Runtime): Runtime =
   Runtime(app: runtime.app, current: runtime.current, index: runtime.index,
     keys: runtime.keys, rowCaches: runtime.rowCaches, counters: runtime.counters,
     rowClock: runtime.rowClock, validator: runtime.validator,
-    descriptionBytes: runtime.descriptionBytes, isCandidate: true)
+    revision: runtime.revision, descriptionBytes: runtime.descriptionBytes,
+    isCandidate: true)
 
-proc gateAndPublish(runtime: Runtime, candidate: Runtime) =
-  ## The single publish boundary. The committer observes the candidate and may
-  ## reject it by raising before any accepted state changes; the proposed
-  ## accepted revision is `accepted.revision + 1`. A successful publication
-  ## advances the accepted revision by exactly one.
-  candidate.revision = runtime.revision + 1
-  if runtime.committer != nil:
-    runtime.committer(runtime, candidate)
+proc markStaged(runtime: Runtime) =
+  ## Record that an isolated staging runtime produced an actual prepared
+  ## result. The first visible change allocates the proposed revision; any
+  ## later preparation during the same staging never advances it again.
+  runtime.stagingChanged = true
+  if runtime.proposed == 0:
+    runtime.proposed = runtime.revision + 1
+
+proc publishCandidate(runtime: Runtime, candidate: Runtime, proposed: uint64) =
+  ## Move accepted state only. The external callback has already run exactly
+  ## once; this never renders or re-invokes the committer.
   runtime.current = candidate.current
   runtime.index = move(candidate.index)
   runtime.keys = move(candidate.keys)
@@ -332,7 +342,18 @@ proc gateAndPublish(runtime: Runtime, candidate: Runtime) =
   runtime.rowClock = candidate.rowClock
   runtime.counters = candidate.counters
   runtime.descriptionBytes = candidate.descriptionBytes
-  runtime.revision = candidate.revision
+  runtime.revision = proposed
+
+proc gateAndPublish(runtime: Runtime, candidate: Runtime) =
+  ## The single publish boundary. The proposed revision is allocated before
+  ## the external callback and stays stable for the whole staging, so nested
+  ## candidate preparation cannot advance it. A successful publication
+  ## advances the accepted revision by exactly one.
+  let proposed = runtime.revision + 1
+  candidate.proposed = proposed
+  if runtime.committer != nil:
+    runtime.committer(runtime, candidate)
+  runtime.publishCandidate(candidate, proposed)
 
 proc postCommitDiagnostics(runtime: Runtime) =
   ## Diagnostics run after acceptance. Their failure must never look like a
@@ -377,7 +398,7 @@ proc refreshImpl(runtime: Runtime): bool =
     var candidate = Runtime(app: runtime.app, current: snapshot,
       index: move(index), keys: move(keys), rowCaches: move(rowCaches),
       counters: runtime.counters, rowClock: runtime.rowClock, validator: runtime.validator,
-      descriptionBytes: descriptionBytes, isCandidate: true)
+      revision: runtime.revision, descriptionBytes: descriptionBytes, isCandidate: true)
     candidate.counters.cachedItems = cachedItems
     candidate.counters.cachedRowBytes = cachedBytes
     candidate.counters.mountedNodes = count
@@ -437,13 +458,7 @@ proc setValidatorImpl(runtime: Runtime, validator: SnapshotValidator) =
 proc setValidator*(runtime: Runtime, validator: SnapshotValidator) =
   inExecutionScope(runtime): runtime.setValidatorImpl(validator)
 
-proc setCommitter*(runtime: Runtime, committer: RuntimeCommitter) =
-  ## Install the backend commit hook. The first non-nil install mounts the
-  ## already accepted description into an isolated candidate and calls the
-  ## committer with `accepted = nil`; it performs no business render and does
-  ## not advance the accepted revision. A non-nil hook cannot be replaced
-  ## silently: unload the session hook with nil first. A failing install
-  ## leaves both the hook and the accepted description unchanged.
+proc setCommitterImpl(runtime: Runtime, committer: RuntimeCommitter) =
   if runtime.isCandidate: fail("candidate runtime cannot install a committer")
   if runtime.inUpdate: fail("cannot replace committer during update")
   if committer == nil:
@@ -455,21 +470,39 @@ proc setCommitter*(runtime: Runtime, committer: RuntimeCommitter) =
   runtime.inUpdate = true
   try:
     committer(nil, candidate)
+    # Publish only results the backend actually prepared. An untouched mount
+    # keeps the accepted revision and does not advance it.
+    if candidate.stagingChanged:
+      runtime.publishCandidate(candidate, candidate.proposed)
+      runtime.safeDump()
+    runtime.committer = committer
   finally:
     runtime.inUpdate = false
-  runtime.committer = committer
+
+proc setCommitter*(runtime: Runtime, committer: RuntimeCommitter) =
+  ## Install the backend commit hook. The whole install/uninstall phase runs
+  ## inside the application execution scope. The first non-nil install mounts
+  ## the already accepted description into an isolated candidate and calls the
+  ## committer with `accepted = nil`; it performs no business render. Prepared
+  ## visible rows are published once with a single revision advance; an
+  ## untouched mount keeps the accepted revision. A failing install leaves the
+  ## hook, description and revision unchanged. A non-nil hook cannot be
+  ## replaced silently: unload it with nil first.
+  inExecutionScope(runtime): runtime.setCommitterImpl(committer)
 
 proc prepareSnapshotImpl(runtime: Runtime, preparer: RuntimePreparer) =
   if runtime.isCandidate: fail("candidate runtime cannot prepare")
   if runtime.inUpdate: fail("cannot replace preparer during update")
-  if preparer != nil:
-    var candidate = runtime.candidateFrom()
-    runtime.inUpdate = true
-    try:
-      preparer(candidate)
+  if preparer == nil: return
+  var candidate = runtime.candidateFrom()
+  runtime.inUpdate = true
+  try:
+    preparer(candidate)
+    # A no-op preparer must not invoke the backend gate or advance revision.
+    if candidate.stagingChanged:
       runtime.gateAndPublish(candidate)
       runtime.safeDump()
-    finally: runtime.inUpdate = false
+  finally: runtime.inUpdate = false
 
 proc prepareSnapshot(runtime: Runtime, preparer: RuntimePreparer) =
   inExecutionScope(runtime): runtime.prepareSnapshotImpl(preparer)
@@ -646,7 +679,12 @@ proc materializeImpl(runtime: Runtime, key: string, first, finish: int,
                   protected: seq[int] = @[]): seq[MountedNode] =
   ## The accepted viewport travels through the same commit gate as refresh and
   ## prepare; a rejected list candidate leaves accepted rows and stats intact.
+  ## Preparing an isolated candidate is allowed and only stages its own state.
   if runtime.inUpdate: fail("reentrant list request")
+  if runtime.isCandidate:
+    result = materializeInto(runtime, key, first, finish, protected)
+    runtime.markStaged()
+    return
   var candidate = runtime.candidateFrom()
   runtime.inUpdate = true
   try:
