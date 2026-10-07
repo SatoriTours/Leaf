@@ -12,6 +12,17 @@ proc processEnvironment*(): StringTableRef =
   result = newStringTable(when defined(windows): modeCaseInsensitive else: modeCaseSensitive)
   for key, value in envPairs(): result[key] = value
 
+proc readCommandOutput*(stream: Stream): string =
+  # A Windows pipe can return a nonzero short read while its child is still
+  # writing. Drain until actual EOF before waiting for the process to exit.
+  var buffer: array[4096,char]
+  while true:
+    let received=stream.readData(addr buffer[0],buffer.len)
+    if received==0:break
+    let previous=result.len
+    result.setLen(previous+received)
+    copyMem(addr result[previous],addr buffer[0],received)
+
 proc runCommand*(command: string, arguments: seq[string] = @[], workingDir = "",
                  environment: StringTableRef = nil): CommandResult =
   var executable = command
@@ -29,7 +40,7 @@ proc runCommand*(command: string, arguments: seq[string] = @[], workingDir = "",
   let process = startProcess(executable, workingDir = workingDir, args = parameters,
     env = environment, options = {poUsePath, poStdErrToStdOut})
   defer: process.close()
-  result.output = process.outputStream.readAll()
+  result.output = readCommandOutput(process.outputStream)
   result.exitCode = process.waitForExit()
 
 proc checkedCommand*(command: string, arguments: seq[string] = @[], workingDir = "",

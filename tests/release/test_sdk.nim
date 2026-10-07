@@ -1,8 +1,84 @@
 ## Real archives and installers; file URLs keep tests independent of networking.
-import std/[unittest, os, strutils, tempfiles, json, strtabs]
+import std/[unittest, os, strutils, tempfiles, json, strtabs, streams]
 import ../../scripts/[package_sdk, smoke_sdk, verify_sdk_install]
 import ../../src/leaf/[checksum, archives]
 import ../nim/archive_reader
+when defined(windows): import std/winlean
+
+# A real child of this test binary exercises merged stdout/stderr without
+# requiring another tool or bypassing runCommand's process implementation.
+if paramCount()==1 and paramStr(1)=="--sdk-output-child":
+  stdout.write("EARLY|")
+  stdout.flushFile()
+  sleep(50)
+  stdout.write(repeat('A',131089))
+  stdout.flushFile()
+  stderr.write(repeat('B',131117))
+  stderr.flushFile()
+  stdout.write("|OUT-TAIL|")
+  stdout.flushFile()
+  stderr.write("|ERR-TAIL|")
+  stderr.flushFile()
+  quit(23)
+
+type ShortReadStream = ref object of StreamObj
+  data: string
+  position: int
+
+proc readShortChunk(stream: Stream, buffer: pointer, length: int): int {.gcsafe.} =
+  let source=ShortReadStream(stream)
+  result=min(length,min(3,source.data.len-source.position))
+  if result>0:
+    copyMem(buffer,unsafeAddr source.data[source.position],result)
+    source.position+=result
+
+
+
+# Test fixture utilities; never recursively remove a directory link's target.
+proc removeFixtureDirectoryLink(path: string) =
+  if not symlinkExists(path):
+    raise newException(ValueError,"Refusing to unlink an ordinary fixture path: " & path)
+  when defined(windows):
+    # RemoveDirectoryW unlinks a junction itself, without walking its target.
+    if removeDirectoryW(newWideCString(path)) == 0:
+      raiseOSError(osLastError(),path)
+  else:removeFile(path)
+
+proc runPowerShellFixture(pwsh, script: string, arguments: seq[string]): CommandResult =
+  let failureFile=script & ".failure.txt"
+  let marker="$ErrorActionPreference = 'Stop'"
+  let body=readFile(script)
+  doAssert body.count(marker)==1
+  # Stream.readAll can stop on a short Windows pipe read. Persist the full
+  # exception separately so early stdout cannot hide the actual assertion.
+  let diagnostics="""
+$PSStyle.OutputRendering = 'PlainText'
+$ErrorView = 'NormalView'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$LeafFailureFile = __FAILURE_FILE__
+trap {
+    $message = 'FIXTURE FAILURE: ' + $_.Exception.Message
+    $details = $message + "`n" + $_.InvocationInfo.PositionMessage + "`n"
+    if ($FixtureRoot) { $details += "FixtureRoot=[$FixtureRoot]; full=[$([IO.Path]::GetFullPath($FixtureRoot))]`n" }
+    if ($GitRoot) { $details += "GitRoot=[$GitRoot]; full=[$([IO.Path]::GetFullPath($GitRoot))]`n" }
+    [IO.File]::WriteAllText($LeafFailureFile, $details, [Text.UTF8Encoding]::new($false))
+    [Console]::Error.WriteLine($message)
+    exit 1
+}
+function AssertEqual($Actual, $Expected, $Message) {
+    if ($Actual -ne $Expected) { throw "$Message; actual=[$Actual]; expected=[$Expected]" }
+}
+function AssertFixturePath($Actual, $Expected, $Message) {
+    # Windows GetFullPath expands existing 8.3 names as well as separators.
+    # Keep raw spellings in failures; compare the same managed representation.
+    $actualFull = [IO.Path]::GetFullPath($Actual)
+    $expectedFull = [IO.Path]::GetFullPath($Expected)
+    AssertEqual $actualFull $expectedFull "$Message; raw actual=[$Actual]; raw expected=[$Expected]"
+}
+""".replace("__FAILURE_FILE__","'" & failureFile.replace("'","''") & "'")
+  writeFile(script,body.replace(marker,marker & "\n" & diagnostics))
+  result=runCommand(pwsh,@["-NoProfile","-File",script] & arguments)
+  if fileExists(failureFile):result.output.add("\n" & readFile(failureFile))
 
 type Fixture = object
   base, target, bridge, cli, nimRoot, output, extension: string
@@ -45,6 +121,21 @@ proc install(f: Fixture, channel = "release", shell = "sh"): CommandResult =
   runCommand(shell, @[RepositoryRoot / "install.sh", "--channel", channel,
     "--prefix", f.base / "installed SDK", "--bin-dir", f.base / "bin",
     "--download-base", fileUrl(f.base / "downloads"), "--no-path"], environment = environment)
+
+suite "SDK command output collection":
+  test "nonzero short reads preserve all bytes until EOF":
+    for payload in ["", "prefix 中文\0suffix", repeat('X',17003)]:
+      let input=ShortReadStream(data:payload,readDataImpl:readShortChunk)
+      let collected=readCommandOutput(input)
+      checkpoint "Expected bytes: " & $payload.len & "; received: " & $collected.len
+      let complete=collected==payload
+      check complete
+  test "real child drains delayed large stdout and stderr and preserves nonzero exit":
+    let executed=runCommand(getAppFilename(),@["--sdk-output-child"])
+    check executed.exitCode==23
+    check executed.output.len==262232
+    check executed.output=="EARLY|" & repeat('A',131089) & repeat('B',131117) &
+      "|OUT-TAIL||ERR-TAIL|"
 
 suite "SDK archive and native installer":
   setup:
@@ -196,6 +287,8 @@ suite "Relocated SDK real path boundaries":
     check not within(sdk/"missing-file",sdk)
   test "different root aliases resolve to the same SDK":
     let alias=base/"SDK alias 中文"
+    defer:
+      if symlinkExists(alias):removeFixtureDirectoryLink(alias)
     when defined(windows):
       let junction=runCommand("cmd.exe",@["/d","/c","mklink","/J",alias,sdk])
       checkpoint junction.output
@@ -205,6 +298,8 @@ suite "Relocated SDK real path boundaries":
     check within(alias/"toolchain"/"nim",sdk)
   test "real directory link escape and outside files remain rejected":
     let escaped=sdk/"escaped-directory"
+    defer:
+      if symlinkExists(escaped):removeFixtureDirectoryLink(escaped)
     when defined(windows):
       let junction=runCommand("cmd.exe",@["/d","/c","mklink","/J",escaped,sibling])
       checkpoint junction.output
@@ -216,6 +311,90 @@ suite "Relocated SDK real path boundaries":
     test "real file symlink escape is rejected":
       createSymlink(sibling/"nim",sdk/"escaped-file")
       check not within(sdk/"escaped-file",sdk)
+
+suite "SDK fixture safety and diagnostics":
+  test "directory link cleanup preserves an outside target and rejects ordinary directories":
+    let base=createTempDir("leaf cleanup 中文 space ", "")
+    let outside=createTempDir("leaf outside fixture 中文 ", "")
+    defer:removeDir(outside)
+    defer:removeDir(base)
+    writeFile(outside/"sentinel.txt","outside target must survive")
+    let link=base/"directory alias 中文"
+    when defined(windows):
+      discard checkedCommand("cmd.exe",@["/d","/c","mklink","/J",link,outside])
+    else:createSymlink(outside,link)
+    removeFixtureDirectoryLink(link)
+    check not symlinkExists(link)
+    check not dirExists(link)
+    check readFile(outside/"sentinel.txt")=="outside target must survive"
+    createDir(base/"ordinary")
+    writeFile(base/"ordinary"/"keep.txt","ordinary directory must survive")
+    expect ValueError:removeFixtureDirectoryLink(base/"ordinary")
+    check readFile(base/"ordinary"/"keep.txt")=="ordinary directory must survive"
+    expect ValueError:removeFixtureDirectoryLink(base/"ordinary"/"keep.txt")
+    check readFile(base/"ordinary"/"keep.txt")=="ordinary directory must survive"
+    # Recursive fixture cleanup after unlinking cannot touch the outside target.
+    removeDir(base)
+    check readFile(outside/"sentinel.txt")=="outside target must survive"
+  test "PowerShell fixture path comparison accepts aliases and rejects wrong locations":
+    let pwsh=findExe("pwsh")
+    if pwsh.len==0:
+      checkpoint "PowerShell unavailable; fixture path comparison not verified"
+      skip()
+    else:
+      let base=createTempDir("leaf path comparison 中文 space ", "")
+      defer:removeDir(base)
+      for prefix in ["ucrt64", "mingw64"]:createDir(base/prefix/"bin")
+      let script=base/"path_tests.ps1"
+      writeFile(script,"""
+param([string]$FixtureRoot)
+$ErrorActionPreference = 'Stop'
+$expected = Join-Path $FixtureRoot 'ucrt64/bin'
+$canonical = [IO.Path]::GetFullPath($expected)
+AssertFixturePath $canonical (Join-Path $FixtureRoot 'ucrt64/../ucrt64/bin') 'Equivalent existing location rejected'
+AssertFixturePath $canonical $expected 'Managed full path versus fixture alias rejected'
+if ($IsWindows) {
+    AssertFixturePath $canonical ($expected.Replace('\', '/')) 'Windows slash spelling rejected'
+}
+# Wrong prefix and a sibling name must remain different after normalization.
+foreach ($wrong in @('mingw64/bin', 'ucrt64-sibling/bin')) {
+    $caught = $false
+    try { AssertFixturePath $canonical (Join-Path $FixtureRoot $wrong) 'Wrong fixture location' }
+    catch {
+        $caught = $true
+        if ($_.Exception.Message -notlike '*actual=*expected=*') { throw 'Path mismatch lost actual/expected details' }
+    }
+    if (-not $caught) { throw ('Wrong fixture location accepted: ' + $wrong) }
+}
+'Equivalent locations accepted; wrong prefix and sibling rejected'
+""")
+      let executed=runPowerShellFixture(pwsh,script,@["-FixtureRoot",base])
+      checkpoint executed.output
+      check executed.exitCode==0
+
+  test "PowerShell failure persists full message after early stdout":
+    let pwsh=findExe("pwsh")
+    if pwsh.len==0:
+      checkpoint "PowerShell unavailable; diagnostic failure regression not verified"
+      skip()
+    else:
+      let base=createTempDir("leaf diagnostic 中文 space ", "")
+      defer:removeDir(base)
+      let script=base/"diagnostic_tests.ps1"
+      writeFile(script,"""
+param([string]$FixtureRoot)
+$ErrorActionPreference = 'Stop'
+'early stdout before exception'
+Start-Sleep -Milliseconds 40
+AssertEqual $FixtureRoot 'different target' 'diagnostic sentinel 中文'
+""")
+      let executed=runPowerShellFixture(pwsh,script,@["-FixtureRoot",base])
+      checkpoint executed.output
+      check executed.exitCode!=0
+      check fileExists(script & ".failure.txt")
+      check ("diagnostic sentinel 中文; actual=[" & base & "]; expected=[different target]") in executed.output
+      if fileExists(script & ".failure.txt"):
+        check "diagnostic sentinel 中文" in readFile(script & ".failure.txt")
 
 suite "Windows HTTPS preparation":
   test "new and legacy Git layouts and missing dependencies":
@@ -253,36 +432,36 @@ function Reject($Git, $Reason) {
 $current = Make-Git 'Git 中文 spaces new' 'ucrt64' 'etc/ssl/certs'
 $git = Join-Path $current 'cmd/git.exe'
 $runtime = Get-LeafGitHttpsRuntime -GitExecutable $git
-Assert ($runtime.OpenSslBin -eq (Join-Path $current 'ucrt64/bin')) 'New ucrt64 runtime not selected'
-Assert ($runtime.Certificates -eq (Join-Path $current 'ucrt64/etc/ssl/certs/ca-bundle.crt')) 'New CA not selected'
-Assert ($runtime.SslVersion -eq '3-x64') 'Nim SSL filename suffix wrong'
+AssertFixturePath ($runtime.OpenSslBin) ((Join-Path $current 'ucrt64/bin')) 'New ucrt64 runtime not selected'
+AssertFixturePath ($runtime.Certificates) ((Join-Path $current 'ucrt64/etc/ssl/certs/ca-bundle.crt')) 'New CA not selected'
+AssertEqual ($runtime.SslVersion) ('3-x64') 'Nim SSL filename suffix wrong'
 # Git wrappers in bin and the native ucrt64 executable resolve the same root.
 New-Item -ItemType Directory -Force (Join-Path $current 'bin') | Out-Null
 foreach ($relative in @('bin/git.exe', 'ucrt64/bin/git.exe')) {
     $entry = Join-Path $current $relative
     Set-Content -LiteralPath $entry 'fixture git'
-    Assert ((Get-LeafGitHttpsRuntime -GitExecutable $entry).OpenSslBin -eq $runtime.OpenSslBin) 'Git root derivation wrong'
+    AssertFixturePath ((Get-LeafGitHttpsRuntime -GitExecutable $entry).OpenSslBin) ($runtime.OpenSslBin) 'Git root derivation wrong'
 }
 $legacy = Make-Git 'Git legacy spaces' 'mingw64' 'ssl/certs'
 $old = Get-LeafGitHttpsRuntime -GitExecutable (Join-Path $legacy 'cmd/git.exe')
-Assert ($old.OpenSslBin -eq (Join-Path $legacy 'mingw64/bin')) 'Legacy runtime not selected'
-Assert ($old.Certificates -eq (Join-Path $legacy 'mingw64/ssl/certs/ca-bundle.crt')) 'Legacy CA not selected'
+AssertFixturePath ($old.OpenSslBin) ((Join-Path $legacy 'mingw64/bin')) 'Legacy runtime not selected'
+AssertFixturePath ($old.Certificates) ((Join-Path $legacy 'mingw64/ssl/certs/ca-bundle.crt')) 'Legacy CA not selected'
 $legacyEtc = Make-Git 'Git legacy etc' 'mingw64' 'etc/ssl/certs'
-Assert ((Get-LeafGitHttpsRuntime -GitExecutable (Join-Path $legacyEtc 'cmd/git.exe')).Certificates -eq
-    (Join-Path $legacyEtc 'mingw64/etc/ssl/certs/ca-bundle.crt')) 'Legacy etc CA not selected'
+AssertFixturePath ((Get-LeafGitHttpsRuntime -GitExecutable (Join-Path $legacyEtc 'cmd/git.exe')).Certificates) `
+    (Join-Path $legacyEtc 'mingw64/etc/ssl/certs/ca-bundle.crt') 'Legacy etc CA not selected'
 # Prefer a complete ucrt64 layout; fall back only to another complete layout.
 $both = Make-Git 'Git both layouts' 'mingw64' 'ssl/certs'
 Make-Git 'Git both layouts' 'ucrt64' 'etc/ssl/certs' | Out-Null
 $bothGit = Join-Path $both 'cmd/git.exe'
-Assert ((Get-LeafGitHttpsRuntime -GitExecutable $bothGit).OpenSslBin -eq
-    (Join-Path $both 'ucrt64/bin')) 'Complete ucrt64 did not take precedence'
+AssertFixturePath ((Get-LeafGitHttpsRuntime -GitExecutable $bothGit).OpenSslBin) `
+    (Join-Path $both 'ucrt64/bin') 'Complete ucrt64 did not take precedence'
 Remove-Item -LiteralPath (Join-Path $both 'ucrt64/bin/libcrypto-3-x64.dll')
-Assert ((Get-LeafGitHttpsRuntime -GitExecutable $bothGit).OpenSslBin -eq
-    (Join-Path $both 'mingw64/bin')) 'Incomplete ucrt64 did not fall back to complete mingw64'
+AssertFixturePath ((Get-LeafGitHttpsRuntime -GitExecutable $bothGit).OpenSslBin) `
+    (Join-Path $both 'mingw64/bin') 'Incomplete ucrt64 did not fall back to complete mingw64'
 $pathFile = Join-Path $FixtureRoot 'github_path'
 $envFile = Join-Path $FixtureRoot 'github_env'
 Write-LeafGitHttpsEnvironment -Runtime $runtime -PathFile $pathFile -EnvironmentFile $envFile
-Assert ((Get-Content -LiteralPath $pathFile) -eq $runtime.OpenSslBin) 'Runtime PATH not transmitted'
+AssertEqual ((Get-Content -LiteralPath $pathFile)) ($runtime.OpenSslBin) 'Runtime PATH not transmitted'
 $lines = Get-Content -LiteralPath $envFile
 Assert ($lines -contains 'NIM_SSL_VERSION=3-x64') 'Nim SSL suffix not transmitted'
 Assert ($lines -contains ('SSL_CERT_FILE=' + $runtime.Certificates)) 'CA not transmitted'
@@ -302,7 +481,7 @@ Remove-Item -LiteralPath (Join-Path $legacy 'mingw64/bin/libssl-3-x64.dll')
 Reject (Join-Path $legacy 'cmd/git.exe') 'Missing ssl accepted'
 'Windows HTTPS layout/validation/environment regression passed'
 """)
-      let executed=runCommand(pwsh,@["-NoProfile","-File",testScript,
+      let executed=runPowerShellFixture(pwsh,testScript,@[
         "-Helper",RepositoryRoot/"scripts/prepare_windows_https.ps1","-FixtureRoot",base])
       checkpoint executed.output
       check executed.exitCode==0
@@ -324,8 +503,8 @@ $ErrorActionPreference = 'Stop'
 function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
 $cert = Join-Path $FixtureRoot 'valid CA 中文.pem'
 $key = Join-Path $FixtureRoot 'generated test key.pem'
-& $OpenSsl req -x509 -newkey rsa:2048 -nodes -subj '/CN=Leaf Test CA' -days 1 -keyout $key -out $cert 2>&1 | Out-Null
-Assert ($LASTEXITCODE -eq 0) 'Test certificate generation failed'
+$generationOutput = & $OpenSsl req -x509 -newkey rsa:2048 -nodes -subj '/CN=Leaf Test CA' -days 1 -keyout $key -out $cert 2>&1 | Out-String
+Assert ($LASTEXITCODE -eq 0) ("Test certificate generation failed; exit=[$LASTEXITCODE]; executable=[$OpenSsl]; cert=[$cert]; output=[$generationOutput]")
 $runtime = [pscustomobject]@{
     OpenSslBin = Split-Path $OpenSsl -Parent
     OpenSslExecutable = $OpenSsl
@@ -336,7 +515,7 @@ $pathFile = Join-Path $FixtureRoot 'github_path'
 $envFile = Join-Path $FixtureRoot 'github_env'
 $previousPath = $env:PATH
 Publish-LeafGitHttpsEnvironment -Runtime $runtime -PathFile $pathFile -EnvironmentFile $envFile
-Assert ((Get-Content -LiteralPath $pathFile) -eq $runtime.OpenSslBin) 'Valid CA did not publish PATH'
+AssertEqual ((Get-Content -LiteralPath $pathFile)) ($runtime.OpenSslBin) 'Valid CA did not publish PATH'
 $lines = Get-Content -LiteralPath $envFile
 Assert ($lines -contains 'NIM_SSL_VERSION=3-x64') 'Valid CA did not publish SSL suffix'
 Assert ($lines -contains ('SSL_CERT_FILE=' + $cert)) 'Valid CA did not publish CA path'
@@ -378,7 +557,7 @@ foreach ($case in $invalid) {
     ($case.Name + ' rejected; PATH/ENV unchanged')
 }
 """)
-      let executed=runCommand(pwsh,@["-NoProfile","-File",testScript,
+      let executed=runPowerShellFixture(pwsh,testScript,@[
         "-Helper",RepositoryRoot/"scripts/prepare_windows_https.ps1",
         "-FixtureRoot",base,"-OpenSsl",openssl])
       checkpoint executed.output
@@ -414,12 +593,12 @@ try {
     # Genuine Application objects discovered from executable fixture files,
     # not mocked Get-Command objects or joined path strings.
     $applications = @(Get-Command git.exe -CommandType Application)
-    Assert ($applications.Count -eq 3) 'Fixture did not discover all three Git Applications'
-    Assert ($applications[0].Source -eq $expected) 'Application order differs from PATH order'
+    AssertEqual ($applications.Count) (3) 'Fixture did not discover all three Git Applications'
+    AssertFixturePath ($applications[0].Source) ($expected) 'Application order differs from PATH order'
     'Discovered three real Git Applications: ' + ($applications.Source -join '; ')
     $selected = Resolve-LeafGitExecutable
     Assert ($selected -is [string]) 'Discovery did not return one path string'
-    Assert ($selected -eq $expected) 'Discovery did not select first Application before taking Source'
+    AssertFixturePath ($selected) ($expected) 'Discovery did not select first Application before taking Source'
     Assert (Test-Path -LiteralPath $selected -PathType Leaf) 'Selected Git path does not exist'
     # Feed discovery into the unchanged supported-layout selector.
     $runtimeBin = Join-Path $GitRoot 'mingw64/bin'
@@ -429,20 +608,20 @@ try {
         Set-Content -LiteralPath (Join-Path $runtimeBin $file) 'layout fixture bytes'
     }
     Set-Content -LiteralPath $cert 'layout fixture CA bytes'
-    Assert ((Get-LeafGitHttpsRuntime -GitExecutable $selected).OpenSslBin -eq $runtimeBin) 'Discovered Git did not resolve legacy layout'
+    AssertFixturePath ((Get-LeafGitHttpsRuntime -GitExecutable $selected).OpenSslBin) ($runtimeBin) 'Discovered Git did not resolve legacy layout'
     'First Application selected; legacy layout resolved'
     $env:PATH = @($bins[1], $bins[0], $bins[2]) -join [IO.Path]::PathSeparator
-    Assert ((Resolve-LeafGitExecutable) -eq (Join-Path $bins[1] 'git.exe')) 'Reordered PATH did not select its first Application'
+    AssertFixturePath ((Resolve-LeafGitExecutable)) ((Join-Path $bins[1] 'git.exe')) 'Reordered PATH did not select its first Application'
     $env:PATH = $bins[2]
-    Assert ((Resolve-LeafGitExecutable) -eq (Join-Path $bins[2] 'git.exe')) 'Single Application discovery failed'
+    AssertFixturePath ((Resolve-LeafGitExecutable)) ((Join-Path $bins[2] 'git.exe')) 'Single Application discovery failed'
     $env:PATH = ''
-    Assert ((Resolve-LeafGitExecutable -GitExecutable $expected) -eq $expected) 'Explicit GitExecutable was not preserved with empty PATH'
+    AssertEqual ((Resolve-LeafGitExecutable -GitExecutable $expected)) ($expected) 'Explicit GitExecutable was not preserved with empty PATH'
     'Reordered/single discovery and explicit override passed'
 } finally {
     $env:PATH = $previousPath
 }
 """)
-      let executed=runCommand(pwsh,@["-NoProfile","-File",testScript,
+      let executed=runPowerShellFixture(pwsh,testScript,@[
         "-Helper",RepositoryRoot/"scripts/prepare_windows_https.ps1","-GitRoot",gitRoot])
       checkpoint executed.output
       check executed.exitCode==0
