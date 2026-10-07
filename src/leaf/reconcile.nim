@@ -5,6 +5,10 @@ import std/[tables, sets, algorithm]
 import ./[core, styles, backend]
 
 type
+  PropsAdapter* = proc(node: Node): NormalizedProps {.closure.}
+    ## Optional backward-compatible hook used by a session to diff effective
+    ## (capability-filtered) properties instead of raw ones.
+
   ReconcilePlan* = object
     ## A complete candidate. `batch` is applied in order; `entities` and
     ## `byNodeId` become the accepted map only when `accept` succeeds.
@@ -38,13 +42,16 @@ proc allocate(r: Reconciler): NodeHandle =
   result = NodeHandle(r.nextHandle)
   inc r.nextHandle
 
-proc plan*(r: Reconciler, snapshot: Snapshot, revision: uint64): ReconcilePlan =
+proc plan*(r: Reconciler, snapshot: Snapshot, revision: uint64,
+          adapter: PropsAdapter = nil): ReconcilePlan =
   ## Diff a candidate description against the accepted entities. Identity is
   ## resolved structurally: a node reuses its entity only when the same node ID
   ## is accepted, its kind is unchanged, and its whole ancestor chain was
   ## reused. A replaced ancestor therefore recreates every descendant even when
   ## the descendant's string ID is identical. No string prefix is ever used to
-  ## infer ancestry.
+  ## infer ancestry. When `adapter` is supplied it produces the stored and
+  ## compared properties (for example capability-filtered effective props);
+  ## the original three-argument call keeps using raw normalized props.
   var entities: Table[NodeHandle, MountedEntity]
   var byNodeId: Table[string, NodeHandle]
   var created: HashSet[NodeHandle]
@@ -65,7 +72,8 @@ proc plan*(r: Reconciler, snapshot: Snapshot, revision: uint64): ReconcilePlan =
     else:
       handle = r.allocate()
     let entity = MountedEntity(handle: handle, parent: parent,
-      nodeId: mounted.id, kind: node.kind, props: normalizeProps(node),
+      nodeId: mounted.id, kind: node.kind,
+      props: (if adapter != nil: adapter(node) else: normalizeProps(node)),
       index: index)
     entities[handle] = entity
     byNodeId[mounted.id] = handle
