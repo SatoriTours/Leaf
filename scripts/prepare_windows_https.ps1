@@ -63,7 +63,11 @@ function Assert-LeafGitHttpsCertificates {
     param([Parameter(Mandatory)]$Runtime)
     $certificateOutput = [IO.Path]::GetTempFileName()
     $decodedCertificates = [IO.Path]::GetTempFileName()
+    $previousUtf8 = [Environment]::GetEnvironmentVariable('OPENSSL_WIN32_UTF8', 'Process')
     try {
+        # OpenSSL's Windows CLI otherwise converts Unicode argv through the
+        # current code page. Scope its official UTF-8 switch to these calls.
+        $env:OPENSSL_WIN32_UTF8 = '1'
         & $runtime.OpenSslExecutable crl2pkcs7 -nocrl -certfile $runtime.Certificates -out $certificateOutput
         if ($LASTEXITCODE -ne 0 -or (Get-Item -LiteralPath $certificateOutput).Length -eq 0) {
             throw "Git HTTPS CA bundle cannot be parsed: $($runtime.Certificates)"
@@ -79,6 +83,11 @@ function Assert-LeafGitHttpsCertificates {
             throw "Git HTTPS CA bundle contains no parsed X509 certificate: $($runtime.Certificates)"
         }
     } finally {
+        if ($null -eq $previousUtf8) {
+            Remove-Item Env:OPENSSL_WIN32_UTF8 -ErrorAction SilentlyContinue
+        } else {
+            $env:OPENSSL_WIN32_UTF8 = $previousUtf8
+        }
         Remove-Item -LiteralPath $certificateOutput, $decodedCertificates -ErrorAction SilentlyContinue
     }
 }

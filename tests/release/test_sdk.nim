@@ -5,6 +5,22 @@ import ../../src/leaf/[checksum, archives]
 import ../nim/archive_reader
 when defined(windows): import std/winlean
 
+# Probe the environment at a real native-process boundary, then execute real
+# OpenSSL. This checks scoped environment propagation even on non-Windows hosts.
+if getEnv("LEAF_TEST_OPENSSL_DELEGATE").len>0 and paramCount()>0 and
+    paramStr(1) in ["crl2pkcs7", "pkcs7", "x509"]:
+  let arguments=commandLineParams()
+  let utf8=getEnv("OPENSSL_WIN32_UTF8")
+  let trace=open(getEnv("LEAF_TEST_OPENSSL_TRACE"),fmAppend)
+  trace.writeLine($( %*{"arguments":arguments,"utf8":utf8} ))
+  trace.close()
+  if utf8!="1":
+    stderr.writeLine("OpenSSL child requires scoped OPENSSL_WIN32_UTF8=1; actual=[" & utf8 & "]")
+    quit(97)
+  let executed=runCommand(getEnv("LEAF_TEST_OPENSSL_DELEGATE"),arguments)
+  stdout.write(executed.output)
+  quit(executed.exitCode)
+
 # A real child of this test binary exercises merged stdout/stderr without
 # requiring another tool or bypassing runCommand's process implementation.
 if paramCount()==1 and paramStr(1)=="--sdk-output-child":
@@ -494,14 +510,27 @@ Reject (Join-Path $legacy 'cmd/git.exe') 'Missing ssl accepted'
       defer:removeDir(base)
       let testScript=base/"ca_tests.ps1"
       writeFile(testScript, """
-param([string]$Helper, [string]$FixtureRoot, [string]$OpenSsl)
+param([string]$Helper, [string]$FixtureRoot, [string]$OpenSsl, [string]$OpenSslProbe)
 $ErrorActionPreference = 'Stop'
 . $Helper
 function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
+function Set-CallerUtf8($Value) {
+    if ($null -eq $Value) { Remove-Item Env:OPENSSL_WIN32_UTF8 -ErrorAction SilentlyContinue }
+    else { $env:OPENSSL_WIN32_UTF8 = $Value }
+}
 $cert = Join-Path $FixtureRoot 'valid CA 中文.pem'
 $key = Join-Path $FixtureRoot 'generated test key.pem'
-$generationOutput = & $OpenSsl req -x509 -newkey rsa:2048 -nodes -subj '/CN=Leaf Test CA' -days 1 -keyout $key -out $cert 2>&1 | Out-String
+$generationUtf8 = [Environment]::GetEnvironmentVariable('OPENSSL_WIN32_UTF8', 'Process')
+try {
+    $env:OPENSSL_WIN32_UTF8 = '1'
+    $generationOutput = & $OpenSsl req -x509 -newkey rsa:2048 -nodes -subj '/CN=Leaf Test CA' -days 1 -keyout $key -out $cert 2>&1 | Out-String
+} finally {
+    Set-CallerUtf8 $generationUtf8
+}
 Assert ($LASTEXITCODE -eq 0) ("Test certificate generation failed; exit=[$LASTEXITCODE]; executable=[$OpenSsl]; cert=[$cert]; output=[$generationOutput]")
+AssertEqual ([Environment]::GetEnvironmentVariable('OPENSSL_WIN32_UTF8', 'Process')) ($generationUtf8) 'Certificate generation did not restore caller UTF8 setting'
+Assert ((Test-Path Env:OPENSSL_WIN32_UTF8) -eq ($null -ne $generationUtf8)) 'Certificate generation changed UTF8 environment presence'
+Assert (Test-Path -LiteralPath $key -PathType Leaf) 'Chinese-directory key was not generated'
 $runtime = [pscustomobject]@{
     OpenSslBin = Split-Path $OpenSsl -Parent
     OpenSslExecutable = $OpenSsl
@@ -511,11 +540,37 @@ $runtime = [pscustomobject]@{
 $pathFile = Join-Path $FixtureRoot 'github_path'
 $envFile = Join-Path $FixtureRoot 'github_env'
 $previousPath = $env:PATH
+# The fixture-generation flag must already have been restored. The product
+# must independently enable UTF-8 for each native certificate validation call.
+$originalUtf8 = [Environment]::GetEnvironmentVariable('OPENSSL_WIN32_UTF8', 'Process')
+# Also validate the direct production invocation, before using the native
+# environment probe to verify all calls and both caller environment states.
+Assert-LeafGitHttpsCertificates -Runtime $runtime
+AssertEqual ([Environment]::GetEnvironmentVariable('OPENSSL_WIN32_UTF8', 'Process')) ($originalUtf8) 'Direct OpenSSL validation changed caller UTF8 setting'
+$env:LEAF_TEST_OPENSSL_DELEGATE = $OpenSsl
+$env:LEAF_TEST_OPENSSL_TRACE = Join-Path $FixtureRoot 'native calls.jsonl'
+$runtime.OpenSslExecutable = $OpenSslProbe
+$certContent = [IO.File]::ReadAllText($cert)
+try {
+foreach ($callerUtf8 in @($null, 'caller original value')) {
+    Set-CallerUtf8 $callerUtf8
+    foreach ($file in @($pathFile, $envFile, $env:LEAF_TEST_OPENSSL_TRACE)) {
+        if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
+    }
+    $runtime.Certificates = $cert
 Publish-LeafGitHttpsEnvironment -Runtime $runtime -PathFile $pathFile -EnvironmentFile $envFile
+AssertEqual ([Environment]::GetEnvironmentVariable('OPENSSL_WIN32_UTF8', 'Process')) ($callerUtf8) 'Valid CA did not restore caller UTF8 setting'
+Assert ((Test-Path Env:OPENSSL_WIN32_UTF8) -eq ($null -ne $callerUtf8)) 'Valid CA changed UTF8 environment presence'
+AssertEqual ([IO.File]::ReadAllText($cert)) ($certContent) 'Validation changed Chinese certificate contents'
+$calls = @(Get-Content -LiteralPath $env:LEAF_TEST_OPENSSL_TRACE | ForEach-Object { $_ | ConvertFrom-Json })
+AssertEqual ($calls.Count) (3) 'Valid CA did not execute all three real OpenSSL checks'
+AssertEqual (($calls | ForEach-Object { $_.arguments[0] }) -join ',') ('crl2pkcs7,pkcs7,x509') 'Certificate validation sequence wrong'
+AssertEqual ($calls[0].arguments[3]) ($cert) 'Chinese certificate argv not preserved'
 AssertEqual ((Get-Content -LiteralPath $pathFile)) ($runtime.OpenSslBin) 'Valid CA did not publish PATH'
 $lines = Get-Content -LiteralPath $envFile
 Assert ($lines -contains 'NIM_SSL_VERSION=3-x64') 'Valid CA did not publish SSL suffix'
 Assert ($lines -contains ('SSL_CERT_FILE=' + $cert)) 'Valid CA did not publish CA path'
+Assert (-not ($lines -match '^OPENSSL_WIN32_UTF8=')) 'UTF8 switch leaked into GITHUB_ENV'
 Assert ($env:PATH -ceq $previousPath) 'Valid CA changed process PATH'
 'Valid X509 CA accepted using real OpenSSL'
 $invalid = @(
@@ -542,6 +597,8 @@ foreach ($case in $invalid) {
             Assert ($_.Exception.Message -like '*HTTPS CA*') "Missing CA diagnostic: $_"
         }
         Assert $caught ($case.Name + ' incorrectly accepted')
+        AssertEqual ([Environment]::GetEnvironmentVariable('OPENSSL_WIN32_UTF8', 'Process')) ($callerUtf8) ($case.Name + ' did not restore caller UTF8 setting')
+        Assert ((Test-Path Env:OPENSSL_WIN32_UTF8) -eq ($null -ne $callerUtf8)) ($case.Name + ' changed UTF8 environment presence')
         Assert ($env:PATH -ceq $previousPath) ($case.Name + ' changed process PATH')
         if ($existing) {
             Assert ([IO.File]::ReadAllText($pathFile) -ceq 'existing PATH') ($case.Name + ' appended PATH')
@@ -553,10 +610,17 @@ foreach ($case in $invalid) {
     }
     ($case.Name + ' rejected; PATH/ENV unchanged')
 }
+$allCalls = @(Get-Content -LiteralPath $env:LEAF_TEST_OPENSSL_TRACE | ForEach-Object { $_ | ConvertFrom-Json })
+Assert (@($allCalls | Where-Object { $_.utf8 -cne '1' }).Count -eq 0) 'Invalid CA checks failed before reaching real OpenSSL with scoped UTF8'
+('Scoped UTF8 restored after success/rejections; original=[' + $callerUtf8 + ']')
+}
+} finally {
+    Set-CallerUtf8 $originalUtf8
+}
 """)
       let executed=runPowerShellFixture(pwsh,testScript,@[
         "-Helper",RepositoryRoot/"scripts/prepare_windows_https.ps1",
-        "-FixtureRoot",base,"-OpenSsl",openssl])
+        "-FixtureRoot",base,"-OpenSsl",openssl,"-OpenSslProbe",getAppFilename()])
       checkpoint executed.output
       check executed.exitCode==0
 
