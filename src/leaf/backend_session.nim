@@ -289,10 +289,19 @@ proc enqueue*(session: BackendSession, envelope: EventEnvelope): bool =
   session.queue.add(envelope)
   true
 
+proc eventEligible(session: BackendSession): bool =
+  ## Single eligibility predicate, re-checked before every queued event. A
+  ## teardown that starts mid-drain (even at a safe post-scope boundary) makes
+  ## the remaining captured batch ineligible instead of leaking it to business.
+  not session.disposed and not session.faulted and not session.frozen and
+    not session.closing
+
 proc process(session: BackendSession, envelope: EventEnvelope) =
   ## Revalidate against the live accepted state immediately before running the
   ## callback. A failed dispatch leaves the old accepted tree and never
-  ## re-executes the business closure.
+  ## re-executes the business closure. The eligibility guard runs before any
+  ## sequence or Runtime access.
+  if not session.eventEligible: return
   if envelope.session != session.sessionId: return
   if envelope.mountGeneration != session.mountGeneration: return
   if envelope.sequence <= session.lastProcessed: return
@@ -317,9 +326,7 @@ proc drainEvents*(session: BackendSession) =
   ## without touching the queue or its sequence bookkeeping, so genuine user
   ## events queued during apply survive for a drain after publication. The
   ## committer never dispatches queued events before publication.
-  if session == nil or session.disposed or session.faulted or session.frozen or
-      session.closing:
-    return
+  if session == nil or not session.eventEligible: return
   if session.draining: return
   if session.runtime != nil and session.runtime.installingUpdate: return
   session.draining = true
@@ -327,7 +334,7 @@ proc drainEvents*(session: BackendSession) =
     let pending = session.queue
     session.queue = @[]
     for envelope in pending:
-      if session.disposed or session.faulted: return
+      if not session.eventEligible: return
       session.process(envelope)
   finally:
     session.draining = false

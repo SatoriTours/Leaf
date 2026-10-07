@@ -730,3 +730,51 @@ suite "Recording backend sessions":
     check scopeCalls == scopeBefore + 2
     check depth == 0
     dispose(session)
+
+  test "closing during a drain stops the remaining pending batch":
+    var count = 0
+    var sessionRef: BackendSession
+    var recordingRef: RecordingBackend
+    var triggerDispose = false
+    var disposeFailed = false
+    proc scope(body: proc() {.closure.}) =
+      body()
+      if triggerDispose:
+        triggerDispose = false
+        recordingRef.failDispose = true
+        try:
+          dispose(sessionRef)
+        except UiError:
+          disposeFailed = true
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        text($count, key = "count"),
+        button("go", key = "go", onClick = proc(e: Event) = inc count)], key = "root")
+
+    let runtime = newRuntime(Application(title: "closing", width: 640, height: 480,
+      render: render, executionScope: scope))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    sessionRef = session
+    recordingRef = recording
+    let handle = session.handleFor(runtime.find("go").id)
+    check session.enqueue(userEvent(session, handle, 1, Event(kind: click)))
+    check session.enqueue(userEvent(session, handle, 2, Event(kind: click)))
+
+    # After the first event's dispatch reaches the safe post-scope boundary, a
+    # teardown starts and fails: the remaining local pending batch must not
+    # reach business state.
+    triggerDispose = true
+    session.drainEvents()
+    check disposeFailed
+    check session.closing
+    check not session.disposed
+    check count == 1
+    check runtime.find("count").node.text == "1"
+    check session.queuedEvents == 0
+
+    # Releasing the injected failure lets the same close request finish.
+    recording.failDispose = false
+    dispose(session)
+    check session.disposed
+    check recording.disposeCalls == 2
