@@ -122,3 +122,5 @@ GPUI 测试覆盖实际 Kit 控件、禁用交互、输入实体与选区保留�
 | `docs` | [架构](docs/architecture.md)、[Nim API](docs/nim-api.md)与开发文档 |
 
 Leaf 使用 MIT 许可。GPUI/GPUI Kit 及相关依赖的许可证信息见 `src/leaf/vendor/GPUI-NOTICES.json`，发布工具将该清单与随依赖提供的许可证文本写入发布包。
+
+继承式 SQLite Model 支持免 db CRUD、where/scope、first/last、校验、回调与事务。新脚手架默认使用 schema 2；参见 [Model 文档](docs/models.md) 和 [脚手架文档](docs/scaffolding.md)。

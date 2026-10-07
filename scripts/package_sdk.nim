@@ -1,6 +1,6 @@
 ## Assemble a relocatable developer SDK with the bundled Nim archive writers.
 import std/[os, strutils, json, tempfiles, algorithm, parseopt, tables, sets]
-import ../src/leaf/[archives, checksum]
+import ../src/leaf/[archives, checksum, licenses]
 
 const RepositoryRoot* = currentSourcePath().parentDir.parentDir
 const SdkTargets* = ["linux-x86_64", "macos-x86_64", "macos-aarch64", "windows-x86_64"]
@@ -51,6 +51,7 @@ proc packageSdk*(options: PackageOptions): string =
     raise newException(ValueError, "release version must be vX.Y.Z")
   if options.commit.len notin 6..40 or not options.commit.allCharsInSet({'0'..'9', 'a'..'f'}):
     raise newException(ValueError, "commit must be a Git SHA")
+  verifyOrmSources(root / "src")
   createDir(options.output)
   let temporary = createTempDir("leaf-sdk-package-", "")
   defer: removeDir(temporary)
@@ -62,6 +63,7 @@ proc packageSdk*(options: PackageOptions): string =
   copyFileWithPermissions(root / "LICENSE", sdk / "LICENSE")
   copyFileWithPermissions(options.nimRoot / ("bin/nim" & executable), sdk / ("toolchain/nim/bin/nim" & executable))
   for directory in ["lib", "config"]: copyTree(options.nimRoot / directory, sdk / "toolchain/nim" / directory)
+  collectLicenses(sdk / "licenses")
   let vendor = root / "src/leaf/vendor"
   for filename in ["Nim-LICENSE.txt", "GPUI-NOTICES.json", "provenance.json"]:
     copyFileWithPermissions(vendor / filename, sdk / "licenses" / filename)
@@ -72,6 +74,7 @@ proc packageSdk*(options: PackageOptions): string =
   writeFile(sdk / "licenses/SDK-SOURCES.txt",
     "Leaf: https://github.com/SatoriTours/Leaf\n" &
     "Nim 2.2.6 (MIT): https://nim-lang.org/download/nim-2.2.6.tar.xz\n" &
+    "ORM sources, MIT licenses and pinned commits: see orm/lock.json and inventory.json\n" &
     "GPUI and dependencies: see GPUI-NOTICES.json and src/leaf/vendor\n" &
     "Windows installer downloads MinGW directly from https://nim-lang.org/download/mingw64.7z\n" &
     "OS graphics libraries, C compiler on Unix and platform runtimes are system prerequisites.\n")

@@ -68,7 +68,10 @@ suite "SDK archive and native installer":
       let unpacked = f.base / "unpacked"
       extractTar(archive, unpacked)
       for item in ["src/leaf.nim", "src/leaf/templates/scaffold/main.nim", "LICENSE",
-                   "toolchain/nim/lib/system.nim", "lib/" & bridgeName(f.target), "bin/leaf"]:
+                   "toolchain/nim/lib/system.nim", "src/leaf/vendor/orm/lock.json",
+                   "src/leaf/orm_config.nim", "src/leaf/orm_config.nims",
+                   "licenses/orm/norm-LICENSE.txt", "licenses/orm/lowdb-LICENSE.txt",
+                   "licenses/orm/db_connector-LICENSE.txt", "licenses/inventory.json", "lib/" & bridgeName(f.target), "bin/leaf"]:
         check fileExists(unpacked / "leaf-sdk" / item)
       check parseFile(unpacked / "leaf-sdk/sdk.json")["channel"].getStr == "release"
       check sha256File(archive) == readFile(archive & ".sha256").splitWhitespace()[0]
