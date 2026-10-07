@@ -1,14 +1,21 @@
 import leaf/model
+import std/strutils
 
 type ApplicationRecord* = ref object of TimestampedRecord
   category*: string
-defineAbstractModel(ApplicationRecord)
+proc normalizeCategory(record: ApplicationRecord) = record.category = record.category.strip()
+defineAbstractModel(ApplicationRecord):
+  validates category, maxLength = 200
+  beforeValidation normalizeCategory
 
 type Task* = ref object of ApplicationRecord
   title*: string
   done*: bool
   priority*: int
-defineModel(Task, table = "tasks")
+proc normalizeTitle(record: Task) = record.title = record.title.strip()
+defineModel(Task, table = "tasks"):
+  validates title, presence = true, maxLength = 200
+  beforeValidation normalizeTitle
 
 type Note* = ref object of ApplicationRecord
   body*: string

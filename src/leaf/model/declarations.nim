@@ -3,7 +3,7 @@ import std/[macros, tables, strutils, sets]
 import norm/model as normModel
 import norm/pragmas
 import ../sqlite
-import ./[record, metadata]
+import ./[record, metadata, validation, callbacks]
 
 type Declaration = object
   abstract: bool
@@ -66,15 +66,85 @@ proc defineDeclaration(symbol: NimNode, body: NimNode, abstract: bool) {.compile
       error("a concrete model must inherit a declared abstract model", parent)
   declarations[key] = Declaration(abstract: abstract, symbol: symbol, body: body.copyNimTree)
 
-macro defineAbstractModel*(T: typedesc, body: untyped = newStmtList()): untyped =
-  let symbol = modelSymbol(T)
-  defineDeclaration(symbol, body, true)
-  result = newStmtList()
+proc declareRules(symbol, body: NimNode): NimNode {.compileTime.} =
+  let parent = objectNode(symbol)[1][0]
+  let recordArg = ident"record"
+  let phaseArg = ident"phase"
+  let eventArg = ident"event"
+  let builtinParent = parent == bindSym"Record" or parent == bindSym"TimestampedRecord"
+  let parentValidations = if builtinParent: bindSym"runValidations" else: ident"runValidations"
+  let parentCallbacks = if builtinParent: bindSym"runCallbacks" else: ident"runCallbacks"
+  var validations = newStmtList(newCall(parentValidations, newCall(parent, recordArg)))
+  var branches = newNimNode(nnkCaseStmt)
+  branches.add(phaseArg)
+  var phaseBodies = initTable[string, NimNode]()
+  for statement in body:
+    if statement.kind notin {nnkCall, nnkCommand} or statement.len < 2:
+      error("expected validates, callback or scope declaration", statement)
+    let keyword = $statement[0]
+    if keyword == "validates":
+      if statement[1].kind notin {nnkIdent, nnkSym}: error("validation requires a field name", statement[1])
+      let name = $statement[1]
+      let field = newDotExpr(recordArg, ident(name))
+      for i in 2..<statement.len:
+        let rule = statement[i]
+        if rule.kind != nnkExprEqExpr: error("expected named validation option", rule)
+        case $rule[0]
+        of "presence", "finite":
+          if not rule[1].eqIdent("true") and not rule[1].eqIdent("false"):
+            error("validation flag must be true or false", rule)
+          if rule[1].eqIdent("true"):
+            let helper = if rule[0].eqIdent("presence"): bindSym"validatePresence" else: bindSym"validateFinite"
+            validations.add(newCall(helper, recordArg, newLit(name), field.copyNimTree))
+        of "maxLength":
+          if rule[1].kind notin {nnkIntLit..nnkUInt64Lit} or rule[1].intVal < 0:
+            error("maxLength must be a non-negative integer literal", rule)
+          validations.add(newCall(bindSym"validateMaxLength", recordArg, newLit(name), field.copyNimTree, rule[1]))
+        else: error("unknown validation rule: " & $rule[0], rule)
+    elif keyword == "scope":
+      discard # Scope generation is added with the query DSL.
+    else:
+      if keyword notin ["beforeValidation", "afterValidation", "beforeSave", "afterSave",
+          "beforeCreate", "afterCreate", "beforeUpdate", "afterUpdate", "beforeDestroy",
+          "afterDestroy", "afterCommit", "afterRollback"]:
+        error("unknown model declaration: " & keyword, statement)
+      if statement.len != 2: error("callback expects one proc", statement)
+      if keyword notin phaseBodies: phaseBodies[keyword] = newStmtList()
+      let action = if keyword in ["afterCommit", "afterRollback"]:
+        newCall(bindSym"invokeEventCallback", recordArg, eventArg, statement[1])
+      else: newCall(bindSym"invokeCallback", recordArg, phaseArg, statement[1])
+      phaseBodies[keyword].add(action)
+  for keyword in ["beforeValidation", "afterValidation", "beforeSave", "afterSave",
+      "beforeCreate", "afterCreate", "beforeUpdate", "afterUpdate", "beforeDestroy",
+      "afterDestroy", "afterCommit", "afterRollback"]:
+    if keyword in phaseBodies:
+      var phaseNode: NimNode
+      for phase in bindSym"CallbackPhase".getTypeImpl:
+        if phase.kind == nnkSym and $phase == keyword & "Phase": phaseNode = phase
+      if phaseNode == nil: error("unknown callback phase", body)
+      branches.add(newTree(nnkOfBranch, phaseNode, phaseBodies[keyword]))
+  branches.add(newTree(nnkElse, newStmtList(newTree(nnkDiscardStmt, newEmptyNode()))))
+  result = quote do:
+    proc runValidations*(`recordArg`: `symbol`) =
+      `validations`
+    proc runCallbacks*(`recordArg`: `symbol`, `phaseArg`: CallbackPhase, `eventArg`: ModelEvent = nil) =
+      if `phaseArg`.isBefore:
+        `parentCallbacks`(`parent`(`recordArg`), `phaseArg`, `eventArg`)
+      `branches`
+      if not `phaseArg`.isBefore:
+        `parentCallbacks`(`parent`(`recordArg`), `phaseArg`, `eventArg`)
 
-macro defineModel*(T: typedesc, table: static[string], body: untyped = newStmtList()): untyped =
+macro defineAbstractModel*(T: typedesc, body: untyped = nil): untyped =
   let symbol = modelSymbol(T)
+  let rules = if body.kind == nnkNilLit: newStmtList() else: body
+  defineDeclaration(symbol, rules, true)
+  result = declareRules(symbol, rules)
+
+macro defineModel*(T: typedesc, table: static[string], body: untyped = nil): untyped =
+  let symbol = modelSymbol(T)
+  let rules = if body.kind == nnkNilLit: newStmtList() else: body
   if table.len == 0 or '\0' in table: error("model table name must not be empty or contain NUL", T)
-  defineDeclaration(symbol, body, false)
+  defineDeclaration(symbol, rules, false)
   let fields = modelFieldDefs(symbol)
   var seen = initHashSet[string]()
   seen.incl("id")
@@ -143,3 +213,4 @@ macro defineModel*(T: typedesc, table: static[string], body: untyped = newStmtLi
       markLoaded(result, db, `storedArg`.id, modelValues(result))
   result.add(newProc(newTree(nnkPostfix, ident"*", ident"build"), params,
     newAssignment(ident"result", constructor)))
+  result.add(declareRules(symbol, rules))

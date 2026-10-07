@@ -11,6 +11,7 @@ type
     baseline: FieldValues
     lastChanges: ChangeSet
     fieldErrors: ModelErrors
+    busy, aborted, canCancel: bool
   TimestampedRecord* = ref object of Record
     created_at*, updated_at*: Option[DateTime]
   RecordState* = object
@@ -82,3 +83,22 @@ proc acceptPersistedValues*(record: Record, db: Database, id: int64,
 proc markDestroyed*(record: Record) =
   record.requireRecord()
   record.lifecycle = destroyed
+
+proc beginOperation*(record: Record, db: Database) =
+  record.requireRecord()
+  if record.busy: raise newException(ModelUsageError, "cannot reenter a model operation on the same record")
+  if record.database != nil and record.database != db:
+    raise newException(ModelUsageError, "record belongs to another database; use dupRecord to copy")
+  record.busy = true
+  record.aborted = false
+  record.canCancel = false
+proc endOperation*(record: Record) =
+  record.busy = false
+  record.canCancel = false
+proc operationAborted*(record: Record): bool = record.aborted
+proc setCancellationAllowed*(record: Record, allowed: bool) = record.canCancel = allowed
+proc abortOperation*(record: Record) =
+  record.requireRecord()
+  if not record.canCancel:
+    raise newException(ModelUsageError, "abortOperation is only allowed in a before callback")
+  record.aborted = true
