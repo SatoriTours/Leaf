@@ -84,7 +84,7 @@ proc commitFrame*(frame: TransactionFrame) =
   try:
     if frames.len == 1: discard frame.context.database.execute("COMMIT")
     else: discard frame.context.database.execute("RELEASE SAVEPOINT " & frame.name)
-  except:
+  except Exception:
     try: frame.rollbackFrame()
     except CatchableError: discard
     raise
@@ -103,7 +103,7 @@ template transaction*(body: untyped): untyped =
     let frame = beginFrame()
     try:
       body
-    except:
+    except Exception:
       if frame.isActive:
         try: rollbackFrame(frame)
         except CatchableError: discard

@@ -1,9 +1,9 @@
 ## Compile-time mapping: public Leaf objects never inherit the Norm state model.
-import std/[macros, tables, strutils, sets]
+import std/[macros, tables, strutils, sets, sequtils]
 import norm/model as normModel
 import norm/pragmas
 import ../sqlite
-import ./[record, metadata, validation, callbacks]
+import ./[record, metadata, validation, callbacks, persistence]
 
 type Declaration = object
   abstract: bool
@@ -143,7 +143,8 @@ macro defineAbstractModel*(T: typedesc, body: untyped = nil): untyped =
 macro defineModel*(T: typedesc, table: static[string], body: untyped = nil): untyped =
   let symbol = modelSymbol(T)
   let rules = if body.kind == nnkNilLit: newStmtList() else: body
-  if table.len == 0 or '\0' in table: error("model table name must not be empty or contain NUL", T)
+  if table.len == 0 or '\0' in table or '"' in table:
+    error("model table name must not be empty or contain NUL or double quotes", T)
   defineDeclaration(symbol, rules, false)
   let fields = modelFieldDefs(symbol)
   var seen = initHashSet[string]()
@@ -168,7 +169,7 @@ macro defineModel*(T: typedesc, table: static[string], body: untyped = nil): unt
     if managed:
       if fieldOwner(symbol, name) != bindSym"TimestampedRecord":
         error("reserved model timestamp field: " & $name, name)
-    recordList.add(newIdentDefs(name.copyNimTree, field[1].copyNimTree))
+    recordList.add(newIdentDefs(newTree(nnkPostfix, ident"*", ident($name)), field[1].copyNimTree))
     fieldList.add(newCall(bindSym"fieldMetadata", fieldTypeExpr.copyNimTree, newLit($name), newLit(managed)))
     values.add(newTree(nnkTupleConstr, newTree(nnkExprColonExpr, ident"name", newLit($name)),
       newTree(nnkExprColonExpr, ident"value", newCall(bindSym"fieldValue", newDotExpr(ident"record", name)))))
@@ -214,3 +215,26 @@ macro defineModel*(T: typedesc, table: static[string], body: untyped = nil): unt
   result.add(newProc(newTree(nnkPostfix, ident"*", ident"build"), params,
     newAssignment(ident"result", constructor)))
   result.add(declareRules(symbol, rules))
+  for operation in ["create", "createOrRaise"]:
+    var creation = newStmtList(newAssignment(ident"result", constructor.copyNimTree))
+    if operation == "create": creation.add(newTree(nnkDiscardStmt, newCall(bindSym"save", ident"result")))
+    else: creation.add(newCall(bindSym"saveOrRaise", ident"result"))
+    result.add(newProc(newTree(nnkPostfix, ident"*", ident(operation)), params.mapIt(it.copyNimTree), creation))
+
+proc assignAndSave(record: NimNode, arguments: NimNode, raising: bool): NimNode {.compileTime.} =
+  let symbol = modelSymbol(record)
+  requireConcreteModel(symbol)
+  let variable = genSym(nskLet, "updatingRecord")
+  result = newStmtList(newLetStmt(variable, record), newCall(bindSym"requireRecord", variable))
+  var assigned = initHashSet[string]()
+  for argument in arguments:
+    if argument.kind != nnkExprEqExpr: error("update requires named model fields", argument)
+    let key = normalized($argument[0])
+    if key in ["id", "createdat", "updatedat"]: error("cannot assign a framework-managed field", argument)
+    if key in assigned: error("duplicate update field", argument)
+    assigned.incl(key)
+    result.add(newAssignment(newDotExpr(variable, argument[0]), argument[1]))
+  result.add(newCall(if raising: bindSym"saveOrRaise" else: bindSym"save", variable))
+
+macro update*(record: typed, arguments: varargs[untyped]): untyped = assignAndSave(record, arguments, false)
+macro updateOrRaise*(record: typed, arguments: varargs[untyped]): untyped = assignAndSave(record, arguments, true)
