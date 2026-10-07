@@ -1,5 +1,6 @@
 ## Self-contained Nim test entry; also works in source archives without Git.
 import std/[os, osproc, algorithm]
+import ../src/leaf/orm_config
 
 proc main(): int =
   let root = currentSourcePath().parentDir.parentDir
@@ -27,6 +28,7 @@ proc main(): int =
       test.extractFilename.changeFileExt(ExeExt)
     createDir(output.parentDir)
     var args = @["c", "-r", "--path:" & root / "src", "--out:" & output]
+    args.add(ormCompilerArgs(root / "src"))
     args.add(test)
     let process = startProcess(compiler, workingDir = root,
       args = args,

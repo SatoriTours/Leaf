@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "dependencies": [
+    {
+      "name": "norm",
+      "version": "2.8.7",
+      "commit": "aba796d0251fa6aeb01ec2c49f48b63522db5e32",
+      "source": "https://github.com/moigagoo/norm",
+      "license": "MIT",
+      "archive_sha256": "a6670e822bfa7c14d7e285b3303a80e29c57753b98888a7047c97f1c13412295",
+      "files": {
+        "LICENSE": "6d44712d3c276a2968c5c7e919a5315128bde9f824245f4b72b088201279ff34",
+        "norm.nimble": "d9269138e7b5bf5256c0108856cdb1b2b24cae48d099384ec35695324ac54d8c",
+        "src/norm.nim": "e8f8abce1b458b36b26891ab0d9f5ce0c5fbdb5505c3e69d7cfb53270b7d60d4",
+        "src/norm/model.nim": "d43b0357f889b8fb42a933206080dbb2935d3ae5652fdd8af515e162bc59ccf7",
+        "src/norm/pool.nim": "4ab09cd7f184c02402846bd625c5fc350e5e8daaab6964e955cdec5a9ff062e5",
+        "src/norm/postgres.nim": "c33968e157b42ac87b1ce6fd225ec8db2b65e58688536a9651af494560bd059a",
+        "src/norm/pragmas.nim": "69d291242bc20222f1568336b705ec6914125c81a690be1c2b6c2e6bdfe361ac",
+        "src/norm/pragmasutils.nim": "15f8860d094139e8394e5a58656a11bf6b17c33f9e88e8ee4863044e35523b08",
+        "src/norm/private/dot.nim": "9986108907cf7f192979e1c09d8dd0c5249a57583959212f6e7635b6f1f233d6",
+        "src/norm/private/log.nim": "e9ed918f5871b368355602185ef8ff4797aca5c153aec86764e845d48fb7327c",
+        "src/norm/private/postgres/dbtypes.nim": "b1a7f390bedbf1558bd09a2737eb049079cb7e2e41044ca1455f91bacea114a4",
+        "src/norm/private/postgres/llexec.nim": "8c5c5ce4f59c2b6c072aeda8556d5066614fc00c374187a2baf3578a88460637",
+        "src/norm/private/postgres/rowutils.nim": "e0bd8ea5ea89ef9add61edeeedc7777dc9f57f081d7cb502c0754ac9f009deea",
+        "src/norm/private/sqlite/dbtypes.nim": "0495db44a2a1694062a19b4a851fe5f8846098e5775dd2177549d9dbd52a570d",
+        "src/norm/private/sqlite/rowutils.nim": "aab6c494c83dd8132963f60399deecb954b05bebd52c2c057caa62ed0d47bd2b",
+        "src/norm/private/utils.nim": "a397fe419d5bfb197fc1979c88fe7eb9eb0c2af02a9fec72c10ed88c207e59f4",
+        "src/norm/sqlite.nim": "521e7eb45f1a34446936794fa844cb12bbba6ce150a58816528c213ad0f6bb5a",
+        "src/norm/types.nim": "1b30086a52cb2a06f78489e0dcf45a04cec52970f9d9de6c369488d5b81e9cdc"
+      }
+    },
+    {
+      "name": "lowdb",
+      "version": "0.3.0",
+      "commit": "b1891f492ac31eeb9b4e7e08761cccd0f01263a8",
+      "source": "https://github.com/PhilippMDoerner/lowdb",
+      "license": "MIT",
+      "archive_sha256": "4506d952f59fe8b2dd2a64a10900417798e92a60beded98fce5fbbb6420d4d99",
+      "files": {
+        "lowdb.nimble": "df5c40ada28185870f06c2b73c15e91181b0c9eb3fc852e4bea47f0144720104",
+        "src/lowdb.nim": "e4d5146f61ab07e185132fe1073dc8e7d62e8dd21ee58b473ad5189fc063bda9",
+        "src/lowdb/postgres.nim": "756aa6b6258520fae7483fb9528ec432d47fa642b7fcadaabcff520004738970",
+        "src/lowdb/sqlite.nim": "c7e9d043893f265705b77d892dfa2bd95a8ba937a053869f8eccc6c336a2c00f",
+        "src/lowdb/wrappers/libpq.nim": "07e1daa67765489e8519064e96b989ed77d5798ae5090975cb8afb2816e974b5",
+        "src/lowdb/wrappers/sqlite3.nim": "a29d194a4663de04dfc3774affd7398ec513880c5f049ccdc3eb73cfdc6481e8"
+      }
+    },
+    {
+      "name": "db_connector",
+      "version": "0.1.0",
+      "commit": "29450a2063970712422e1ab857695c12d80112a6",
+      "source": "https://github.com/nim-lang/db_connector",
+      "license": "MIT",
+      "archive_sha256": "9dc219d754589ff2d55d8572a89d062e369ce6a10c93fe6afa91797a73093b38",
+      "files": {
+        "LICENSE": "3f83518f4535cf20964f08167dc68bdf2c8c632f0227d6bb753e3d6218b915c9",
+        "db_connector.nimble": "e05ac3d64dd893fa85ea0c17ff54b15d0a55d0c9669def60952216aad4f84894",
+        "src/db_connector/db_common.nim": "81bbe00987693bcf66121112bc421c1744e82b9dd9cfff9bf3cbd726df68c8dd",
+        "src/db_connector/db_mysql.nim": "0a106a8041820f810030341187010bbaddd61908179fce75315976fc1b938215",
+        "src/db_connector/db_odbc.nim": "094edf5ce942849f97c2803ff323b372e0bbd0a5f25c15786ce978e5f03c6305",
+        "src/db_connector/db_postgres.nim": "3c355651643248db1efca4fffb463f02b701a282550575befe9e0f3f0f9a6cbb",
+        "src/db_connector/db_sqlite.nim": "fb91b724a4e35db3d921e420e17a8f37ca3bf790db7d543fe9af6b7b6e2c0d53",
+        "src/db_connector/mysql.nim": "f0ab72c4c4ce0b09935f1f16e55a44346598257f2900f38bf1d4d10259161b58",
+        "src/db_connector/odbcsql.nim": "044abd1b5a89f8c8e3d47cb152896ff3c4c1a8d5b40fd694d484086db8bac99d",
+        "src/db_connector/postgres.nim": "15948ab9b3cd4af95b2aebd60f0e27f014cdefdd878ece572d3ba9104d969e53",
+        "src/db_connector/private/dbutils.nim": "e68638448da5f27840daef9568f28823ad7ddf55a20cc259008ee80ca07c76b8",
+        "src/db_connector/sqlite3.nim": "72b29e5ed0147c652e1307502cad7d3b83e9096dc1549a03e641f6e37fc3da94"
+      }
+    }
+  ],
+  "patches": [
+    {
+      "package": "db_connector",
+      "file": "src/db_connector/sqlite3.nim",
+      "patch": "db_connector-library.patch",
+      "original_sha256": "72b29e5ed0147c652e1307502cad7d3b83e9096dc1549a03e641f6e37fc3da94",
+      "patched_sha256": "b45bd03260d607b4c31da82167d3bf88efe4733246333a877f8f175659f22a3a"
+    }
+  ]
+}
