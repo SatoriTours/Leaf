@@ -30,6 +30,13 @@ proc toSqlValue(value: SomeInteger): SqlValue = SqlValue(kind: sqlInteger, integ
 proc toSqlValue(value: float): SqlValue = SqlValue(kind: sqlFloat, number: value)
 proc toSqlValue(value: bool): SqlValue = toSqlValue(int(value))
 template dbValue*(value: typed): SqlValue = toSqlValue(value)
+proc `==`*(left, right: SqlValue): bool =
+  if left.kind != right.kind: return false
+  case left.kind
+  of sqlNull: true
+  of sqlInteger: left.integer == right.integer
+  of sqlFloat: left.number == right.number
+  of sqlText: left.text == right.text
 proc asString*(value: SqlValue): string =
   if value.kind != sqlText: raise newException(DatabaseError, "expected SQLite text")
   value.text
