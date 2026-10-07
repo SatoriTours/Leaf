@@ -17,6 +17,7 @@ type
     creates*, updates*, moves*, removes*: int
     prepareCalls*, applyCalls*, discardCalls*, restoreCalls*, disposeCalls*: int
     failPrepare*, failApply*, failRestore*: bool
+    failDiscard*, failDispose*: bool
     failApplyAt*: int
       ## 1-based op index to fail at during apply; 0 disables.
     disposed*: bool
@@ -39,6 +40,8 @@ proc prepareImpl(recording: RecordingBackend, batch: UpdateBatch) =
 
 proc discardImpl(recording: RecordingBackend) =
   inc recording.discardCalls
+  if recording.failDiscard:
+    raise newException(UiError, "recording discard failure")
   recording.prepared.setLen(0)
 
 proc applyImpl(recording: RecordingBackend, batch: UpdateBatch) =
@@ -105,6 +108,8 @@ proc restoreImpl(recording: RecordingBackend,
 
 proc disposeImpl(recording: RecordingBackend) =
   inc recording.disposeCalls
+  if recording.failDispose:
+    raise newException(UiError, "recording dispose failure")
   if recording.disposed: return
   recording.disposed = true
   recording.entities.clear()

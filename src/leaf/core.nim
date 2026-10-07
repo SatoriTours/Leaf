@@ -91,6 +91,9 @@ type
     validator: SnapshotValidator
     preparer: RuntimePreparer
     committer: RuntimeCommitter
+    committerOwner: uint64
+    preparerOwner: uint64
+    hookCounter: uint64
     revision: uint64
     proposed: uint64
     stagingChanged: bool
@@ -294,6 +297,12 @@ template inExecutionScope(runtime: Runtime, body: untyped) =
 
 proc acceptedRevision*(runtime: Runtime): uint64 = runtime.revision
 
+proc installingUpdate*(runtime: Runtime): bool = runtime.inUpdate
+
+proc committerOwner*(runtime: Runtime): uint64 = runtime.committerOwner
+
+proc preparerOwner*(runtime: Runtime): uint64 = runtime.preparerOwner
+
 proc proposedRevision*(runtime: Runtime): uint64 = runtime.proposed
 
 proc stagingChanged*(runtime: Runtime): bool = runtime.stagingChanged
@@ -458,12 +467,13 @@ proc setValidatorImpl(runtime: Runtime, validator: SnapshotValidator) =
 proc setValidator*(runtime: Runtime, validator: SnapshotValidator) =
   inExecutionScope(runtime): runtime.setValidatorImpl(validator)
 
-proc setCommitterImpl(runtime: Runtime, committer: RuntimeCommitter) =
+proc setCommitterImpl(runtime: Runtime, committer: RuntimeCommitter): uint64 =
   if runtime.isCandidate: fail("candidate runtime cannot install a committer")
   if runtime.inUpdate: fail("cannot replace committer during update")
   if committer == nil:
     runtime.committer = nil
-    return
+    runtime.committerOwner = 0
+    return 0
   if runtime.committer != nil:
     fail("committer already installed; unload the existing session first")
   var candidate = runtime.candidateFrom()
@@ -476,19 +486,37 @@ proc setCommitterImpl(runtime: Runtime, committer: RuntimeCommitter) =
       runtime.publishCandidate(candidate, candidate.proposed)
       runtime.safeDump()
     runtime.committer = committer
+    inc runtime.hookCounter
+    runtime.committerOwner = runtime.hookCounter
+    result = runtime.committerOwner
   finally:
     runtime.inUpdate = false
 
+proc installCommitter*(runtime: Runtime, committer: RuntimeCommitter): uint64 =
+  ## Install the backend commit hook and return its ownership token. The whole
+  ## install/uninstall phase runs inside the application execution scope. The
+  ## first non-nil install mounts the already accepted description into an
+  ## isolated candidate and calls the committer with `accepted = nil`; it
+  ## performs no business render. Prepared visible rows are published once with
+  ## a single revision advance; an untouched mount keeps the accepted revision.
+  ## A failing install leaves the hook, description and revision unchanged. A
+  ## non-nil hook cannot be replaced silently: unload it first. A caller that
+  ## owns the returned token can later uninstall exactly its own hook.
+  var token: uint64
+  inExecutionScope(runtime): token = runtime.setCommitterImpl(committer)
+  token
+
 proc setCommitter*(runtime: Runtime, committer: RuntimeCommitter) =
-  ## Install the backend commit hook. The whole install/uninstall phase runs
-  ## inside the application execution scope. The first non-nil install mounts
-  ## the already accepted description into an isolated candidate and calls the
-  ## committer with `accepted = nil`; it performs no business render. Prepared
-  ## visible rows are published once with a single revision advance; an
-  ## untouched mount keeps the accepted revision. A failing install leaves the
-  ## hook, description and revision unchanged. A non-nil hook cannot be
-  ## replaced silently: unload it with nil first.
-  inExecutionScope(runtime): runtime.setCommitterImpl(committer)
+  ## Backward-compatible entry point. Use `installCommitter` when the caller
+  ## must later uninstall only its own hook.
+  discard runtime.installCommitter(committer)
+
+proc clearCommitter*(runtime: Runtime, owner: uint64) =
+  ## Uninstall the committer only when it is still the one identified by
+  ## `owner`. A stale session can never remove another session's hook.
+  if owner == 0 or runtime.committerOwner != owner: return
+  runtime.committer = nil
+  runtime.committerOwner = 0
 
 proc prepareSnapshotImpl(runtime: Runtime, preparer: RuntimePreparer) =
   if runtime.isCandidate: fail("candidate runtime cannot prepare")
@@ -511,11 +539,34 @@ proc prepare*(runtime: Runtime) =
   ## Reprepare a viewport without rendering business state, atomically.
   runtime.prepareSnapshot(runtime.preparer)
 
+proc setPreparerImpl(runtime: Runtime, preparer: RuntimePreparer): uint64 =
+  if runtime.isCandidate: fail("candidate runtime cannot prepare")
+  if runtime.inUpdate: fail("cannot replace preparer during update")
+  runtime.prepareSnapshotImpl(preparer)
+  runtime.preparer = preparer
+  inc runtime.hookCounter
+  runtime.preparerOwner = runtime.hookCounter
+  result = runtime.preparerOwner
+
+proc installPreparer*(runtime: Runtime, preparer: RuntimePreparer): uint64 =
+  ## Install a preparer and return its ownership token so the caller can later
+  ## uninstall exactly its own hook.
+  var token: uint64
+  inExecutionScope(runtime): token = runtime.setPreparerImpl(preparer)
+  token
+
 proc setPreparer*(runtime: Runtime, preparer: RuntimePreparer) =
   ## Prepare lazy content before publication. Never mutate visible controls
   ## or business state; temporary measurement controls may be constructed.
-  runtime.prepareSnapshot(preparer)
-  runtime.preparer = preparer
+  ## Backward-compatible entry point.
+  discard runtime.installPreparer(preparer)
+
+proc clearPreparer*(runtime: Runtime, owner: uint64) =
+  ## Uninstall the preparer only when it is still the one identified by
+  ## `owner`.
+  if owner == 0 or runtime.preparerOwner != owner: return
+  runtime.preparer = nil
+  runtime.preparerOwner = 0
 
 proc find*(runtime: Runtime, key: string): MountedNode =
   if key in runtime.index: return runtime.index[key]

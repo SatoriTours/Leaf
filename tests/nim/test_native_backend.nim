@@ -1,4 +1,4 @@
-import std/[unittest, json, tables, options]
+import std/[unittest, json, tables, options, strutils]
 import leaf/[core, widgets, styles, backend, backend_session]
 import leaf/backends/headless
 
@@ -405,3 +405,228 @@ suite "Recording backend sessions":
     let updatesBefore = recording.updates
     check runtime.dispatch("go", Event(kind: click))
     check recording.updates == updatesBefore
+  test "failed second attach keeps the existing session hooks":
+    var count = 0
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        text($count, key = "count"),
+        button("go", key = "go", onClick = proc(e: Event) = inc count)], key = "root")
+
+    let runtime = newRuntime(app(render))
+    let first = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, first.backend, makeHost())
+    let applyCalls = first.applyCalls
+    let second = newRecordingBackend(fullCapabilities())
+    expect UiError:
+      discard attachBackend(runtime, second.backend, makeHost(sessionId = 8))
+    check second.applyCalls == 0
+    check runtime.dispatch("go", Event(kind: click))
+    check runtime.find("count").node.text == "1"
+    check first.applyCalls > applyCalls
+    dispose(session)
+
+  test "old session dispose does not remove a newer session hook":
+    var count = 0
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        text($count, key = "count"),
+        button("go", key = "go", onClick = proc(e: Event) = inc count)], key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recA = newRecordingBackend(fullCapabilities())
+    let sessionA = attachBackend(runtime, recA.backend, makeHost())
+    runtime.setCommitter(nil)
+    runtime.setPreparer(nil)
+    let recB = newRecordingBackend(fullCapabilities())
+    let sessionB = attachBackend(runtime, recB.backend, makeHost(sessionId = 9))
+    dispose(sessionA)
+    check runtime.dispatch("go", Event(kind: click))
+    check runtime.find("count").node.text == "1"
+    check recB.applyCalls > 1
+    dispose(sessionB)
+
+  test "dispose during a commit defers safely and remains retryable":
+    var count = 0
+    var sessionRef: BackendSession
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        text($count, key = "count"),
+        button("go", key = "go", onClick = proc(e: Event) =
+          inc count
+          dispose(sessionRef))], key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    sessionRef = session
+    var raised = false
+    try:
+      discard runtime.dispatch("go", Event(kind: click))
+    except UiError:
+      raised = true
+    check not raised
+    check recording.disposeCalls == 0
+    check not session.disposed
+    dispose(session)
+    check session.disposed
+    check recording.disposeCalls == 1
+
+  test "backend dispose failure stays retryable":
+    proc render(ctx: BuildContext): Node = button("go", key = "go")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    recording.failDispose = true
+    expect UiError:
+      dispose(session)
+    check not session.disposed
+    check recording.disposeCalls == 1
+    recording.failDispose = false
+    dispose(session)
+    check session.disposed
+    check recording.disposeCalls == 2
+
+  test "busy drain keeps queued user events for a later drain":
+    var count = 0
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        text($count, key = "count"),
+        button("go", key = "go", onClick = proc(e: Event) = inc count)], key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let handle = session.handleFor(runtime.find("go").id)
+    var injected = false
+    var duringApply = -1
+    recording.onSetter = proc(h: NodeHandle) =
+      if not injected:
+        injected = true
+        discard session.enqueue(userEvent(session, handle, 1, Event(kind: click),
+          observedRevision = runtime.acceptedRevision))
+        session.drainEvents()
+        duringApply = session.queuedEvents
+    check runtime.dispatch("go", Event(kind: click))
+    check duringApply == 1
+    check count == 1
+    check session.queuedEvents == 1
+    session.drainEvents()
+    check count == 2
+    check session.queuedEvents == 0
+
+  test "viewport restore failure rejects the candidate":
+    var failBuild = false
+    var items = @["a", "b"]
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        virtualList("list", items, proc(index: int): Node =
+          if failBuild: raise newException(UiError, "row build failed")
+          text(items[index], key = "row")),
+        button("go", key = "go", onClick = proc(e: Event) = discard)], key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let listHandle = session.handleFor(runtime.find("list").id)
+    var source = runtime.find("list").node.listSource
+    discard session.requestRows(listHandle, source.generation, 0, 1)
+    check runtime.find("list").children.len == 1
+    let before = runtime.snapshot.toJson()
+    failBuild = true
+    expect UiError:
+      discard runtime.dispatch("go", Event(kind: click))
+    check runtime.snapshot.toJson() == before
+    check runtime.find("list").children.len == 1
+
+  test "ancestor replacement migrates viewport tracking":
+    var useRow = false
+    var items = @["a", "b"]
+    proc render(ctx: BuildContext): Node =
+      let list = virtualList("list", items, proc(index: int): Node =
+        text(items[index], key = "row"))
+      let go = button("go", key = "go", onClick = proc(e: Event) = useRow = true)
+      if useRow: row(@[list, go], key = "panel")
+      else: column(@[list, go], key = "panel")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let listId = runtime.find("list").id
+    let oldHandle = session.handleFor(listId)
+    var source = runtime.find("list").node.listSource
+    discard session.requestRows(oldHandle, source.generation, 0, 1)
+    check runtime.find("list").children.len == 1
+
+    check runtime.dispatch("go", Event(kind: click))
+    check runtime.find("list").id == listId
+    check session.handleFor(listId) != oldHandle
+    check runtime.find("list").children.len == 1
+    check runtime.dispatch("go", Event(kind: click))
+    check runtime.find("list").children.len == 1
+
+  test "every mandatory backend hook is validated before apply":
+    proc render(ctx: BuildContext): Node = button("go", key = "go")
+    for missing in ["prepare", "apply", "discardPrepared", "restore", "dispose"]:
+      let runtime = newRuntime(app(render))
+      let recording = newRecordingBackend(fullCapabilities())
+      case missing
+      of "prepare": recording.backend.prepare = nil
+      of "apply": recording.backend.apply = nil
+      of "discardPrepared": recording.backend.discardPrepared = nil
+      of "restore": recording.backend.restore = nil
+      of "dispose": recording.backend.dispose = nil
+      else: discard
+      expect UiError:
+        discard attachBackend(runtime, recording.backend, makeHost())
+      check recording.applyCalls == 0
+
+  test "cleanup failure does not skip restore":
+    var a, b = 0
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        text($a, key = "a"), text($b, key = "b"),
+        button("go", key = "go", onClick = proc(e: Event) =
+          inc a; inc b)], key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    recording.failApplyAt = 2
+    recording.failDiscard = true
+    expect UiError:
+      discard runtime.dispatch("go", Event(kind: click))
+    check recording.restoreCalls > 0
+    check runtime.find("a").node.text == "0"
+    check not session.faulted
+
+    recording.failApplyAt = 2
+    recording.failDiscard = true
+    recording.failRestore = true
+    expect UiError:
+      discard runtime.dispatch("go", Event(kind: click))
+    check session.faulted
+    check runtime.eventsFrozen
+
+  test "prepare failure with cleanup exception keeps the primary error":
+    var count = 0
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        text($count, key = "count"),
+        button("go", key = "go", onClick = proc(e: Event) = inc count)], key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let before = runtime.snapshot.toJson()
+    recording.failPrepare = true
+    recording.failDiscard = true
+    var message = ""
+    try:
+      discard runtime.dispatch("go", Event(kind: click))
+    except UiError as error:
+      message = error.msg
+    check "prepare failed" in message
+    check "discard" in message
+    check runtime.snapshot.toJson() == before
+    check not session.faulted

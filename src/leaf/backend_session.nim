@@ -4,7 +4,7 @@
 ## The session is the only place that coordinates the Runtime commit gate with
 ## a backend. It never renders business state, never runs a business callback
 ## before the backend confirms a batch, and never executes platform lifecycle.
-import std/[tables, sets, math]
+import std/[tables, sets, math, strutils]
 import ./[core, styles, backend, reconcile]
 
 type
@@ -31,6 +31,8 @@ type
     host: HostContext
     mode: CapabilityMode
     reconciler: Reconciler
+    committerToken: uint64
+    preparerToken: uint64
     sessionId: uint64
     mountGeneration: uint64
     lastQueued: uint64
@@ -44,11 +46,13 @@ type
     disposed: bool
     faulted: bool
     frozen: bool
+    draining: bool
 
 proc runtime*(session: BackendSession): Runtime = session.runtime
 proc sessionId*(session: BackendSession): uint64 = session.sessionId
 proc mountGeneration*(session: BackendSession): uint64 = session.mountGeneration
 proc queuedEvents*(session: BackendSession): int = session.queue.len
+proc disposed*(session: BackendSession): bool = session.disposed
 proc faulted*(session: BackendSession): bool = session.faulted
 proc frozen*(session: BackendSession): bool = session.frozen
 proc capabilityIssues*(session: BackendSession): seq[CapabilityIssue] = session.issues
@@ -79,24 +83,57 @@ proc adapterFor(session: BackendSession): PropsAdapter =
     effectiveProps(capabilities, normalizeProps(node))
 
 proc recover(session: BackendSession,
-             previous: Table[NodeHandle, MountedEntity]): bool =
+             previous: Table[NodeHandle, MountedEntity]): string =
   ## Apply failed after touching native state. Restore the old accepted
   ## entities; a successful restore advances the mount generation so old
   ## native notifications are invalidated. A failed restore faults the session
-  ## and permanently freezes business dispatch on the runtime.
+  ## and permanently freezes business dispatch on the runtime. Returns "" on
+  ## success, otherwise the restore failure detail.
   session.frozen = true
   try:
     session.backend.restore(previous)
   except CatchableError as error:
     session.faulted = true
     session.runtime.freezeEvents("backend restore failed: " & error.msg)
-    return false
+    return error.msg
   inc session.mountGeneration
   session.queue.setLen(0)
   session.lastQueued = 0
   session.lastProcessed = 0
   session.frozen = false
-  true
+  ""
+
+proc safeDiscard(session: BackendSession, cleanup: var seq[string]) =
+  ## Cleanup must never mask the primary failure. A missing or throwing
+  ## discard hook is recorded, not propagated, so apply-failure recovery still
+  ## runs.
+  if session.backend.discardPrepared == nil:
+    cleanup.add("discardPrepared missing")
+    return
+  try:
+    session.backend.discardPrepared()
+  except CatchableError as error:
+    cleanup.add("discardPrepared failed: " & error.msg)
+
+proc cleanupSuffix(cleanup: seq[string]): string =
+  if cleanup.len == 0: "" else: "; cleanup: " & cleanup.join(", ")
+
+proc migrateViewports(session: BackendSession,
+                      previous: Table[NodeHandle, MountedEntity],
+                      plan: ReconcilePlan) =
+  ## Move accepted viewport tracking to the current handle of the same list
+  ## node after an ancestor replacement, and drop tracking for lists that are
+  ## gone. Called only after a successful accept.
+  var migrated: Table[NodeHandle, ViewportState]
+  for handle, viewport in session.viewports:
+    if not previous.hasKey(handle): continue
+    let nodeId = previous[handle].nodeId
+    if nodeId notin plan.byNodeId: continue
+    let nextHandle = plan.byNodeId[nodeId]
+    if not plan.entities.hasKey(nextHandle): continue
+    if plan.entities[nextHandle].kind != virtualList: continue
+    migrated[nextHandle] = viewport
+  session.viewports = migrated
 
 proc commit(session: BackendSession, accepted: Runtime, candidate: Runtime) =
   ## The Runtime committer. Runs after build/validate/prepare and before
@@ -112,55 +149,68 @@ proc commit(session: BackendSession, accepted: Runtime, candidate: Runtime) =
   try:
     session.backend.prepare(plan.batch)
   except CatchableError as error:
-    session.backend.discardPrepared()
-    raise newException(UiError, "backend prepare failed: " & error.msg)
+    var cleanup: seq[string]
+    session.safeDiscard(cleanup)
+    raise newException(UiError, "backend prepare failed: " & error.msg &
+      cleanupSuffix(cleanup))
 
   try:
     session.backend.apply(plan.batch)
   except CatchableError as error:
-    session.backend.discardPrepared()
+    var cleanup: seq[string]
+    session.safeDiscard(cleanup)
+    let suffix = cleanupSuffix(cleanup)
     if accepted == nil:
       # Initial mount has no accepted native state to restore. The caller
       # disposes the backend and installs nothing.
-      raise newException(UiError, "initial backend apply failed: " & error.msg)
-    if session.recover(previous):
+      raise newException(UiError, "initial backend apply failed: " &
+        error.msg & suffix)
+    let restoreError = session.recover(previous)
+    if restoreError.len == 0:
       raise newException(UiError, "backend apply failed; restored accepted state: " &
-        error.msg)
+        error.msg & suffix)
     raise newException(UiError, "backend apply failed and restore failed: " &
-      error.msg)
+      error.msg & suffix & "; restore: " & restoreError)
 
   session.reconciler.accept(plan)
+  session.migrateViewports(previous, plan)
   session.entities = plan.entities
   session.byNodeId = plan.byNodeId
 
 proc restoreViewports(session: BackendSession, candidate: Runtime) =
   ## Preparer: after a list source changes, remount the tracked viewport by
-  ## stable item key. Old row numbers are never rebound to new items.
+  ## stable item key. Old row numbers are never rebound to new items. Only a
+  ## list that is no longer mounted in this candidate is skipped; row-build,
+  ## validation and materialize errors propagate so the candidate is rejected.
   for handle, viewport in session.viewports:
     if not session.entities.hasKey(handle): continue
     let nodeId = session.entities[handle].nodeId
+    var target: MountedNode
     try:
-      let target = candidate.find(nodeId)
-      let source = target.node.listSource
-      if source == nil or source.len == 0: continue
-      var indexByKey: Table[string, int]
-      for index in 0..<source.len: indexByKey[source.itemKey(index)] = index
-      var active: seq[int]
-      for key in viewport.keys:
-        if key in indexByKey: active.add(indexByKey[key])
-      if active.len > 0:
-        discard candidate.materialize(nodeId, 0, 0, active)
+      target = candidate.find(nodeId)
     except UiError:
-      discard
+      continue
+    let source = target.node.listSource
+    if source == nil or source.len == 0: continue
+    var indexByKey: Table[string, int]
+    for index in 0..<source.len: indexByKey[source.itemKey(index)] = index
+    var active: seq[int]
+    for key in viewport.keys:
+      if key in indexByKey: active.add(indexByKey[key])
+    if active.len > 0:
+      discard candidate.materialize(nodeId, 0, 0, active)
 
 proc attachBackend*(runtime: Runtime, backend: Backend, host: HostContext,
                     mode = compatible): BackendSession =
   ## Validate hooks, host and capabilities before any visible backend apply,
   ## then install the committer and viewport preparer. A failed initial mount
-  ## disposes the backend and installs no session hook.
+  ## disposes the backend and installs no session hook. Cleanup only removes
+  ## hooks this call actually installed, so a rejected second attach never
+  ## unloads an existing session.
   if runtime == nil: fail("attachBackend requires a runtime")
   if backend == nil or backend.prepare == nil or backend.apply == nil or
-      backend.restore == nil or backend.dispose == nil:
+      backend.discardPrepared == nil or backend.restore == nil or
+      backend.dispose == nil:
     fail("backend contract is incomplete")
   if host.sessionId == 0: fail("host session id must be non-zero")
   if classify(host.scale) in {fcNan, fcInf, fcNegInf} or host.scale <= 0:
@@ -177,28 +227,42 @@ proc attachBackend*(runtime: Runtime, backend: Backend, host: HostContext,
   session.collectIssues(runtime.snapshot.root)
 
   try:
-    runtime.setCommitter(proc(accepted: Runtime, candidate: Runtime) =
-      session.commit(accepted, candidate))
-    runtime.setPreparer(proc(candidate: Runtime) =
-      session.restoreViewports(candidate))
+    session.committerToken = runtime.installCommitter(
+      proc(accepted: Runtime, candidate: Runtime) =
+        session.commit(accepted, candidate))
+    session.preparerToken = runtime.installPreparer(
+      proc(candidate: Runtime) = session.restoreViewports(candidate))
   except CatchableError:
-    runtime.setCommitter(nil)
+    if session.committerToken != 0:
+      runtime.clearCommitter(session.committerToken)
+      session.committerToken = 0
+    if session.preparerToken != 0:
+      runtime.clearPreparer(session.preparerToken)
+      session.preparerToken = 0
     backend.dispose()
     raise
   session
 
 proc dispose*(session: BackendSession) =
-  ## Idempotent teardown. Removes this session's hooks and queue and disposes
-  ## the backend once; it never calls back into a disposed native session.
+  ## Teardown. Refuses without side effects while a Runtime update/commit is in
+  ## progress, so a later call can still complete. Only removes hooks this
+  ## session installed, and only marks itself disposed after the backend
+  ## releases its resources; a throwing backend dispose stays retryable.
   if session == nil or session.disposed: return
-  session.disposed = true
-  session.queue.setLen(0)
-  session.viewports.clear()
+  if session.runtime != nil and session.runtime.installingUpdate:
+    return
   if session.runtime != nil:
-    session.runtime.setCommitter(nil)
-    session.runtime.setPreparer(nil)
+    if session.committerToken != 0:
+      session.runtime.clearCommitter(session.committerToken)
+      session.committerToken = 0
+    if session.preparerToken != 0:
+      session.runtime.clearPreparer(session.preparerToken)
+      session.preparerToken = 0
   if session.backend != nil and session.backend.dispose != nil:
     session.backend.dispose()
+  session.queue.setLen(0)
+  session.viewports.clear()
+  session.disposed = true
 
 proc enqueue*(session: BackendSession, envelope: EventEnvelope): bool =
   ## Queue a genuine user event. Backend setter notifications are suppressed at
@@ -240,14 +304,22 @@ proc process(session: BackendSession, envelope: EventEnvelope) =
     discard
 
 proc drainEvents*(session: BackendSession) =
-  ## Explicit host drain. The queue is only processed outside a commit; a
+  ## Explicit host drain. A commit in progress (or a reentrant drain) returns
+  ## without touching the queue or its sequence bookkeeping, so genuine user
+  ## events queued during apply survive for a drain after publication. The
   ## committer never dispatches queued events before publication.
   if session == nil or session.disposed or session.faulted or session.frozen: return
-  let pending = session.queue
-  session.queue = @[]
-  for envelope in pending:
-    if session.disposed or session.faulted: return
-    session.process(envelope)
+  if session.draining: return
+  if session.runtime != nil and session.runtime.installingUpdate: return
+  session.draining = true
+  try:
+    let pending = session.queue
+    session.queue = @[]
+    for envelope in pending:
+      if session.disposed or session.faulted: return
+      session.process(envelope)
+  finally:
+    session.draining = false
 
 proc requestRows*(session: BackendSession, listHandle: NodeHandle,
                   sourceGeneration: uint64, first, finish: int,
