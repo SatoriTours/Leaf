@@ -13,7 +13,7 @@ proc changes*[T: Record](record: T): ChangeSet =
     let value = current.valueFor(field.name)
     let original = if record.isNewRecord: none(SqlValue)
       else: some(previous.valueFor(field.name))
-    if original.isNone or original.get != value:
+    if original.isNone or not sqlite.`==`(original.get, value):
       result.add(FieldChange(field: field.name, before: original, after: some(value)))
 
 proc changed*[T: Record](record: T): bool = record.changes.len > 0

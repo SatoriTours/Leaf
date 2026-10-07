@@ -1,0 +1,13 @@
+{
+  "name": "scaffold_v1",
+  "identifier": "org.example.scaffold-v1",
+  "version": "0.1.0",
+  "entry": "main.nim",
+  "include": [
+    "main.nim",
+    "app",
+    "config",
+    "db",
+    "assets"
+  ]
+}

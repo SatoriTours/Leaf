@@ -9,3 +9,5 @@ proc ormCompilerArgs*(sourceRoot: string): seq[string] =
     elif defined(macosx): "libsqlite3.dylib"
     else: "libsqlite3.so(|.0)"
   result.add("-d:leafOrmSqliteLibrary=" & library)
+
+const OrmSourceRoot* = currentSourcePath().parentDir.parentDir

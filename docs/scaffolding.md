@@ -10,7 +10,7 @@ leaf --check my-app
 leaf --watch my-app
 ```
 
-生成器创建一个可以运行的首页、搜索和设置示例，包含模型、服务、页面逻辑、View、独立路由、SQLite 迁移 SQL 和测试。
+生成器创建一个可以运行的首页、搜索和设置示例，包含继承式模型、页面逻辑、View、独立路由、SQLite 迁移 SQL 和测试。
 
 ```text
 my-app/
@@ -30,7 +30,7 @@ my-app/
 │   │       └── settings.nim
 │   ├── components/empty_state.nim
 │   ├── models/task.nim
-│   ├── services/task_service.nim
+│   ├── models/application_record.nim
 │   └── generated/
 │       ├── pages.nim
 │       └── migrations.nim
@@ -44,9 +44,9 @@ my-app/
 └── tests/
 ```
 
-`pages/` 按页面组划分。首页的主界面、搜索界面和设置面板共同持有一份状态。`logic.nim` 接收用户操作并调用服务；`views/` 只生成界面及绑定事件。
+`pages/` 按页面组划分。首页的主界面、搜索界面和设置面板共同持有一份状态。`logic.nim` 接收用户操作并调用 Model；`views/` 只生成界面及绑定事件。
 
-`page.nim` 预加载 Leaf、模型、服务与组件，并用 Nim `include` 组合本组的逻辑和 View 文件。这些文件无需重复导入依赖。新增本组 View 时，在 `page.nim` 添加 include，并保持被调用的子 View 先于组合 View 声明。任意用户新增文件的自动发现不在这一版本中。
+`page.nim` 预加载 Leaf、Model 与组件，并用 Nim `include` 组合本组的逻辑和 View 文件。这些文件无需重复导入依赖。新增本组 View 时，在 `page.nim` 添加 include，并保持被调用的子 View 先于组合 View 声明。任意用户新增文件的自动发现不在这一版本中。
 
 ## 在应用中生成业务资源
 
@@ -57,8 +57,7 @@ leaf generate scaffold Metric count:int amount:float --project my-app
 
 资源命令一次生成：
 
-- `app/models/note.nim`：类型、稳定的整数 id、校验。
-- `app/services/note_service.nim`：SQLite 创建、查询、更新与删除。
+- `app/models/note.nim`：继承 ApplicationRecord、只读 int64 id、校验及时间字段。
 - `app/pages/notes/logic.nim` 和 `views/`：列表、编辑器、详情及页面组状态。
 - `app/pages/notes/page.nim`：依赖预组装与页面工厂。
 - `db/migrations/<version>_create_notes.up.sql` 和 `.down.sql`。
@@ -66,7 +65,7 @@ leaf generate scaffold Metric count:int amount:float --project my-app
 
 生成器自动接入页面工厂、`/notes` 路由和主窗口导航，无需手动导入或修改 shell。
 
-字段支持 `string`、`bool`、`int`、`float`。字符串必填并去除两端空白；整数与浮点数在提交时解析；浮点数必须有限。创建和编辑失败会保留输入，取消编辑不会修改已保存数据。数据库只读或锁定等写入错误会显示在页面上，失败的完成或删除操作不会提前改变记录。输入 key 为 `notes_field_title`，按钮 key 为 `notes_new`、`notes_save` 等，列表操作 key 使用业务 id。
+字段支持 `string`、`bool`、`int`、`float`。字符串必填、最多 200 个 Unicode 码点，并去除两端空白；整数与浮点数在提交时解析；浮点数必须有限。创建和编辑失败会保留输入，取消编辑不会修改已保存数据。数据库只读或锁定等写入错误会显示在页面上，失败的完成或删除操作不会提前改变记录。输入 key 为 `notes_field_title`，按钮 key 为 `notes_new`、`notes_save` 等，列表操作 key 使用业务 id。
 
 模型名使用单数 PascalCase，文件名使用 snake_case。复数采用简单规则：辅音加 y 变 ies；s/x/z/ch/sh 加 es；其余加 s。没有完整英语词形还原。完整模板已有 Task 模型，重复生成会被拒绝。`leaf_schema_migrations` 和 `sqlite_` 开头的表名保留给存储层。
 
@@ -127,3 +126,52 @@ Leaf 提供显式的 `leaf/sqlite` 模块，依赖目标系统 SQLite 动态库�
 nim c -r --path:/path/to/leaf/src --nimcache:target/test-cache --out:target/test_home tests/test_home.nim
 nim c -r --path:/path/to/leaf/src --nimcache:target/test-cache --out:target/test_notes tests/test_notes.nim
 ```
+
+## schema 2 的 Model 与连接作用域
+
+新应用清单为 `schema: 2, model_api: 1, timestamps: true`。`ApplicationRecord` 继承 `TimestampedRecord`；每个具体模型用 `defineModel` 声明表名、校验和回调，共享保存、查询、删除、dirty tracking 与事务能力。常规 CRUD 不生成 service。
+
+```nim
+import leaf/model
+import ./application_record
+
+type Note* = ref object of ApplicationRecord
+  title*: string
+  archived*: bool
+
+defineModel(Note, table = "notes"):
+  validates title, presence = true, maxLength = 200
+  scope active, it.archived == false
+
+# 位于应用执行作用域内，无需传 db。
+let titles = Note.active.where(it.title.contains("中文")).pluck(it.title)
+let first = Note.first  # Option[Note]，默认按 id ASC
+let last = Note.last
+let records = Note.all # seq[Note]
+let total = Note.count # int64；count/exists 忽略排序与分页
+transaction:
+  let note = Note.createOrRaise(title = "事务内创建")
+  note.archived = true
+  note.saveOrRaise()
+```
+
+启动时打开并迁移数据库一次，在 `withDatabase` 内建立页面工厂。`createApplication(database = nil)` 保留测试注入接口；render 与 Application.executionScope 绑定同一连接，覆盖事件、延迟列表行和验证器。直接使用 Model 的后台任务须自行打开连接并进入同步 withDatabase，不能跨线程复用连接或跨 await 保留作用域。
+
+页面 Draft 是独立值类型，编辑先查询完整 Model，再赋值及 save。校验失败返回 false，保留输入并显示 errors.fullMessages；数据库失败抛异常，页面显示错误。取消编辑不改变已存数据。详情和编辑主键为 int64。
+
+## schema 1 兼容与人工升级
+
+已有 schema 1 清单继续生成原来的值模型、service、int id 和迁移；生成器不会自动升级或改写历史 SQL。schema 2 缺少 model_api/timestamps 或版本未知时拒绝生成。升级须先改应用基类、声明、页面和连接作用域，再核对生成注册文件与清单，最后用新迁移补齐旧表时间字段：
+
+```sql
+-- 新增 002_task_timestamps.up.sql，001_create_tasks.up.sql 保持原样。
+ALTER TABLE tasks ADD COLUMN created_at REAL;
+ALTER TABLE tasks ADD COLUMN updated_at REAL;
+UPDATE tasks SET
+  created_at = CAST(strftime('%s', 'now') AS REAL),
+  updated_at = CAST(strftime('%s', 'now') AS REAL);
+```
+
+将新迁移加入应用迁移序列；模型使用 Option[DateTime] 接收时间值，未来写入由框架补齐 UTC 时间。schema 2 新表的时间字段为 REAL NOT NULL。如需对旧表补 NOT NULL 约束，另建迁移重建表。新表用 INTEGER PRIMARY KEY，删除后的 id 可能重用；原 schema 1 AUTOINCREMENT 语义保持不变。
+
+完整 API 与事务失败语义见 [Model 文档](models.md)。

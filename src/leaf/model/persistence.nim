@@ -25,7 +25,7 @@ proc writtenChanges[T: Record](record: T, values: FieldValues): ChangeSet =
     if field.name == "id": continue
     let value = values.valueFor(field.name)
     let previous = if record.isNewRecord: none(SqlValue) else: some(baseline.valueFor(field.name))
-    if previous.isNone or previous.get != value:
+    if previous.isNone or not sqlite.`==`(previous.get, value):
       result.add(FieldChange(field: field.name, before: previous, after: some(value)))
 
 proc queueCallbacks[T: Record](record: T, event: ModelEvent) =

@@ -1,10 +1,10 @@
 ## One command for a complete application or a registered typed CRUD resource.
 import std/[os, strutils, json]
-import ./[core, project, scaffold_types, scaffold_files, scaffold_templates]
+import ./[core, project, scaffold_types, scaffold_files, scaffold_templates, scaffold_model_templates, scaffold_model_pages]
 export scaffold_types
 
 const
-  ScaffoldSchema = 1
+  ScaffoldSchema = 2
   ManifestPath = ".leaf/scaffold.json"
   PagesPath = "app/generated/pages.nim"
   RoutesPath = "config/generated/routes.nim"
@@ -24,12 +24,18 @@ const
     ("config/routes.nim", staticRead("templates/scaffold/routes.nim")),
     ("README.md", staticRead("templates/scaffold/README.md"))]
 
-proc pageRegistry(resources: seq[ResourceSpec]): string =
-  result = GeneratedHeader & "import leaf\nimport leaf/sqlite as storage\nimport ../pages/home/page as home_page\n"
+proc pageRegistry(resources: seq[ResourceSpec], schema: int): string =
+  result = GeneratedHeader & "import leaf\n"
+  if schema == 1: result.add("import leaf/sqlite as storage\n")
+  result.add("import ../pages/home/page as home_page\n")
   for resource in resources:
     result.add("import ../pages/" & resource.plural & "/page as " & resource.plural & "_page\n")
-  result.add("\nproc generatedPages*(database: storage.Database): seq[PageDefinition] =\n  @[home_page.definition(database)")
-  for resource in resources: result.add(",\n    " & resource.plural & "_page.definition(database)")
+  if schema == 1:
+    result.add("\nproc generatedPages*(database: storage.Database): seq[PageDefinition] =\n  @[home_page.definition(database)")
+    for resource in resources: result.add(",\n    " & resource.plural & "_page.definition(database)")
+  else:
+    result.add("\nproc generatedPages*(): seq[PageDefinition] =\n  @[home_page.definition()")
+    for resource in resources: result.add(",\n    " & resource.plural & "_page.definition()")
   result.add("]\n")
 
 proc migrationRegistry(resources: seq[ResourceSpec]): string =
@@ -53,14 +59,18 @@ proc routeRegistry(resources: seq[ResourceSpec]): string =
     result.add(",\n    Route(name: \"" & p & "\", path: \"/" & p & "\", page: \"" & p & "\", view: \"index\")")
   result.add("\n  ]\n")
 
-proc manifest(resources: seq[ResourceSpec]): string =
+proc manifest(resources: seq[ResourceSpec], schema: int): string =
   var entries = newJArray()
   for resource in resources:
     var fields = newJArray()
     for field in resource.fields: fields.add(%*{"name": field.name, "type": field.kind})
     entries.add(%*{"model": resource.model, "singular": resource.singular,
       "fields": fields, "migration": resource.migration})
-  pretty(%*{"schema": ScaffoldSchema, "resources": entries}) & "\n"
+  var value = %*{"schema": schema, "resources": entries}
+  if schema == 2:
+    value["model_api"] = %1
+    value["timestamps"] = %true
+  pretty(value) & "\n"
 
 proc member(value: JsonNode, name: string, kind: JsonNodeKind): JsonNode =
   if value.kind != JObject or name notin value or value[name].kind != kind:
@@ -78,13 +88,16 @@ proc checkResource(resources: seq[ResourceSpec], resource: ResourceSpec) =
       fail("resource already exists: " & resource.model)
     if prior.migration == resource.migration: fail("duplicate migration version")
 
-proc loadResources(root: string): seq[ResourceSpec] =
+proc loadManifest(root: string): ScaffoldManifest =
   let path = guardedPath(root, ManifestPath)
   if not fileExists(path):
     fail("resource generation needs a scaffold application; create one with leaf g scaffold DIRECTORY")
   let value = parseFile(path)
-  if member(value, "schema", JInt).getInt != ScaffoldSchema:
-    fail("unsupported scaffold manifest schema")
+  result.schema = member(value, "schema", JInt).getInt
+  if result.schema notin [1, 2]: fail("unsupported scaffold manifest schema")
+  if result.schema == 2:
+    if member(value, "model_api", JInt).getInt != 1 or not member(value, "timestamps", JBool).getBool:
+      fail("unsupported scaffold model metadata")
   let entries = member(value, "resources", JArray)
   for entry in entries:
     let name = member(entry, "model", JString).getStr
@@ -97,18 +110,33 @@ proc loadResources(root: string): seq[ResourceSpec] =
     let resource = parseResource(singular, fields, version)
     if name != resource.model or singular != resource.singular:
       fail("noncanonical resource identity in scaffold manifest")
-    checkResource(result, resource)
-    result.add(resource)
-  for file in [ScaffoldFile(path: PagesPath, content: pageRegistry(result)),
-      ScaffoldFile(path: RoutesPath, content: routeRegistry(result)),
-      ScaffoldFile(path: MigrationsPath, content: migrationRegistry(result))]:
+    if result.schema == 2: checkModelFields(resource)
+    checkResource(result.resources, resource)
+    result.resources.add(resource)
+  for file in [ScaffoldFile(path: PagesPath, content: pageRegistry(result.resources, result.schema)),
+      ScaffoldFile(path: RoutesPath, content: routeRegistry(result.resources)),
+      ScaffoldFile(path: MigrationsPath, content: migrationRegistry(result.resources))]:
     let registered = guardedPath(root, file.path)
     if not fileExists(registered) or readFile(registered) != file.content:
       fail("generated registry was modified or is missing: " & file.path)
 
 proc appFiles(name: string): seq[ScaffoldFile] =
+  const
+    modelApplication = staticRead("templates/scaffold/model_application.nim")
+    modelPage = staticRead("templates/scaffold/model_home_page.nim")
+    modelLogic = staticRead("templates/scaffold/model_home_logic.nim")
+    modelReadme = staticRead("templates/scaffold/model_README.md")
   for (path, content) in Templates:
-    result.add(ScaffoldFile(path: path, content: content.replace("{{name}}", name)))
+    var selected = content
+    case path
+    of "app/application.nim": selected = modelApplication
+    of "app/pages/home/page.nim": selected = modelPage
+    of "app/pages/home/logic.nim": selected = modelLogic
+    of "README.md": selected = modelReadme
+    else: discard
+    result.add(ScaffoldFile(path: path, content: selected.replace("{{name}}", name)))
+  result.add(ScaffoldFile(path: "config.nims", content: "import std/strutils\nimport leaf/orm_config\nfor argument in ormCompilerArgs(OrmSourceRoot):\n  let pair = argument.split(\":\", 1)\n  switch(pair[0].strip(chars = {'-'}), pair[1])\n"))
+  result.add(ScaffoldFile(path: "app/models/application_record.nim", content: "import leaf/model\n\ntype ApplicationRecord* = ref object of TimestampedRecord\ndefineAbstractModel(ApplicationRecord)\n"))
   result.add(ScaffoldFile(path: "leaf.json", content: pretty(newProjectConfig(name, "main.nim",
     @["main.nim", "app", "config", "db", "assets"])) & "\n"))
   result.add(ScaffoldFile(path: ".gitignore", content: "/target/\n/dist/\n*.core\n"))
@@ -118,14 +146,13 @@ proc appFiles(name: string): seq[ScaffoldFile] =
   result.add(ScaffoldFile(path: "config/database.nim", content:
     "## Importing configuration does not open storage; application startup does.\nimport std/os\nimport leaf/sqlite\nimport ../app/generated/migrations\nexport sqlite\n\nproc databasePath*(): string =\n  getEnv(\"LEAF_DATABASE_PATH\", getDataDir() / " & name.escape & " / \"application.sqlite3\")\n\nproc openApplicationDatabase*(path = databasePath()): Database =\n  result = openDatabase(path)\n  try:\n    result.migrate(generatedMigrations())\n  except CatchableError:\n    result.close()\n    raise\n"))
   let task = parseResource("Task", @["title:string", "done:bool"], 1)
-  result.add(ScaffoldFile(path: "app/models/task.nim", content: modelCode(task)))
-  result.add(ScaffoldFile(path: "app/services/task_service.nim", content: serviceCode(task)))
-  result.add(ScaffoldFile(path: "tests/test_home.nim", content: testCode(task)))
-  result.add(migrationFiles(task))
-  result.add(ScaffoldFile(path: PagesPath, content: pageRegistry(@[])))
+  result.add(ScaffoldFile(path: "app/models/task.nim", content: modelCodeV2(task)))
+  result.add(ScaffoldFile(path: "tests/test_home.nim", content: modelTestCodeV2(task)))
+  result.add(migrationFilesV2(task))
+  result.add(ScaffoldFile(path: PagesPath, content: pageRegistry(@[], ScaffoldSchema)))
   result.add(ScaffoldFile(path: RoutesPath, content: routeRegistry(@[])))
   result.add(ScaffoldFile(path: MigrationsPath, content: migrationRegistry(@[])))
-  result.add(ScaffoldFile(path: ManifestPath, content: manifest(@[])))
+  result.add(ScaffoldFile(path: ManifestPath, content: manifest(@[], ScaffoldSchema)))
 
 proc generateScaffold*(options: ScaffoldOptions): seq[string] =
   let newProject = options.project.len == 0
@@ -137,19 +164,26 @@ proc generateScaffold*(options: ScaffoldOptions): seq[string] =
     plan = appFiles(root.extractFilename)
   else:
     root = readProject(options.project).root
-    var resources = loadResources(root)
+    let loaded = loadManifest(root)
+    var resources = loaded.resources
+    let schema = loaded.schema
     var version = 2
     for resource in resources: version = max(version, resource.migration + 1)
     let resource = parseResource(options.target, options.fields, version)
     checkResource(resources, resource)
-    plan = resourceFiles(resource)
-    plan.add(migrationFiles(resource))
-    plan.add(ScaffoldFile(path: "tests/test_" & resource.plural & ".nim", content: testCode(resource)))
+    if schema == 1:
+      plan = resourceFiles(resource)
+      plan.add(migrationFiles(resource))
+      plan.add(ScaffoldFile(path: "tests/test_" & resource.plural & ".nim", content: testCode(resource)))
+    else:
+      plan = resourceFilesV2(resource)
+      plan.add(migrationFilesV2(resource))
+      plan.add(ScaffoldFile(path: "tests/test_" & resource.plural & ".nim", content: modelTestCodeV2(resource)))
     resources.add(resource)
-    for file in [ScaffoldFile(path: PagesPath, content: pageRegistry(resources)),
+    for file in [ScaffoldFile(path: PagesPath, content: pageRegistry(resources, schema)),
         ScaffoldFile(path: RoutesPath, content: routeRegistry(resources)),
         ScaffoldFile(path: MigrationsPath, content: migrationRegistry(resources)),
-        ScaffoldFile(path: ManifestPath, content: manifest(resources))]:
+        ScaffoldFile(path: ManifestPath, content: manifest(resources, schema))]:
       var updated = file
       updated.update = true
       updated.previous = readFile(guardedPath(root, file.path))
