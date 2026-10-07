@@ -172,3 +172,274 @@ suite "SDK archive and native installer":
     check verify.headlessOnly
     expect ValueError: discard parsePackageOptions(@["--target"])
     expect ValueError: discard parseVerifyOptions(@["--headless-only=yes"])
+
+
+suite "Relocated SDK real path boundaries":
+  setup:
+    let base=createTempDir("leaf path 中文 spaces ", "")
+    let sdk=base/"SDK with spaces 中文"
+    let sibling=base/"SDK with spaces 中文-sibling"
+    createDir(sdk/"toolchain")
+    createDir(sibling)
+    writeFile(sdk/"toolchain"/"nim", "compiler")
+    writeFile(sibling/"nim", "external compiler")
+  teardown:
+    removeDir(base)
+  test "real descendants accepted and sibling prefixes rejected":
+    check within(sdk/"toolchain"/"nim",sdk)
+    check within(sdk,sdk)
+    check not within(sibling/"nim",sdk)
+    check not within(base/"absent",sdk)
+    check not within(sdk/"missing-file",sdk)
+  test "different root aliases resolve to the same SDK":
+    let alias=base/"SDK alias 中文"
+    when defined(windows):
+      let junction=runCommand("cmd.exe",@["/d","/c","mklink","/J",alias,sdk])
+      checkpoint junction.output
+      check junction.exitCode==0
+    else:createSymlink(sdk,alias)
+    check within(sdk/"toolchain"/"nim",alias)
+    check within(alias/"toolchain"/"nim",sdk)
+  test "real directory link escape and outside files remain rejected":
+    let escaped=sdk/"escaped-directory"
+    when defined(windows):
+      let junction=runCommand("cmd.exe",@["/d","/c","mklink","/J",escaped,sibling])
+      checkpoint junction.output
+      check junction.exitCode==0
+    else:createSymlink(sibling,escaped)
+    check not within(escaped/"nim",sdk)
+    check not within(sibling/"nim",sdk)
+  when not defined(windows):
+    test "real file symlink escape is rejected":
+      createSymlink(sibling/"nim",sdk/"escaped-file")
+      check not within(sdk/"escaped-file",sdk)
+
+suite "Windows HTTPS preparation":
+  test "new and legacy Git layouts and missing dependencies":
+    let pwsh=findExe("pwsh")
+    if pwsh.len==0:
+      checkpoint "PowerShell unavailable; HTTPS layout regression not verified"
+      skip()
+    else:
+      let base=createTempDir("leaf HTTPS 中文 space ", "")
+      defer:removeDir(base)
+      let testScript=base/"https_tests.ps1"
+      writeFile(testScript, """
+param([string]$Helper, [string]$FixtureRoot)
+$ErrorActionPreference = 'Stop'
+. $Helper
+function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
+function Make-Git($Name, $Prefix, $CertDir) {
+    $root = Join-Path $FixtureRoot $Name
+    $bin = Join-Path $root "$Prefix/bin"
+    $cert = Join-Path $root "$Prefix/$CertDir/ca-bundle.crt"
+    New-Item -ItemType Directory -Force $bin, (Split-Path $cert -Parent), (Join-Path $root 'cmd') | Out-Null
+    foreach ($file in @('libssl-3-x64.dll', 'libcrypto-3-x64.dll', 'openssl.exe')) {
+        Set-Content -LiteralPath (Join-Path $bin $file) 'fixture bytes'
+    }
+    Set-Content -LiteralPath $cert 'fixture CA bytes'
+    Set-Content -LiteralPath (Join-Path $root 'cmd/git.exe') 'fixture git'
+    return $root
+}
+function Reject($Git, $Reason) {
+    $caught = $false
+    try { Get-LeafGitHttpsRuntime -GitExecutable $Git | Out-Null }
+    catch { $caught = $true; Assert ($_.Exception.Message -like '*HTTPS*') "Missing HTTPS diagnostic: $_" }
+    Assert $caught $Reason
+}
+$current = Make-Git 'Git 中文 spaces new' 'ucrt64' 'etc/ssl/certs'
+$git = Join-Path $current 'cmd/git.exe'
+$runtime = Get-LeafGitHttpsRuntime -GitExecutable $git
+Assert ($runtime.OpenSslBin -eq (Join-Path $current 'ucrt64/bin')) 'New ucrt64 runtime not selected'
+Assert ($runtime.Certificates -eq (Join-Path $current 'ucrt64/etc/ssl/certs/ca-bundle.crt')) 'New CA not selected'
+Assert ($runtime.SslVersion -eq '3-x64') 'Nim SSL filename suffix wrong'
+# Git wrappers in bin and the native ucrt64 executable resolve the same root.
+New-Item -ItemType Directory -Force (Join-Path $current 'bin') | Out-Null
+foreach ($relative in @('bin/git.exe', 'ucrt64/bin/git.exe')) {
+    $entry = Join-Path $current $relative
+    Set-Content -LiteralPath $entry 'fixture git'
+    Assert ((Get-LeafGitHttpsRuntime -GitExecutable $entry).OpenSslBin -eq $runtime.OpenSslBin) 'Git root derivation wrong'
+}
+$legacy = Make-Git 'Git legacy spaces' 'mingw64' 'ssl/certs'
+$old = Get-LeafGitHttpsRuntime -GitExecutable (Join-Path $legacy 'cmd/git.exe')
+Assert ($old.OpenSslBin -eq (Join-Path $legacy 'mingw64/bin')) 'Legacy runtime not selected'
+Assert ($old.Certificates -eq (Join-Path $legacy 'mingw64/ssl/certs/ca-bundle.crt')) 'Legacy CA not selected'
+$legacyEtc = Make-Git 'Git legacy etc' 'mingw64' 'etc/ssl/certs'
+Assert ((Get-LeafGitHttpsRuntime -GitExecutable (Join-Path $legacyEtc 'cmd/git.exe')).Certificates -eq
+    (Join-Path $legacyEtc 'mingw64/etc/ssl/certs/ca-bundle.crt')) 'Legacy etc CA not selected'
+# Prefer a complete ucrt64 layout; fall back only to another complete layout.
+$both = Make-Git 'Git both layouts' 'mingw64' 'ssl/certs'
+Make-Git 'Git both layouts' 'ucrt64' 'etc/ssl/certs' | Out-Null
+$bothGit = Join-Path $both 'cmd/git.exe'
+Assert ((Get-LeafGitHttpsRuntime -GitExecutable $bothGit).OpenSslBin -eq
+    (Join-Path $both 'ucrt64/bin')) 'Complete ucrt64 did not take precedence'
+Remove-Item -LiteralPath (Join-Path $both 'ucrt64/bin/libcrypto-3-x64.dll')
+Assert ((Get-LeafGitHttpsRuntime -GitExecutable $bothGit).OpenSslBin -eq
+    (Join-Path $both 'mingw64/bin')) 'Incomplete ucrt64 did not fall back to complete mingw64'
+$pathFile = Join-Path $FixtureRoot 'github_path'
+$envFile = Join-Path $FixtureRoot 'github_env'
+Write-LeafGitHttpsEnvironment -Runtime $runtime -PathFile $pathFile -EnvironmentFile $envFile
+Assert ((Get-Content -LiteralPath $pathFile) -eq $runtime.OpenSslBin) 'Runtime PATH not transmitted'
+$lines = Get-Content -LiteralPath $envFile
+Assert ($lines -contains 'NIM_SSL_VERSION=3-x64') 'Nim SSL suffix not transmitted'
+Assert ($lines -contains ('SSL_CERT_FILE=' + $runtime.Certificates)) 'CA not transmitted'
+# Validate complete pairs and certificates; never silently skip TLS.
+Remove-Item -LiteralPath (Join-Path $current 'ucrt64/bin/libcrypto-3-x64.dll')
+Reject $git 'Missing crypto accepted'
+Set-Content -LiteralPath (Join-Path $current 'ucrt64/bin/libcrypto-3-x64.dll') '' -NoNewline
+Reject $git 'Empty crypto accepted'
+Set-Content -LiteralPath (Join-Path $current 'ucrt64/bin/libcrypto-3-x64.dll') 'fixture bytes'
+Remove-Item -LiteralPath (Join-Path $current 'ucrt64/etc/ssl/certs/ca-bundle.crt')
+Reject $git 'Missing CA accepted'
+# Do not mix a ucrt64 ssl DLL with a mingw64 crypto DLL or certificate.
+New-Item -ItemType Directory -Force (Join-Path $current 'mingw64/bin') | Out-Null
+Set-Content -LiteralPath (Join-Path $current 'mingw64/bin/libcrypto-3-x64.dll') 'fixture bytes'
+Reject $git 'Mixed incomplete profiles accepted'
+Remove-Item -LiteralPath (Join-Path $legacy 'mingw64/bin/libssl-3-x64.dll')
+Reject (Join-Path $legacy 'cmd/git.exe') 'Missing ssl accepted'
+'Windows HTTPS layout/validation/environment regression passed'
+""")
+      let executed=runCommand(pwsh,@["-NoProfile","-File",testScript,
+        "-Helper",RepositoryRoot/"scripts/prepare_windows_https.ps1","-FixtureRoot",base])
+      checkpoint executed.output
+      check executed.exitCode==0
+
+  test "real OpenSSL rejects invalid CA before publishing environment":
+    let pwsh=findExe("pwsh")
+    let openssl=findExe("openssl")
+    if pwsh.len==0 or openssl.len==0:
+      checkpoint "PowerShell/OpenSSL unavailable; real CA regression not verified"
+      skip()
+    else:
+      let base=createTempDir("leaf CA 中文 space ", "")
+      defer:removeDir(base)
+      let testScript=base/"ca_tests.ps1"
+      writeFile(testScript, """
+param([string]$Helper, [string]$FixtureRoot, [string]$OpenSsl)
+$ErrorActionPreference = 'Stop'
+. $Helper
+function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
+$cert = Join-Path $FixtureRoot 'valid CA 中文.pem'
+$key = Join-Path $FixtureRoot 'generated test key.pem'
+& $OpenSsl req -x509 -newkey rsa:2048 -nodes -subj '/CN=Leaf Test CA' -days 1 -keyout $key -out $cert 2>&1 | Out-Null
+Assert ($LASTEXITCODE -eq 0) 'Test certificate generation failed'
+$runtime = [pscustomobject]@{
+    OpenSslBin = Split-Path $OpenSsl -Parent
+    OpenSslExecutable = $OpenSsl
+    Certificates = $cert
+    SslVersion = '3-x64'
+}
+$pathFile = Join-Path $FixtureRoot 'github_path'
+$envFile = Join-Path $FixtureRoot 'github_env'
+$previousPath = $env:PATH
+Publish-LeafGitHttpsEnvironment -Runtime $runtime -PathFile $pathFile -EnvironmentFile $envFile
+Assert ((Get-Content -LiteralPath $pathFile) -eq $runtime.OpenSslBin) 'Valid CA did not publish PATH'
+$lines = Get-Content -LiteralPath $envFile
+Assert ($lines -contains 'NIM_SSL_VERSION=3-x64') 'Valid CA did not publish SSL suffix'
+Assert ($lines -contains ('SSL_CERT_FILE=' + $cert)) 'Valid CA did not publish CA path'
+Assert ($env:PATH -ceq $previousPath) 'Valid CA changed process PATH'
+'Valid X509 CA accepted using real OpenSSL'
+$invalid = @(
+    @{ Name = 'garbage'; Text = "fixture CA bytes`n" },
+    @{ Name = 'comments'; Text = "# CA bundle comment only`n# no certificates`n" },
+    @{ Name = 'malformed PEM'; Text = "-----BEGIN CERTIFICATE-----`ninvalid`n-----END CERTIFICATE-----`n" }
+)
+foreach ($case in $invalid) {
+    $runtime.Certificates = Join-Path $FixtureRoot ($case.Name + ' 中文.pem')
+    Set-Content -LiteralPath $runtime.Certificates $case.Text -NoNewline
+    # Both absent files and existing runner files must remain untouched.
+    foreach ($existing in @($false, $true)) {
+        foreach ($file in @($pathFile, $envFile)) {
+            if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
+        }
+        if ($existing) {
+            Set-Content -LiteralPath $pathFile 'existing PATH' -NoNewline
+            Set-Content -LiteralPath $envFile 'EXISTING_ENV=preserved' -NoNewline
+        }
+        $caught = $false
+        try { Publish-LeafGitHttpsEnvironment -Runtime $runtime -PathFile $pathFile -EnvironmentFile $envFile }
+        catch {
+            $caught = $true
+            Assert ($_.Exception.Message -like '*HTTPS CA*') "Missing CA diagnostic: $_"
+        }
+        Assert $caught ($case.Name + ' incorrectly accepted')
+        Assert ($env:PATH -ceq $previousPath) ($case.Name + ' changed process PATH')
+        if ($existing) {
+            Assert ([IO.File]::ReadAllText($pathFile) -ceq 'existing PATH') ($case.Name + ' appended PATH')
+            Assert ([IO.File]::ReadAllText($envFile) -ceq 'EXISTING_ENV=preserved') ($case.Name + ' appended ENV')
+        } else {
+            Assert (-not (Test-Path -LiteralPath $pathFile)) ($case.Name + ' created PATH')
+            Assert (-not (Test-Path -LiteralPath $envFile)) ($case.Name + ' created ENV')
+        }
+    }
+    ($case.Name + ' rejected; PATH/ENV unchanged')
+}
+""")
+      let executed=runCommand(pwsh,@["-NoProfile","-File",testScript,
+        "-Helper",RepositoryRoot/"scripts/prepare_windows_https.ps1",
+        "-FixtureRoot",base,"-OpenSsl",openssl])
+      checkpoint executed.output
+      check executed.exitCode==0
+
+  test "real Application discovery selects first Git path and honors explicit override":
+    let pwsh=findExe("pwsh")
+    if pwsh.len==0:
+      checkpoint "PowerShell unavailable; multiple Git Application discovery not verified"
+      skip()
+    else:
+      let base=createTempDir("leaf Git discovery 中文 space ", "")
+      defer:removeDir(base)
+      let gitRoot=base/"Git 中文 spaces"
+      for directory in ["bin", "cmd", "mingw64/bin"]:
+        let bin=gitRoot/directory
+        createDir(bin)
+        let git=bin/"git.exe"
+        writeFile(git,"#!/bin/sh\nexit 0\n")
+        when not defined(windows):
+          setFilePermissions(git,{fpUserRead,fpUserWrite,fpUserExec})
+      let testScript=base/"discovery_tests.ps1"
+      writeFile(testScript, """
+param([string]$Helper, [string]$GitRoot)
+$ErrorActionPreference = 'Stop'
+. $Helper
+function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
+$bins = @('bin', 'cmd', 'mingw64/bin') | ForEach-Object { Join-Path $GitRoot $_ }
+$expected = Join-Path $bins[0] 'git.exe'
+$previousPath = $env:PATH
+try {
+    $env:PATH = $bins -join [IO.Path]::PathSeparator
+    # Genuine Application objects discovered from executable fixture files,
+    # not mocked Get-Command objects or joined path strings.
+    $applications = @(Get-Command git.exe -CommandType Application)
+    Assert ($applications.Count -eq 3) 'Fixture did not discover all three Git Applications'
+    Assert ($applications[0].Source -eq $expected) 'Application order differs from PATH order'
+    'Discovered three real Git Applications: ' + ($applications.Source -join '; ')
+    $selected = Resolve-LeafGitExecutable
+    Assert ($selected -is [string]) 'Discovery did not return one path string'
+    Assert ($selected -eq $expected) 'Discovery did not select first Application before taking Source'
+    Assert (Test-Path -LiteralPath $selected -PathType Leaf) 'Selected Git path does not exist'
+    # Feed discovery into the unchanged supported-layout selector.
+    $runtimeBin = Join-Path $GitRoot 'mingw64/bin'
+    $cert = Join-Path $GitRoot 'mingw64/etc/ssl/certs/ca-bundle.crt'
+    New-Item -ItemType Directory -Force (Split-Path $cert -Parent) | Out-Null
+    foreach ($file in @('libssl-3-x64.dll', 'libcrypto-3-x64.dll', 'openssl.exe')) {
+        Set-Content -LiteralPath (Join-Path $runtimeBin $file) 'layout fixture bytes'
+    }
+    Set-Content -LiteralPath $cert 'layout fixture CA bytes'
+    Assert ((Get-LeafGitHttpsRuntime -GitExecutable $selected).OpenSslBin -eq $runtimeBin) 'Discovered Git did not resolve legacy layout'
+    'First Application selected; legacy layout resolved'
+    $env:PATH = @($bins[1], $bins[0], $bins[2]) -join [IO.Path]::PathSeparator
+    Assert ((Resolve-LeafGitExecutable) -eq (Join-Path $bins[1] 'git.exe')) 'Reordered PATH did not select its first Application'
+    $env:PATH = $bins[2]
+    Assert ((Resolve-LeafGitExecutable) -eq (Join-Path $bins[2] 'git.exe')) 'Single Application discovery failed'
+    $env:PATH = ''
+    Assert ((Resolve-LeafGitExecutable -GitExecutable $expected) -eq $expected) 'Explicit GitExecutable was not preserved with empty PATH'
+    'Reordered/single discovery and explicit override passed'
+} finally {
+    $env:PATH = $previousPath
+}
+""")
+      let executed=runCommand(pwsh,@["-NoProfile","-File",testScript,
+        "-Helper",RepositoryRoot/"scripts/prepare_windows_https.ps1","-GitRoot",gitRoot])
+      checkpoint executed.output
+      check executed.exitCode==0

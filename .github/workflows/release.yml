@@ -84,17 +84,7 @@ jobs:
       - name: Windows HTTPS 运行库和证书
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $gitRoot = Split-Path (Split-Path (Get-Command git.exe).Source -Parent) -Parent
-          $opensslBin = Join-Path $gitRoot 'mingw64/bin'
-          $certificates = Join-Path $gitRoot 'mingw64/ssl/certs/ca-bundle.crt'
-          foreach ($path in @((Join-Path $opensslBin 'libssl-3-x64.dll'), (Join-Path $opensslBin 'libcrypto-3-x64.dll'), $certificates)) {
-              if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Git HTTPS dependency missing: $path" }
-          }
-          $opensslBin >> $env:GITHUB_PATH
-          'NIM_SSL_VERSION=3-x64' >> $env:GITHUB_ENV
-          ('SSL_CERT_FILE=' + $certificates) >> $env:GITHUB_ENV
+        run: ./scripts/prepare_windows_https.ps1
       - name: 发布与安装脚本测试
         run: nim c -r --out:target/nim/test_runner scripts/test.nim --release-only
       - name: 构建和测试 Unix 桥接
