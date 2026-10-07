@@ -2,6 +2,8 @@
 import std/[os, osproc, strtabs, streams, json, tempfiles, strutils]
 when defined(windows): import ../src/leaf/windows_paths
 
+import ../src/leaf/orm_config
+
 type CommandResult* = object
   output*: string
   exitCode*: int
@@ -76,6 +78,8 @@ proc smokeSdk*(sdkPath: string, headlessOnly = false) =
   defer: removeDir(root)
   let project = root / "smoke-app"
   environment["LEAF_DATABASE_PATH"] = root / "application.sqlite3"
+  environment["NIMBLE_DIR"] = root / "empty-nimble"
+  createDir(environment["NIMBLE_DIR"])
   proc run(arguments: varargs[string]): string =
     checkedCommand(cli, @arguments, root, environment)
   stdout.write(run("--version"))
@@ -94,7 +98,26 @@ proc smokeSdk*(sdkPath: string, headlessOnly = false) =
   discard run("--check", project)
   let binary = project / (when defined(windows): "target/nim/app.exe" else: "target/nim/app")
   require(fileExists(binary), "Application binary was not created")
-  echo "SDK relocation + SQLite scaffold build passed"
+  let taskText = "SDK 中文持久化"
+  discard run("--headless", "--change", "task_draft", taskText, "--click", "task_add", project)
+  require(taskText in run("--headless", project), "Task was not persisted across processes")
+  let noteText = "SDK second model"
+  discard run("--headless", "--click", "nav_notes", "--click", "notes_new",
+    "--change", "notes_field_title", noteText, "--click", "notes_save", project)
+  require(noteText in run("--headless", "--click", "nav_notes", project), "Note was not persisted")
+  for test in ["test_home", "test_notes"]:
+    var args = @["c", "-r", "--skipUserCfg:on", "--skipParentCfg:on", "--skipProjCfg:on", "--noNimblePath",
+      "--path:" & sdk / "src", "--nimcache:" & project / "target/isolated-cache",
+      "--out:" & project / "target" / test.addFileExt(ExeExt)]
+    args.add(ormCompilerArgs(sdk / "src"))
+    args.add(project / "tests" / (test & ".nim"))
+    discard checkedCommand(sdk / "toolchain/nim/bin" / "nim".addFileExt(ExeExt), args, project, environment)
+  let otherProject = root / "other-app"
+  environment["LEAF_DATABASE_PATH"] = root / "other.sqlite3"
+  discard run("g", "scaffold", otherProject)
+  discard run("--headless", "--change", "task_draft", "Independent application", "--click", "task_add", otherProject)
+  require("Independent application" in run("--headless", otherProject), "Second application did not persist")
+  echo "SDK relocation + offline model CRUD and persistence passed"
 
 when isMainModule:
   var sdk = ""

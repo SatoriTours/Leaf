@@ -1,6 +1,7 @@
 ## A build can be polled while the previous desktop process continues running.
 import std/[os, strutils]
 import ./[core, project, process_io, gpui_build, sdk]
+import ./orm_config
 when defined(windows): import ./[windows_paths, windows_manifest]
 
 const SourceRoot = currentSourcePath().parentDir.parentDir
@@ -45,6 +46,7 @@ proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedCon
     "--nimcache:" & cache.replace("$", "$$"),
     "--out:" & binary.replace("$", "$$")]
   if isolatedConfig: args.add(@["--skipParentCfg:on", "--skipUserCfg:on"])
+  for argument in ormCompilerArgs(sources): args.add(argument.replace("$", "$$"))
   when defined(windows):
     let bundledGcc = sdkGcc()
     var gcc=bundledGcc

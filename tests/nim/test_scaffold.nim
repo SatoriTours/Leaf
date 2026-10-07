@@ -101,7 +101,7 @@ else: doAssert false
     let app = base / "validation"
     require leaf_cli.main(@["g", "scaffold", app]) == 0
     let before = files(app)
-    for fields in [@["title:string", "title:int"], @["id:int"], @["type:string"],
+    for fields in [@["title:string", "title:int"], @["id:int"], @["createdAt:string"], @["updated_at:float"], @["type:string"],
         @["title:date"], @["foo_bar:string", "foobar:bool"], @["9name:string"],
         @["value:float:extra"], @[]]:
       check leaf_cli.main(@["g", "scaffold", "Note"] & fields & @["--project", app]) == 1
@@ -216,6 +216,7 @@ else: doAssert false
     require leaf_cli.main(@["g", "scaffold", app]) == 0
     for name in ["Node", "State", "PageDefinition", "Draft", "Panel", "System", "ValueError", "Database", "SqlValue", "Migration"]:
       require leaf_cli.main(@["g", "scaffold", name, "label:string", "--project", app]) == 0
+    require leaf_cli.main(@["g", "scaffold", "Issue", "errors:string", "changed:bool", "--project", app]) == 0
     let binary = app / "target/check".addFileExt(ExeExt)
     createDir(binary.parentDir)
     let compiled = runChild(compiler(), @["c", "--path:" & sourceRoot,
@@ -225,7 +226,7 @@ else: doAssert false
     let checked = runChild(binary, @["--check"], app)
     checkpoint checked.output
     check checked.code == 0
-    for name in ["databases", "sql_values", "migrations"]:
+    for name in ["databases", "sql_values", "migrations", "issues"]:
       let tested = runChild(compiler(), @["c", "-r", "--path:" & sourceRoot,
         "--nimcache:" & app / "target/test-cache", "--out:" & app / "target" / name,
         app / "tests" / ("test_" & name & ".nim")], app)
@@ -249,6 +250,7 @@ else: doAssert false
     require leaf_cli.main(@["g", "scaffold", "Note", "title:string", "archived:bool", "--project", app]) == 0
     require leaf_cli.main(@["generate", "scaffold", "Metric", "count:int", "amount:float", "--project", app]) == 0
     writeFile(app / "tests/integration.nim", """
+import std/strutils
 import leaf
 import ../app/application
 import ../config/database
@@ -295,6 +297,14 @@ doAssert rt.find("notes_detail_title").node.text == "First note"
 rt.click("notes_back")
 rt.click("notes_edit_1")
 rt.change("notes_field_title", "Discard this")
+rt.click("notes_cancel")
+doAssert rt.find("notes_title_1").node.text == "First note"
+rt.click("notes_edit_1")
+rt.change("notes_field_title", "中".repeat(201))
+rt.click("notes_save")
+doAssert rt.find("notes_error").node.text.len > 0
+doAssert rt.find("notes_field_title").node.text == "中".repeat(201)
+doAssert connection.query("SELECT title FROM notes WHERE id=1")[0][0].asString == "First note"
 rt.click("notes_cancel")
 doAssert rt.find("notes_title_1").node.text == "First note"
 rt.click("notes_edit_1")
@@ -351,10 +361,10 @@ echo "generated application ready"
     up.sort()
     down.sort(SortOrder.Descending)
     for path in up: migrated.executeScript(readFile(path))
-    discard migrated.execute("INSERT INTO notes (title, archived) VALUES (?, ?)", [dbValue("note"), dbValue(0)])
+    discard migrated.execute("INSERT INTO notes (title, archived, created_at, updated_at) VALUES (?, ?, 0, 0)", [dbValue("note"), dbValue(0)])
     expect DatabaseError:
-      discard migrated.execute("INSERT INTO notes (title, archived) VALUES (?, ?)", [dbValue("bad"), dbValue(2)])
-    discard migrated.execute("INSERT INTO metrics (count, amount) VALUES (?, ?)", [dbValue(42), dbValue(1.5)])
+      discard migrated.execute("INSERT INTO notes (title, archived, created_at, updated_at) VALUES (?, ?, 0, 0)", [dbValue("bad"), dbValue(2)])
+    discard migrated.execute("INSERT INTO metrics (count, amount, created_at, updated_at) VALUES (?, ?, 0, 0)", [dbValue(42), dbValue(1.5)])
     for path in down: migrated.executeScript(readFile(path))
     check migrated.query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").len == 0
     discard collectFiles(readProject(app))

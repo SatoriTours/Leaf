@@ -13,6 +13,9 @@ type
     model*, singular*, plural*: string
     fields*: seq[FieldSpec]
     migration*: int
+  ScaffoldManifest* = object
+    schema*: int
+    resources*: seq[ResourceSpec]
   ScaffoldFile* = object
     path*, content*: string
     update*: bool

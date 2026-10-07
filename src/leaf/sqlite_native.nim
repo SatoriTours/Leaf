@@ -15,6 +15,8 @@ type
 proc openConnection*(path: cstring, db: ptr ptr SqliteConnection, flags: cint, vfs: cstring): cint {.importc: "sqlite3_open_v2".}
 proc closeConnection*(db: ptr SqliteConnection): cint {.importc: "sqlite3_close_v2".}
 proc errorMessage*(db: ptr SqliteConnection): cstring {.importc: "sqlite3_errmsg".}
+proc errorCode*(db: ptr SqliteConnection): cint {.importc: "sqlite3_errcode".}
+proc extendedErrorCode*(db: ptr SqliteConnection): cint {.importc: "sqlite3_extended_errcode".}
 proc busyTimeout*(db: ptr SqliteConnection, milliseconds: cint): cint {.importc: "sqlite3_busy_timeout".}
 proc prepareStatement*(db: ptr SqliteConnection, sql: cstring, bytes: cint, statement: ptr ptr SqliteStatement, tail: ptr cstring): cint {.importc: "sqlite3_prepare_v2".}
 proc finalizeStatement*(statement: ptr SqliteStatement): cint {.importc: "sqlite3_finalize".}

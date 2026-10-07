@@ -1,0 +1,5 @@
+CREATE TABLE "tasks" (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  "title" TEXT NOT NULL,
+  "done" INTEGER NOT NULL CHECK ("done" IN (0, 1))
+);

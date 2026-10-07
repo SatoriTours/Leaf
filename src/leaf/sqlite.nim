@@ -5,6 +5,8 @@ import ./sqlite_native as native
 
 type
   DatabaseError* = object of ValueError
+    code*, extendedCode*: int
+  ConstraintError* = object of DatabaseError
   SqlKind* = enum sqlNull, sqlInteger, sqlFloat, sqlText
   SqlValue* = object
     case kind*: SqlKind
@@ -14,6 +16,7 @@ type
     of sqlText: text*: string
   DatabaseHandle = object
     connection: ptr native.SqliteConnection
+    ownerThread: int
   Database* = ref DatabaseHandle
   Migration* = object
     version*: int
@@ -22,10 +25,18 @@ type
 proc `=destroy`(db: DatabaseHandle) =
   if db.connection != nil: discard native.closeConnection(db.connection)
 
-proc dbValue*(value: string): SqlValue = SqlValue(kind: sqlText, text: value)
-proc dbValue*(value: SomeInteger): SqlValue = SqlValue(kind: sqlInteger, integer: int64(value))
-proc dbValue*(value: float): SqlValue = SqlValue(kind: sqlFloat, number: value)
-proc dbValue*(value: bool): SqlValue = dbValue(int(value))
+proc toSqlValue(value: string): SqlValue = SqlValue(kind: sqlText, text: value)
+proc toSqlValue(value: SomeInteger): SqlValue = SqlValue(kind: sqlInteger, integer: int64(value))
+proc toSqlValue(value: float): SqlValue = SqlValue(kind: sqlFloat, number: value)
+proc toSqlValue(value: bool): SqlValue = toSqlValue(int(value))
+template dbValue*(value: typed): SqlValue = toSqlValue(value)
+proc `==`*(left, right: SqlValue): bool =
+  if left.kind != right.kind: return false
+  case left.kind
+  of sqlNull: true
+  of sqlInteger: left.integer == right.integer
+  of sqlFloat: left.number == right.number
+  of sqlText: left.text == right.text
 proc asString*(value: SqlValue): string =
   if value.kind != sqlText: raise newException(DatabaseError, "expected SQLite text")
   value.text
@@ -33,6 +44,9 @@ proc asInt*(value: SqlValue): int =
   if value.kind != sqlInteger or value.integer < int64(low(int)) or value.integer > int64(high(int)):
     raise newException(DatabaseError, "expected SQLite integer within Nim int range")
   int(value.integer)
+proc asInt64*(value: SqlValue): int64 =
+  if value.kind != sqlInteger: raise newException(DatabaseError, "expected SQLite integer")
+  value.integer
 proc asFloat*(value: SqlValue): float =
   case value.kind
   of sqlFloat: value.number
@@ -40,19 +54,39 @@ proc asFloat*(value: SqlValue): float =
   else: raise newException(DatabaseError, "expected SQLite number")
 proc asBool*(value: SqlValue): bool = value.asInt != 0
 
-proc requireOpen(db: Database) =
+proc requireUsable*(db: Database) =
   if db == nil or db.connection == nil: raise newException(DatabaseError, "database is closed")
+  when compileOption("threads"):
+    if db.ownerThread != getThreadId():
+      raise newException(DatabaseError, "database belongs to another thread")
+
+proc borrowSqliteHandle*(db: Database): pointer =
+  ## Internal ORM bridge. The caller borrows this handle and must never close it.
+  db.requireUsable()
+  cast[pointer](db.connection)
+
+proc raiseSqliteError*(db: Database, detail = "") {.noreturn.} =
+  db.requireUsable()
+  let code = int(native.errorCode(db.connection))
+  let extendedCode = int(native.extendedErrorCode(db.connection))
+  let message = "SQLite: " & (if detail.len > 0: detail else: $native.errorMessage(db.connection))
+  let error = if code == 19: newException(ConstraintError, message)
+    else: newException(DatabaseError, message)
+  error.code = code
+  error.extendedCode = extendedCode
+  raise error
 
 proc check(db: Database, code: cint) =
-  if code != 0: raise newException(DatabaseError, "SQLite: " & $native.errorMessage(db.connection))
+  if code != 0: db.raiseSqliteError()
 
 proc close*(db: Database) =
   if db != nil and db.connection != nil:
+    db.requireUsable()
     db.check(native.closeConnection(db.connection))
     db.connection = nil
 
 proc executeScript*(db: Database, sql: string) =
-  db.requireOpen()
+  db.requireUsable()
   if '\0' in sql: raise newException(DatabaseError, "SQL cannot contain NUL")
   db.check(native.executeScript(db.connection, sql.cstring, nil, nil, nil))
 
@@ -60,6 +94,7 @@ proc openDatabase*(path: string): Database =
   if path.len == 0 or '\0' in path: raise newException(DatabaseError, "invalid database path")
   if path != ":memory:": createDir(absolutePath(path).parentDir)
   result = Database()
+  when compileOption("threads"): result.ownerThread = getThreadId()
   # READWRITE | CREATE | FULLMUTEX. Connections are used on their owning UI thread.
   let code = native.openConnection(path.cstring, addr result.connection, 0x10006, nil)
   if code != 0:
@@ -74,7 +109,7 @@ proc openDatabase*(path: string): Database =
     raise
 
 proc prepare(db: Database, sql: string, values: openArray[SqlValue]): ptr native.SqliteStatement =
-  db.requireOpen()
+  db.requireUsable()
   if '\0' in sql: raise newException(DatabaseError, "SQL cannot contain NUL")
   var tail: cstring
   db.check(native.prepareStatement(db.connection, sql.cstring, -1, addr result, addr tail))
@@ -106,8 +141,12 @@ proc execute*(db: Database, sql: string, values: openArray[SqlValue] = []): int 
   int(native.changedRows(db.connection))
 
 proc lastInsertId*(db: Database): int =
-  db.requireOpen()
+  db.requireUsable()
   dbValue(native.insertId(db.connection)).asInt
+
+proc lastInsertId64*(db: Database): int64 =
+  db.requireUsable()
+  native.insertId(db.connection)
 
 proc query*(db: Database, sql: string, values: openArray[SqlValue] = []): seq[seq[SqlValue]] =
   let statement = db.prepare(sql, values)
