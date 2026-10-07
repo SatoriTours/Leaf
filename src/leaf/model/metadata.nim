@@ -8,6 +8,10 @@ type
     name*, sqlType*: string
     nullable*, frameworkManaged*: bool
   FieldValues* = seq[tuple[name: string, value: SqlValue]]
+  FieldChange* = object
+    field*: string
+    before*, after*: Option[SqlValue]
+  ChangeSet* = seq[FieldChange]
 
 proc quoteIdentifier*(name: string): string =
   if name.len == 0 or '\0' in name:
