@@ -33,6 +33,10 @@ type
     reconciler: Reconciler
     committerToken: uint64
     preparerToken: uint64
+    backendToken: uint64
+    pendingPlan: ReconcilePlan
+    pendingInstall: bool
+    pendingInitial: bool
     sessionId: uint64
     mountGeneration: uint64
     lastQueued: uint64
@@ -137,10 +141,44 @@ proc migrateViewports(session: BackendSession,
     migrated[nextHandle] = viewport
   session.viewports = migrated
 
+proc acceptPlan(session: BackendSession, plan: ReconcilePlan) =
+  let previous = session.entities
+  session.reconciler.accept(plan)
+  session.migrateViewports(previous, plan)
+  session.entities = plan.entities
+  session.byNodeId = plan.byNodeId
+
+proc confirmInstall(session: BackendSession) =
+  ## Pure framework publication, after the installation scope has exited.
+  if not session.pendingInstall: return
+  session.acceptPlan(session.pendingPlan)
+  session.pendingInstall = false
+  session.pendingPlan = default(ReconcilePlan)
+
+proc abortInstall(session: BackendSession, scoped: bool) =
+  if not session.pendingInstall: return
+  let initial = session.pendingInitial
+  session.pendingInstall = false
+  session.pendingPlan = default(ReconcilePlan)
+  if not scoped:
+    if not initial:
+      session.frozen = true
+      session.faulted = true
+      session.runtime.freezeEvents("backend installation rollback scope refused entry")
+    return
+  var cleanup: seq[string]
+  session.safeDiscard(cleanup)
+  if not initial:
+    let restoreError = session.recover(session.entities)
+    if restoreError.len != 0: cleanup.add("restore failed: " & restoreError)
+  # Discard failures must not skip restore or mask the original scope failure.
+  if cleanup.len != 0: fail("backend installation abort" & cleanupSuffix(cleanup))
+
 proc commit(session: BackendSession, accepted: Runtime, candidate: Runtime) =
   ## The Runtime committer. Runs after build/validate/prepare and before
-  ## publication: prepare the batch, apply it, then accept the plan. No event
-  ## is drained here and no business callback runs.
+  ## publication: prepare and apply the batch. Ordinary commits accept here;
+  ## hook installations defer acceptance until the scope's lifecycle confirms.
+  ## No event is drained here and no business callback runs.
   session.collectIssues(candidate.snapshot.root)
   let revision = if candidate.proposedRevision != 0: candidate.proposedRevision
                  else: candidate.acceptedRevision
@@ -174,10 +212,14 @@ proc commit(session: BackendSession, accepted: Runtime, candidate: Runtime) =
     raise newException(UiError, "backend apply failed and restore failed: " &
       error.msg & suffix & "; restore: " & restoreError)
 
-  session.reconciler.accept(plan)
-  session.migrateViewports(previous, plan)
-  session.entities = plan.entities
-  session.byNodeId = plan.byNodeId
+  if candidate.installingHook:
+    # Native apply has completed, but scope exit may still fail. Keep accepted
+    # identities/viewports unchanged until the owner-bound lifecycle confirms.
+    session.pendingPlan = plan
+    session.pendingInitial = accepted == nil
+    session.pendingInstall = true
+  else:
+    session.acceptPlan(plan)
 
 proc restoreViewports(session: BackendSession, candidate: Runtime) =
   ## Preparer: after a list source changes, remount the tracked viewport by
@@ -205,11 +247,15 @@ proc restoreViewports(session: BackendSession, candidate: Runtime) =
 proc attachBackend*(runtime: Runtime, backend: Backend, host: HostContext,
                     mode = compatible): BackendSession =
   ## Validate hooks, host and capabilities before any visible backend apply,
-  ## then install the committer and viewport preparer. A failed initial mount
-  ## disposes the backend and installs no session hook. Cleanup only removes
-  ## hooks this call actually installed, so a rejected second attach never
-  ## unloads an existing session.
+  ## then claim resources and install the committer and viewport preparer.
+  ## Cleanup only removes this call's hooks and disposes its own Backend;
+  ## occupied instances are rejected without touching their resources. If a
+  ## scope refuses hook cleanup, retain the Backend referenced by that hook
+  ## and report the cleanup failure together with the primary install error.
   if runtime == nil: fail("attachBackend requires a runtime")
+  if runtime.committerOwner != 0:
+    fail("committer already installed; unload the existing session first")
+  if runtime.installingUpdate: fail("cannot attach backend during update")
   if backend == nil or backend.prepare == nil or backend.apply == nil or
       backend.discardPrepared == nil or backend.restore == nil or
       backend.dispose == nil:
@@ -227,22 +273,47 @@ proc attachBackend*(runtime: Runtime, backend: Backend, host: HostContext,
     mode: mode, reconciler: newReconciler(), sessionId: host.sessionId,
     mountGeneration: host.mountGeneration)
   session.collectIssues(runtime.snapshot.root)
+  session.backendToken = backend.reserveSession()
 
   try:
     session.committerToken = runtime.installCommitter(
       proc(accepted: Runtime, candidate: Runtime) =
-        session.commit(accepted, candidate))
+        session.commit(accepted, candidate),
+      RuntimeInstallLifecycle(
+        confirm: proc() = session.confirmInstall(),
+        abort: proc(scoped: bool) = session.abortInstall(scoped)))
     session.preparerToken = runtime.installPreparer(
       proc(candidate: Runtime) = session.restoreViewports(candidate))
-  except CatchableError:
+  except CatchableError as error:
+    var cleanup: seq[string]
     if session.committerToken != 0:
-      runtime.clearCommitter(session.committerToken)
-      session.committerToken = 0
+      try:
+        runtime.clearCommitter(session.committerToken)
+      except CatchableError as secondary:
+        cleanup.add("clearCommitter failed: " & secondary.msg)
     if session.preparerToken != 0:
-      runtime.clearPreparer(session.preparerToken)
-      session.preparerToken = 0
-    backend.dispose()
-    raise
+      try:
+        runtime.clearPreparer(session.preparerToken)
+      except CatchableError as secondary:
+        cleanup.add("clearPreparer failed: " & secondary.msg)
+    # A clear may throw after its body has removed the hook, or before its
+    # body has run at all. Inspect exact ownership rather than the return path.
+    let liveCommitter = session.committerToken != 0 and
+      runtime.committerOwner == session.committerToken
+    let livePreparer = session.preparerToken != 0 and
+      runtime.preparerOwner == session.preparerToken
+    if liveCommitter or livePreparer:
+      cleanup.add("backend retained: session hook is still installed")
+    elif backend.ownsSession(session.backendToken):
+      try:
+        backend.dispose()
+        backend.releaseSession(session.backendToken)
+      except CatchableError as secondary:
+        cleanup.add("backend dispose failed: " & secondary.msg)
+    # Preserve the primary exception (including its type/chain) while making
+    # every secondary failure visible to the caller.
+    error.msg.add(cleanupSuffix(cleanup))
+    raise error
   session
 
 proc dispose*(session: BackendSession) =
@@ -267,8 +338,10 @@ proc dispose*(session: BackendSession) =
     if session.preparerToken != 0:
       session.runtime.clearPreparer(session.preparerToken)
       session.preparerToken = 0
-  if session.backend != nil and session.backend.dispose != nil:
+  if session.backend != nil and session.backend.dispose != nil and
+      session.backend.ownsSession(session.backendToken):
     session.backend.dispose()
+    session.backend.releaseSession(session.backendToken)
   session.viewports.clear()
   session.disposed = true
 

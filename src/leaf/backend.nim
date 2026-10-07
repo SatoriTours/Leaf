@@ -82,6 +82,8 @@ type
     discardPrepared*: proc() {.closure.}
     restore*: proc(entities: Table[NodeHandle, MountedEntity]) {.closure.}
     dispose*: proc() {.closure.}
+    sessionOwner: uint64
+    sessionCounter: uint64
 
   HostContext* = object
     sessionId*: uint64
@@ -90,6 +92,22 @@ type
     scale*: float64
 
 const NoHandle* = NodeHandle(0)
+
+proc reserveSession*(backend: Backend): uint64 =
+  ## Claim this instance's resources before mounting. A Backend cannot be
+  ## shared by live sessions, including sessions on different Runtimes.
+  if backend.sessionOwner != 0: fail("backend already owned by a session")
+  inc backend.sessionCounter
+  backend.sessionOwner = backend.sessionCounter
+  backend.sessionOwner
+
+proc ownsSession*(backend: Backend, owner: uint64): bool =
+  owner != 0 and backend.sessionOwner == owner
+
+proc releaseSession*(backend: Backend, owner: uint64) =
+  ## Release only after resources have been disposed successfully. A stale
+  ## owner cannot release a later session's reservation.
+  if backend.ownsSession(owner): backend.sessionOwner = 0
 
 proc `==`*(a, b: NodeHandle): bool {.borrow.}
 proc `<`*(a, b: NodeHandle): bool {.borrow.}

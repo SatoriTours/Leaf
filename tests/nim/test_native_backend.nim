@@ -778,3 +778,474 @@ suite "Recording backend sessions":
     dispose(session)
     check session.disposed
     check recording.disposeCalls == 2
+
+  test "duplicate attach preserves the active Backend resource owner":
+    var count = 0
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        text($count, key = "count"),
+        button("go", key = "go", onClick = proc(e: Event) = inc count)], key = "root")
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let before = runtime.snapshot.toJson()
+    let entitiesBefore = recording.entities
+    let revisionBefore = runtime.acceptedRevision
+    let committerBefore = runtime.committerOwner
+    let preparerBefore = runtime.preparerOwner
+    let preparesBefore = recording.prepareCalls
+    let appliesBefore = recording.applyCalls
+    expect UiError:
+      discard attachBackend(runtime, recording.backend, makeHost(sessionId = 8))
+    check recording.prepareCalls == preparesBefore
+    check recording.applyCalls == appliesBefore
+    check recording.disposeCalls == 0
+    check not recording.disposed
+    check recording.entities == entitiesBefore
+    check runtime.snapshot.toJson() == before
+    check runtime.acceptedRevision == revisionBefore
+    check runtime.committerOwner == committerBefore
+    check runtime.preparerOwner == preparerBefore
+    # Avoid cascading an expected RED into an uncaught disposed-backend error.
+    if not recording.disposed:
+      check runtime.dispatch("go", Event(kind: click))
+      check runtime.find("count").node.text == "1"
+      check runtime.acceptedRevision == revisionBefore + 1
+      dispose(session)
+
+  test "another Runtime cannot acquire an active Backend instance":
+    var count = 0
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        text($count, key = "count"),
+        button("go", key = "go", onClick = proc(e: Event) = inc count)], key = "root")
+    let firstRuntime = newRuntime(app(render))
+    let secondRuntime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(firstRuntime, recording.backend, makeHost())
+    let entitiesBefore = recording.entities
+    expect UiError:
+      discard attachBackend(secondRuntime, recording.backend, makeHost(sessionId = 8))
+    check recording.prepareCalls == 1
+    check recording.applyCalls == 1
+    check recording.disposeCalls == 0
+    check recording.entities == entitiesBefore
+    check secondRuntime.committerOwner == 0
+    check secondRuntime.preparerOwner == 0
+    if not recording.disposed:
+      check firstRuntime.dispatch("go", Event(kind: click))
+      check firstRuntime.find("count").node.text == "1"
+      dispose(session)
+
+  test "occupied Runtime rejects a new Backend without acquiring resources":
+    proc render(ctx: BuildContext): Node = text("x", key = "x")
+    let runtime = newRuntime(app(render))
+    let first = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, first.backend, makeHost())
+    let other = newRecordingBackend(fullCapabilities())
+    expect UiError:
+      discard attachBackend(runtime, other.backend, makeHost(sessionId = 8))
+    check other.prepareCalls == 0
+    check other.applyCalls == 0
+    check other.discardCalls == 0
+    check other.disposeCalls == 0
+    # The rejected Backend remains available to an unoccupied Runtime.
+    if not other.disposed:
+      let secondRuntime = newRuntime(app(render))
+      let second = attachBackend(secondRuntime, other.backend, makeHost(sessionId = 8))
+      check second.acceptedEntities.len == 1
+      dispose(second)
+    dispose(session)
+
+  test "Scope exit failure at either attach stage leaves no hooks and permits retry":
+    for stage in [1, 2]:
+      var scopeCalls = 0
+      var failAt = 0
+      proc scope(body: proc() {.closure.}) =
+        inc scopeCalls
+        body()
+        if scopeCalls == failAt: raise newException(UiError, "attach scope exit failed")
+      proc render(ctx: BuildContext): Node = text("x", key = "x")
+      let runtime = newRuntime(Application(title: "scope attach", width: 640, height: 480,
+        render: render, executionScope: scope))
+      let before = runtime.snapshot.toJson()
+      let statsBefore = runtime.stats
+      let revisionBefore = runtime.acceptedRevision
+      let recording = newRecordingBackend(fullCapabilities())
+      failAt = scopeCalls + stage
+      expect UiError:
+        discard attachBackend(runtime, recording.backend, makeHost())
+      check recording.prepareCalls == 1
+      check recording.applyCalls == 1
+      check recording.disposeCalls == 1
+      check recording.disposed
+      check recording.entities.len == 0
+      check runtime.committerOwner == 0
+      check runtime.preparerOwner == 0
+      check runtime.snapshot.toJson() == before
+      check runtime.stats == statsBefore
+      check runtime.acceptedRevision == revisionBefore
+      check not runtime.installingUpdate
+      failAt = 0
+      if runtime.committerOwner == 0 and runtime.preparerOwner == 0:
+        let retry = newRecordingBackend(fullCapabilities())
+        let session = attachBackend(runtime, retry.backend, makeHost())
+        check session.acceptedEntities.len == 1
+        dispose(session)
+
+  test "attach cleanup preserves primary error and attempts disposal after scoped clear errors":
+    for failDispose in [false, true]:
+      var scopeCalls = 0
+      var failAt = 0
+      proc scope(body: proc() {.closure.}) =
+        inc scopeCalls
+        let call = scopeCalls
+        body()
+        if call == failAt: raise newException(UiError, "primary install exit")
+        if failAt != 0 and call > failAt:
+          raise newException(UiError, "secondary cleanup exit")
+      proc render(ctx: BuildContext): Node = text("x", key = "x")
+      let runtime = newRuntime(Application(title: "cleanup", width: 640, height: 480,
+        render: render, executionScope: scope))
+      let recording = newRecordingBackend(fullCapabilities())
+      recording.failDispose = failDispose
+      failAt = scopeCalls + 2
+      var message = ""
+      try:
+        discard attachBackend(runtime, recording.backend, makeHost())
+      except UiError as error: message = error.msg
+      check "primary install exit" in message
+      check "secondary cleanup exit" in message
+      check recording.disposeCalls == 1
+      if failDispose: check "recording dispose failure" in message
+      else: check recording.disposed
+      check runtime.committerOwner == 0
+      check runtime.preparerOwner == 0
+      failAt = 0
+      if runtime.committerOwner == 0 and runtime.preparerOwner == 0:
+        let retry = newRecordingBackend(fullCapabilities())
+        let session = attachBackend(runtime, retry.backend, makeHost())
+        dispose(session)
+
+  test "failed initial prepare discards and disposes its own resources despite cleanup errors":
+    proc render(ctx: BuildContext): Node = text("x", key = "x")
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    recording.failPrepare = true
+    recording.failDiscard = true
+    recording.failDispose = true
+    var message = ""
+    try:
+      discard attachBackend(runtime, recording.backend, makeHost())
+    except UiError as error: message = error.msg
+    check "recording prepare failure" in message
+    check "recording discard failure" in message
+    check "recording dispose failure" in message
+    check recording.discardCalls == 1
+    check recording.disposeCalls == 1
+    check runtime.committerOwner == 0
+    check runtime.preparerOwner == 0
+
+  test "attach cleanup never disposes a Backend whose hook could not be cleared":
+    var scopeCalls = 0
+    var failAt = 0
+    proc scope(body: proc() {.closure.}) =
+      inc scopeCalls
+      if failAt != 0 and scopeCalls > failAt:
+        raise newException(UiError, "cleanup scope entry failed")
+      body()
+      if scopeCalls == failAt: raise newException(UiError, "primary install exit")
+    proc render(ctx: BuildContext): Node = text("x", key = "x")
+    let runtime = newRuntime(Application(title: "retain", width: 640, height: 480,
+      render: render, executionScope: scope))
+    let recording = newRecordingBackend(fullCapabilities())
+    failAt = scopeCalls + 2
+    var message = ""
+    try:
+      discard attachBackend(runtime, recording.backend, makeHost())
+    except UiError as error: message = error.msg
+    check "primary install exit" in message
+    check "cleanup scope entry failed" in message
+    check recording.disposeCalls == 0
+    check not recording.disposed
+    check recording.entities.len == 1
+    check runtime.committerOwner != 0
+    failAt = 0
+    # The retained hook references live resources; no bypass of Scope is used.
+    check runtime.refresh()
+    let secondRuntime = newRuntime(app(render))
+    expect UiError:
+      discard attachBackend(secondRuntime, recording.backend, makeHost(sessionId = 8))
+    check recording.disposeCalls == 0
+    runtime.clearCommitter(runtime.committerOwner)
+    runtime.clearPreparer(runtime.preparerOwner)
+    recording.backend.dispose()
+
+  test "raw preparer install Scope failure restores accepted Native rows and invalidates old listeners":
+    var failExit = false
+    var depth, clicks, renders = 0
+    proc scope(body: proc() {.closure.}) =
+      inc depth
+      try: body()
+      finally: dec depth
+      if failExit and depth == 0:
+        failExit = false
+        raise newException(UiError, "installation scope exit failed")
+    proc render(ctx: BuildContext): Node =
+      inc renders
+      ctx.cached("list component", "stable", proc(): Node =
+        column(@[virtualList("items", @["a", "b"], proc(index: int): Node =
+          button("row " & $index, onClick = proc(e: Event) = inc clicks))], key = "root"))
+    let runtime = newRuntime(Application(title: "rollback", width: 640, height: 480,
+      render: render, executionScope: scope))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let listHandle = session.handleFor(runtime.find("items").id)
+    let source = runtime.find("items").node.listSource
+    discard session.requestRows(listHandle, source.generation, 0, 1)
+    let rowHandle = session.handleFor(runtime.find("a").id)
+    let oldEnvelope = userEvent(session, rowHandle, 1, Event(kind: click))
+    check session.enqueue(oldEnvelope)
+    let oldEntities = session.acceptedEntities
+    let oldSnapshot = runtime.snapshot.toJson()
+    let oldStats = runtime.stats
+    let oldRevision = runtime.acceptedRevision
+    let oldGeneration = session.mountGeneration
+    let oldOwner = runtime.preparerOwner
+    failExit = true
+    expect UiError:
+      discard runtime.installPreparer(proc(candidate: Runtime) =
+        discard candidate.materialize("items", 0, 2))
+    check runtime.snapshot.toJson() == oldSnapshot
+    check runtime.stats == oldStats
+    check runtime.acceptedRevision == oldRevision
+    check runtime.preparerOwner == oldOwner
+    check session.acceptedEntities == oldEntities
+    check recording.entities == oldEntities
+    check recording.restoreCalls == 1
+    check session.mountGeneration == oldGeneration + 1
+    check session.queuedEvents == 0
+    check not session.enqueue(oldEnvelope)
+    check not session.faulted
+    check not runtime.eventsFrozen
+    check renders == 1
+    var failedHandle = NoHandle
+    for op in recording.history:
+      if op.kind == opCreate and op.nodeId.endsWith("/k:1:b"):
+        failedHandle = op.handle
+    check failedHandle != NoHandle
+    # Retrying the raw API succeeds, but never recycles the rejected handle.
+    discard runtime.installPreparer(proc(candidate: Runtime) =
+      discard candidate.materialize("items", 0, 2))
+    let newHandle = session.handleFor(runtime.find("b").id)
+    check failedHandle < newHandle
+    check recording.entities == session.acceptedEntities
+    check session.enqueue(userEvent(session, rowHandle, 1, Event(kind: click)))
+    session.drainEvents()
+    check clicks == 1
+    dispose(session)
+
+  test "raw preparer Scope rollback restore failure faults Session and freezes direct dispatch":
+    var failExit = false
+    var depth, clicks = 0
+    proc scope(body: proc() {.closure.}) =
+      inc depth
+      try: body()
+      finally: dec depth
+      if failExit and depth == 0:
+        failExit = false
+        raise newException(UiError, "primary install scope exit")
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        virtualList("items", @["a"], proc(index: int): Node = text("row")),
+        button("go", key = "go", onClick = proc(e: Event) = inc clicks)], key = "root")
+    let runtime = newRuntime(Application(title: "fault", width: 640, height: 480,
+      render: render, executionScope: scope))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let oldEntities = session.acceptedEntities
+    let before = runtime.snapshot.toJson()
+    recording.failRestore = true
+    failExit = true
+    var message = ""
+    try:
+      runtime.setPreparer(proc(candidate: Runtime) =
+        discard candidate.materialize("items", 0, 1))
+    except UiError as error: message = error.msg
+    check "primary install scope exit" in message
+    check "recording restore failure" in message
+    check recording.restoreCalls == 1
+    check runtime.snapshot.toJson() == before
+    check session.acceptedEntities == oldEntities
+    check session.faulted
+    check session.frozen
+    check runtime.eventsFrozen
+    expect UiError:
+      discard runtime.dispatch("go", Event(kind: click))
+    check clicks == 0
+    dispose(session)
+
+  test "raw setPreparer confirms pending rows once after Scope and no-op skips Backend":
+    var depth = 0
+    var inspectExit = false
+    var sessionRef: BackendSession
+    var runtimeRef: Runtime
+    var recordingRef: RecordingBackend
+    var oldEntities: Table[NodeHandle, MountedEntity]
+    proc scope(body: proc() {.closure.}) =
+      inc depth
+      try: body()
+      finally: dec depth
+      if inspectExit and depth == 0:
+        inspectExit = false
+        check sessionRef.acceptedEntities == oldEntities
+        check runtimeRef.find("items").children.len == 0
+        check recordingRef.entities.len == oldEntities.len + 1
+        check runtimeRef.installingUpdate
+    proc render(ctx: BuildContext): Node =
+      column(@[virtualList("items", @["a"], proc(index: int): Node = text("row"))])
+    let runtime = newRuntime(Application(title: "confirm", width: 640, height: 480,
+      render: render, executionScope: scope))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    sessionRef = session
+    runtimeRef = runtime
+    recordingRef = recording
+    oldEntities = session.acceptedEntities
+    let revisionBefore = runtime.acceptedRevision
+    let applyBefore = recording.applyCalls
+    inspectExit = true
+    runtime.setPreparer(proc(candidate: Runtime) =
+      discard candidate.materialize("items", 0, 1))
+    check not inspectExit
+    check runtime.find("items").children.len == 1
+    check session.acceptedEntities.len == oldEntities.len + 1
+    check recording.entities == session.acceptedEntities
+    check recording.applyCalls == applyBefore + 1
+    check runtime.acceptedRevision == revisionBefore + 1
+    check recording.restoreCalls == 0
+    let accepted = runtime.acceptedRevision
+    let applied = recording.applyCalls
+    let statsBefore = runtime.stats
+    discard runtime.installPreparer(proc(candidate: Runtime) = discard)
+    runtime.setPreparer(nil)
+    check runtime.acceptedRevision == accepted
+    check runtime.stats == statsBefore
+    check recording.applyCalls == applied
+    check recording.restoreCalls == 0
+    dispose(session)
+
+  test "rollback Scope errors preserve primary and never restore outside Scope":
+    for entryFailure in [false, true]:
+      var phase, depth = 0
+      proc scope(body: proc() {.closure.}) =
+        let rollback = depth == 0 and phase == 2
+        if rollback and entryFailure:
+          phase = 0
+          raise newException(UiError, "secondary rollback scope entry")
+        inc depth
+        try: body()
+        finally: dec depth
+        if depth == 0 and phase == 1:
+          phase = 2
+          raise newException(UiError, "primary installation exit")
+        if rollback:
+          phase = 0
+          raise newException(UiError, "secondary rollback scope exit")
+      proc render(ctx: BuildContext): Node =
+        column(@[virtualList("items", @["a"], proc(index: int): Node = text("row"))])
+      let runtime = newRuntime(Application(title: "rollback scope", width: 640, height: 480,
+        render: render, executionScope: scope))
+      let recording = newRecordingBackend(fullCapabilities())
+      let session = attachBackend(runtime, recording.backend, makeHost())
+      let oldEntities = session.acceptedEntities
+      phase = 1
+      var message = ""
+      try:
+        discard runtime.installPreparer(proc(candidate: Runtime) =
+          discard candidate.materialize("items", 0, 1))
+      except UiError as error: message = error.msg
+      check "primary installation exit" in message
+      check "secondary rollback scope" in message
+      check session.acceptedEntities == oldEntities
+      check runtime.find("items").children.len == 0
+      check recording.disposeCalls == 0
+      if entryFailure:
+        check recording.restoreCalls == 0
+        check session.faulted
+        check runtime.eventsFrozen
+      else:
+        check recording.restoreCalls == 1
+        check recording.entities == oldEntities
+        check not session.faulted
+        check not runtime.eventsFrozen
+      phase = 0
+      dispose(session)
+
+  test "pending install discard failure still restores Native and preserves Scope primary":
+    var failExit = false
+    var depth = 0
+    proc scope(body: proc() {.closure.}) =
+      inc depth
+      try: body()
+      finally: dec depth
+      if failExit and depth == 0:
+        failExit = false
+        raise newException(UiError, "primary pending scope exit")
+    proc render(ctx: BuildContext): Node =
+      column(@[virtualList("items", @["a"], proc(index: int): Node = text("row"))])
+    let runtime = newRuntime(Application(title: "discard rollback", width: 640, height: 480,
+      render: render, executionScope: scope))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let oldEntities = session.acceptedEntities
+    recording.failDiscard = true
+    failExit = true
+    var message = ""
+    try:
+      runtime.setPreparer(proc(candidate: Runtime) =
+        discard candidate.materialize("items", 0, 1))
+    except UiError as error: message = error.msg
+    check "primary pending scope exit" in message
+    check "recording discard failure" in message
+    check recording.discardCalls == 1
+    check recording.restoreCalls == 1
+    check recording.entities == oldEntities
+    check session.acceptedEntities == oldEntities
+    check not session.faulted
+    recording.failDiscard = false
+    dispose(session)
+
+  test "old Session disposal cannot detach the successor install lifecycle":
+    var failExit = false
+    var depth = 0
+    proc scope(body: proc() {.closure.}) =
+      inc depth
+      try: body()
+      finally: dec depth
+      if failExit and depth == 0:
+        failExit = false
+        raise newException(UiError, "successor scope exit")
+    proc render(ctx: BuildContext): Node =
+      column(@[virtualList("items", @["a"], proc(index: int): Node = text("row"))])
+    let runtime = newRuntime(Application(title: "owner lifecycle", width: 640, height: 480,
+      render: render, executionScope: scope))
+    let oldRecording = newRecordingBackend(fullCapabilities())
+    let oldSession = attachBackend(runtime, oldRecording.backend, makeHost())
+    runtime.clearCommitter(runtime.committerOwner)
+    runtime.clearPreparer(runtime.preparerOwner)
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost(sessionId = 8))
+    let owner = runtime.committerOwner
+    dispose(oldSession)
+    check runtime.committerOwner == owner
+    failExit = true
+    expect UiError:
+      runtime.setPreparer(proc(candidate: Runtime) =
+        discard candidate.materialize("items", 0, 1))
+    check recording.restoreCalls == 1
+    check recording.entities == session.acceptedEntities
+    check runtime.find("items").children.len == 0
+    check recording.entities.len == 2
+    check oldRecording.restoreCalls == 0
+    dispose(session)

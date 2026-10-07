@@ -366,3 +366,121 @@ suite "Runtime candidate commit gate and accepted revision":
     check commits == 1
     check runtime.acceptedRevision == accepted + 1
     check runtime.find("items").children.len == 1
+  test "committer Scope exit failure retains description indices caches and revision":
+    var failExit = false
+    var renders, builds, clicks, depth = 0
+    proc scope(body: proc() {.closure.}) =
+      inc depth
+      try: body()
+      finally: dec depth
+      if failExit and depth == 0:
+        raise newException(UiError, "committer scope exit failed")
+    proc render(ctx: BuildContext): Node =
+      inc renders
+      ctx.cached("component", "stable", proc(): Node =
+        column(@[
+          virtualList("items", @["a", "b"], proc(index: int): Node =
+            inc builds
+            text("row " & $index, key = "row")),
+          button("go", key = "go", onClick = proc(e: Event) = inc clicks)]))
+    let runtime = newRuntime(Application(title: "install", width: 640, height: 480,
+      render: render, executionScope: scope))
+    let before = runtime.snapshot.toJson()
+    let statsBefore = runtime.stats
+    let revisionBefore = runtime.acceptedRevision
+    failExit = true
+    expect UiError:
+      discard runtime.installCommitter(proc(accepted: Runtime, candidate: Runtime) =
+        discard candidate.materialize("items", 0, 1))
+    check runtime.committerOwner == 0
+    check runtime.snapshot.toJson() == before
+    check runtime.stats == statsBefore
+    check runtime.acceptedRevision == revisionBefore
+    check not runtime.installingUpdate
+    check runtime.find("items").children.len == 0
+    expect UiError:
+      discard runtime.find("a")
+    check renders == 1
+    check builds == 1
+    failExit = false
+    if runtime.committerOwner == 0:
+      let token = runtime.installCommitter(proc(accepted: Runtime, candidate: Runtime) = discard)
+      check token == 1 # Failed installation did not publish an owner counter.
+      discard runtime.materialize("items", 0, 1)
+      check builds == 2 # Failed candidate row cache must not be reused.
+      check runtime.stats.builtItems == statsBefore.builtItems + 1
+      check runtime.dispatch("go", Event(kind: click))
+      check clicks == 1
+      check runtime.stats.cacheHits == statsBefore.cacheHits + 1
+
+  test "preparer Scope exit failure preserves its previous hook and row state":
+    var failExit = false
+    var builds, oldPrepares, commits, depth = 0
+    proc scope(body: proc() {.closure.}) =
+      inc depth
+      try: body()
+      finally: dec depth
+      if failExit and depth == 0:
+        raise newException(UiError, "preparer scope exit failed")
+    proc render(ctx: BuildContext): Node =
+      column(@[virtualList("items", @["a", "b"], proc(index: int): Node =
+        inc builds
+        text("row " & $index, key = "row"))])
+    let runtime = newRuntime(Application(title: "prepare", width: 640, height: 480,
+      render: render, executionScope: scope))
+    runtime.setCommitter(proc(accepted: Runtime, candidate: Runtime) =
+      check depth == 1
+      if accepted != nil: inc commits)
+    let oldOwner = runtime.installPreparer(proc(candidate: Runtime) = inc oldPrepares)
+    let before = runtime.snapshot.toJson()
+    let statsBefore = runtime.stats
+    let revisionBefore = runtime.acceptedRevision
+    failExit = true
+    expect UiError:
+      discard runtime.installPreparer(proc(candidate: Runtime) =
+        discard candidate.materialize("items", 0, 1))
+    check runtime.preparerOwner == oldOwner
+    check runtime.snapshot.toJson() == before
+    check runtime.stats == statsBefore
+    check runtime.acceptedRevision == revisionBefore
+    check not runtime.installingUpdate
+    expect UiError:
+      discard runtime.find("a")
+    check builds == 1
+    check commits == 1
+    failExit = false
+    runtime.prepare()
+    check oldPrepares == 2
+    if runtime.preparerOwner == oldOwner:
+      let token = runtime.installPreparer(proc(candidate: Runtime) =
+        discard candidate.materialize("items", 0, 1))
+      check token == oldOwner + 1
+      check builds == 2
+      check runtime.stats.builtItems == statsBefore.builtItems + 1
+      check runtime.acceptedRevision == revisionBefore + 1
+      check runtime.find("a").node.text == "row 0"
+
+  test "install guard includes Scope exit and does not publish hooks early":
+    var inspectExit = false
+    var runtimeRef: Runtime
+    var rejected = 0
+    proc scope(body: proc() {.closure.}) =
+      body()
+      if inspectExit:
+        inspectExit = false
+        check runtimeRef.installingUpdate
+        check runtimeRef.committerOwner == 0
+        try: discard runtimeRef.dispatch("go", Event(kind: click))
+        except UiError: inc rejected
+        try: discard runtimeRef.installPreparer(proc(candidate: Runtime) = discard)
+        except UiError: inc rejected
+    proc render(ctx: BuildContext): Node =
+      button("go", key = "go", onClick = proc(e: Event) = discard)
+    let runtime = newRuntime(Application(title: "exit guard", width: 640, height: 480,
+      render: render, executionScope: scope))
+    runtimeRef = runtime
+    inspectExit = true
+    let token = runtime.installCommitter(proc(accepted: Runtime, candidate: Runtime) = discard)
+    check rejected == 2
+    check token != 0
+    check not runtime.installingUpdate

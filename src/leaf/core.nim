@@ -91,6 +91,7 @@ type
     validator: SnapshotValidator
     preparer: RuntimePreparer
     committer: RuntimeCommitter
+    committerLifecycle: RuntimeInstallLifecycle
     committerOwner: uint64
     preparerOwner: uint64
     hookCounter: uint64
@@ -100,10 +101,19 @@ type
     eventsFrozen: bool
     frozenReason: string
     isCandidate: bool
+    hookInstallation: bool
     descriptionBytes: int
     diagnostics: Diagnostics
   RuntimePreparer* = proc(candidate: Runtime) {.closure.}
   RuntimeCommitter* = proc(accepted: Runtime, candidate: Runtime) {.closure.}
+  RuntimeInstallLifecycle* = object
+    ## Optional Native installation lifecycle, owned by the installed committer.
+    ## confirm publishes only framework metadata after successful scope exit.
+    ## abort(true) runs inside the application scope to restore Native state;
+    ## abort(false) may only fault/freeze metadata if that scope refused entry.
+    ## Neither callback renders or invokes business callbacks.
+    confirm*: proc() {.closure.}
+    abort*: proc(scoped: bool) {.closure.}
 
 proc fail*(message: string) {.noreturn.} =
   raise newException(UiError, message)
@@ -299,6 +309,8 @@ proc acceptedRevision*(runtime: Runtime): uint64 = runtime.revision
 
 proc installingUpdate*(runtime: Runtime): bool = runtime.inUpdate
 
+proc installingHook*(runtime: Runtime): bool = runtime.hookInstallation
+
 proc committerOwner*(runtime: Runtime): uint64 = runtime.committerOwner
 
 proc preparerOwner*(runtime: Runtime): uint64 = runtime.preparerOwner
@@ -467,44 +479,68 @@ proc setValidatorImpl(runtime: Runtime, validator: SnapshotValidator) =
 proc setValidator*(runtime: Runtime, validator: SnapshotValidator) =
   inExecutionScope(runtime): runtime.setValidatorImpl(validator)
 
-proc setCommitterImpl(runtime: Runtime, committer: RuntimeCommitter): uint64 =
+proc abortInstallation(runtime: Runtime, lifecycle: RuntimeInstallLifecycle,
+                       primary: ref CatchableError) =
+  if lifecycle.abort == nil: return
+  var entered = false
+  try:
+    inExecutionScope(runtime):
+      entered = true
+      lifecycle.abort(true)
+  except CatchableError as secondary:
+    primary.msg.add("; installation abort failed: " & secondary.msg)
+    if not entered:
+      # No Native operations or hook removal may bypass a refused scope.
+      try: lifecycle.abort(false)
+      except CatchableError as failure:
+        primary.msg.add("; installation fault notification failed: " & failure.msg)
+
+proc installCommitter*(runtime: Runtime, committer: RuntimeCommitter,
+                      lifecycle = default(RuntimeInstallLifecycle)): uint64 =
+  ## Stage the accepted description and call the backend inside the application
+  ## execution scope, without rendering business state. Publish prepared rows
+  ## and the hook only after the scope has successfully exited. Holding the
+  ## update guard through scope exit prevents reentrant installation/publication.
+  ## A failed install leaves description, revision and hook ownership unchanged.
   if runtime.isCandidate: fail("candidate runtime cannot install a committer")
   if runtime.inUpdate: fail("cannot replace committer during update")
-  if committer == nil:
-    runtime.committer = nil
-    runtime.committerOwner = 0
-    return 0
-  if runtime.committer != nil:
+  if committer != nil and runtime.committer != nil:
     fail("committer already installed; unload the existing session first")
-  var candidate = runtime.candidateFrom()
+  if (lifecycle.confirm == nil) != (lifecycle.abort == nil):
+    fail("installation lifecycle requires both confirm and abort")
+  var candidate: Runtime
+  if committer != nil:
+    candidate = runtime.candidateFrom()
+    candidate.hookInstallation = true
+  var committed = false
   runtime.inUpdate = true
   try:
-    committer(nil, candidate)
-    # Publish only results the backend actually prepared. An untouched mount
-    # keeps the accepted revision and does not advance it.
+    try:
+      inExecutionScope(runtime):
+        if committer != nil:
+          committer(nil, candidate)
+          committed = true
+      if committed and lifecycle.confirm != nil: lifecycle.confirm()
+    except CatchableError as error:
+      if committed: runtime.abortInstallation(lifecycle, error)
+      raise error
+    # Framework confirmation has completed; publication invokes no business
+    # callback and remains protected by the same update guard.
+    if committer == nil:
+      runtime.committer = nil
+      runtime.committerOwner = 0
+      runtime.committerLifecycle = default(RuntimeInstallLifecycle)
+      return 0
     if candidate.stagingChanged:
       runtime.publishCandidate(candidate, candidate.proposed)
       runtime.safeDump()
     runtime.committer = committer
     inc runtime.hookCounter
     runtime.committerOwner = runtime.hookCounter
+    runtime.committerLifecycle = lifecycle
     result = runtime.committerOwner
   finally:
     runtime.inUpdate = false
-
-proc installCommitter*(runtime: Runtime, committer: RuntimeCommitter): uint64 =
-  ## Install the backend commit hook and return its ownership token. The whole
-  ## install/uninstall phase runs inside the application execution scope. The
-  ## first non-nil install mounts the already accepted description into an
-  ## isolated candidate and calls the committer with `accepted = nil`; it
-  ## performs no business render. Prepared visible rows are published once with
-  ## a single revision advance; an untouched mount keeps the accepted revision.
-  ## A failing install leaves the hook, description and revision unchanged. A
-  ## non-nil hook cannot be replaced silently: unload it first. A caller that
-  ## owns the returned token can later uninstall exactly its own hook.
-  var token: uint64
-  inExecutionScope(runtime): token = runtime.setCommitterImpl(committer)
-  token
 
 proc setCommitter*(runtime: Runtime, committer: RuntimeCommitter) =
   ## Backward-compatible entry point. Use `installCommitter` when the caller
@@ -517,6 +553,7 @@ proc clearCommitterImpl(runtime: Runtime, owner: uint64): bool =
   if runtime.inUpdate: fail("cannot uninstall committer during update")
   runtime.committer = nil
   runtime.committerOwner = 0
+  runtime.committerLifecycle = default(RuntimeInstallLifecycle)
   true
 
 proc clearCommitter*(runtime: Runtime, owner: uint64) =
@@ -550,21 +587,40 @@ proc prepare*(runtime: Runtime) =
   ## Reprepare a viewport without rendering business state, atomically.
   runtime.prepareSnapshot(runtime.preparer)
 
-proc setPreparerImpl(runtime: Runtime, preparer: RuntimePreparer): uint64 =
+proc installPreparer*(runtime: Runtime, preparer: RuntimePreparer): uint64 =
+  ## Prepare and confirm an isolated candidate in the application execution
+  ## scope; publish the candidate and hook only after successful scope exit.
+  ## A failing replacement retains the previous preparer and accepted state.
   if runtime.isCandidate: fail("candidate runtime cannot prepare")
   if runtime.inUpdate: fail("cannot replace preparer during update")
-  runtime.prepareSnapshotImpl(preparer)
-  runtime.preparer = preparer
-  inc runtime.hookCounter
-  runtime.preparerOwner = runtime.hookCounter
-  result = runtime.preparerOwner
-
-proc installPreparer*(runtime: Runtime, preparer: RuntimePreparer): uint64 =
-  ## Install a preparer and return its ownership token so the caller can later
-  ## uninstall exactly its own hook.
-  var token: uint64
-  inExecutionScope(runtime): token = runtime.setPreparerImpl(preparer)
-  token
+  var candidate = runtime.candidateFrom()
+  candidate.hookInstallation = true
+  # Capture this owner's lifecycle; stale clears cannot detach a successor's.
+  let lifecycle = runtime.committerLifecycle
+  var committed = false
+  runtime.inUpdate = true
+  try:
+    try:
+      inExecutionScope(runtime):
+        if preparer != nil: preparer(candidate)
+        if candidate.stagingChanged:
+          candidate.proposed = runtime.revision + 1
+          if runtime.committer != nil:
+            runtime.committer(runtime, candidate)
+            committed = true
+      if committed and lifecycle.confirm != nil: lifecycle.confirm()
+    except CatchableError as error:
+      if committed: runtime.abortInstallation(lifecycle, error)
+      raise error
+    if candidate.stagingChanged:
+      runtime.publishCandidate(candidate, candidate.proposed)
+      runtime.safeDump()
+    runtime.preparer = preparer
+    inc runtime.hookCounter
+    runtime.preparerOwner = runtime.hookCounter
+    result = runtime.preparerOwner
+  finally:
+    runtime.inUpdate = false
 
 proc setPreparer*(runtime: Runtime, preparer: RuntimePreparer) =
   ## Prepare lazy content before publication. Never mutate visible controls
