@@ -4,6 +4,7 @@ import norm/model as normModel
 import norm/pragmas
 import ../sqlite
 import ./[record, metadata, validation, callbacks, persistence]
+import ./[query, query_expression, introspection]
 
 type Declaration = object
   abstract: bool
@@ -84,7 +85,7 @@ proc declareRules(symbol, body: NimNode): NimNode {.compileTime.} =
     let keyword = $statement[0]
     if keyword == "validates":
       if statement[1].kind notin {nnkIdent, nnkSym}: error("validation requires a field name", statement[1])
-      let name = $statement[1]
+      let name = persistentFieldName(symbol, $statement[1])
       let field = newDotExpr(recordArg, ident(name))
       for i in 2..<statement.len:
         let rule = statement[i]
@@ -134,11 +135,38 @@ proc declareRules(symbol, body: NimNode): NimNode {.compileTime.} =
       if not `phaseArg`.isBefore:
         `parentCallbacks`(`parent`(`recordArg`), `phaseArg`, `eventArg`)
 
+proc declareScopes(symbol, body: NimNode): NimNode {.compileTime.} =
+  result = newStmtList()
+  var seen = initHashSet[string]()
+  for statement in body:
+    if statement.kind notin {nnkCommand, nnkCall} or not statement[0].eqIdent("scope"): continue
+    if statement.len != 3 or statement[1].kind notin {nnkIdent, nnkSym}:
+      error("scope expects a name and one typed expression", statement)
+    let name = $statement[1]
+    if normalized(name) in ["all", "first", "last", "firstorraise", "lastorraise", "count",
+        "exists", "find", "findby", "findbyorraise", "where", "orderby", "limit", "offset",
+        "ids", "pluck", "build", "create", "createorraise", "rawquery"]:
+      error("scope name conflicts with a model operation", statement[1])
+    if normalized(name) in seen: error("duplicate scope name", statement)
+    seen.incl(normalized(name))
+    let helper = genSym(nskProc, name & "Predicate")
+    result.add(newProc(helper, @[bindSym"Predicate"], compilePredicateNode(symbol, statement[2])))
+    for queryScope in [false, true]:
+      let subtype = ident"ScopedModel"
+      let source = ident"scopeSource"
+      let sourceType = newTree(nnkBracketExpr, if queryScope: ident"Query" else: ident"typedesc", subtype)
+      let body = newCall(bindSym"withPredicate", newCall(bindSym"asQuery", source), newCall(helper))
+      var scopeTemplate = newProc(newTree(nnkPostfix, ident"*", ident(name)),
+        @[newTree(nnkBracketExpr, ident"Query", subtype.copyNimTree), newIdentDefs(source, sourceType)], body)
+      scopeTemplate[2] = newTree(nnkGenericParams, newIdentDefs(subtype.copyNimTree, ident($symbol)))
+      result.add(scopeTemplate)
+
 macro defineAbstractModel*(T: typedesc, body: untyped = nil): untyped =
   let symbol = modelSymbol(T)
   let rules = if body.kind == nnkNilLit: newStmtList() else: body
   defineDeclaration(symbol, rules, true)
   result = declareRules(symbol, rules)
+  result.add(declareScopes(symbol, rules))
 
 macro defineModel*(T: typedesc, table: static[string], body: untyped = nil): untyped =
   let symbol = modelSymbol(T)
@@ -215,6 +243,7 @@ macro defineModel*(T: typedesc, table: static[string], body: untyped = nil): unt
   result.add(newProc(newTree(nnkPostfix, ident"*", ident"build"), params,
     newAssignment(ident"result", constructor)))
   result.add(declareRules(symbol, rules))
+  result.add(declareScopes(symbol, rules))
   for operation in ["create", "createOrRaise"]:
     var creation = newStmtList(newAssignment(ident"result", constructor.copyNimTree))
     if operation == "create": creation.add(newTree(nnkDiscardStmt, newCall(bindSym"save", ident"result")))
