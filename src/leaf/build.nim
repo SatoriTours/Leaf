@@ -1,7 +1,7 @@
 ## A build can be polled while the previous desktop process continues running.
 import std/[os, strutils]
 import ./[core, project, process_io, gpui_build, sdk]
-when defined(windows): import ./windows_paths
+when defined(windows): import ./[windows_paths, windows_manifest]
 
 const SourceRoot = currentSourcePath().parentDir.parentDir
 type BuildJob* = ref object
@@ -46,10 +46,27 @@ proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedCon
     "--out:" & binary.replace("$", "$$")]
   if isolatedConfig: args.add(@["--skipParentCfg:on", "--skipUserCfg:on"])
   when defined(windows):
-    let gcc = sdkGcc()
-    if gcc.len > 0:
-      let path = compilerPath(gcc).replace("$", "$$")
+    let bundledGcc = sdkGcc()
+    var gcc=bundledGcc
+    if bundledGcc.len > 0:
+      let path=compilerPath(gcc).replace("$", "$$")
       args.add(@["--cc:gcc", "--gcc.exe:" & path, "--gcc.linkerexe:" & path])
+    else:
+      # Ask Nim to generate its real project commands with its existing configs.
+      # This does not compile/link C or replace the project's chosen toolchain.
+      var discoverArgs=args
+      discoverArgs.add(@["--compileOnly",entry])
+      let discover=startManaged(executable,discoverArgs,project.root)
+      try:
+        while not discover.poll():
+          if wasInterrupted():raise newException(ProcessInterruptedError,"compiler discovery interrupted")
+          sleep(10)
+        if discover.code != 0:
+          fail("Nim compiler discovery failed\n" & discover.output.diagnosticText())
+        gcc=gccFromBuildScript(cache / binary.extractFilename.changeFileExt("json"))
+      finally:discover.close()
+    let objectPath = compileWindowsManifest(sources, cache, gcc)
+    args.add("--passL:" & quoteShell(compilerPath(objectPath)).replace("$", "$$"))
   args.add(entry)
   result.process = startManaged(executable, args, project.root)
 

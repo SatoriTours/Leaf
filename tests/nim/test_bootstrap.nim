@@ -1,4 +1,4 @@
-import std/[unittest, os]
+import std/[unittest, os, json, tempfiles]
 import leaf
 import leaf/runner
 
@@ -27,3 +27,13 @@ suite "Application launch dispatch":
     let app = Application(title: "Bad flag", width: 320, height: 240,
       render: proc(ctx: BuildContext): Node = text("OK"))
     check run(app, @["--unknown"]) == 1
+
+  test "headless diagnostics have no desktop DPI initialization":
+    let (file, path) = createTempFile("leaf-headless-dpi-", ".jsonl")
+    file.close()
+    defer: removeFile(path)
+    let app = Application(title: "Headless DPI", width: 320, height: 240,
+      render: proc(ctx: BuildContext): Node = text("OK"))
+    check run(app, @["--check", "--log-file", path]) == 0
+    for line in lines(path):
+      check parseJson(line)["phase"].getStr != "dpi"

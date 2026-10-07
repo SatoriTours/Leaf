@@ -1,0 +1,95 @@
+{
+  "task_id": "36dbf599",
+  "stage": "exec",
+  "round": 0,
+  "spec_sha256": "86fb877f38bee050d16355122e30c474f9cb2e4041480957fe9187070f66ee74",
+  "plan_sha256": "beb0df449ff9ca1a6caddc118302d736a69d7e239212744e9b531d3bcbcf7f8e",
+  "executor_agent_id": "075253dd-8f88-4e26-b3fd-f432b1da062e",
+  "baseline_identity_sha256": "3782f8af839c753b6314f3e3255ca78701ccc17030f248dc11320e05d7a2c809",
+  "files": [
+    {
+      "path": "src/leaf/windows_dpi.nim",
+      "type": "file",
+      "sha256": "18a81f63dab43d59b17137fa8ae85f5301ad5891bc701b730953a8d7acf57900"
+    },
+    {
+      "path": "src/leaf/windows_manifest.nim",
+      "type": "file",
+      "sha256": "6d14dcbac976598b2257a6ddb4aee22902fd7f304e293d8d3bed8d5a5b427c04"
+    },
+    {
+      "path": "src/leaf/resources/windows/leaf_app.manifest",
+      "type": "file",
+      "sha256": "62928b197125c69f66860dcfa5fa62969a89352c74542a33c4e4e00582e250b3"
+    },
+    {
+      "path": "tests/nim/test_windows_dpi.nim",
+      "type": "file",
+      "sha256": "e0ec9875502e6d37e4dc937bcc5387ef0b3bdb2889886db036120b4c524b1c77"
+    },
+    {
+      "path": "tests/nim/test_windows_manifest.nim",
+      "type": "file",
+      "sha256": "a2c5133418482b9269d5e12fa2c60ee2d21d5815de90ff26e309fae5efbadfc7"
+    },
+    {
+      "path": "tests/nim/windows_dpi_probe.nim",
+      "type": "file",
+      "sha256": "c32d8b5347e1093330a01a9188499a2ffbd34f8aaffe1936727f35d9bfadeefc"
+    },
+    {
+      "path": "tests/nim/windows_dpi_app.nim",
+      "type": "file",
+      "sha256": "786c9d3f8ff4b5569e166ef6b313ec54176f23a0d015935a2b121d9f525f69a1"
+    },
+    {
+      "path": "src/leaf/desktop.nim",
+      "type": "file",
+      "sha256": "c4dadcd00e32508da09e4d50c143b409735ee0c9fe38f276f59018fd77c85df5"
+    },
+    {
+      "path": "src/leaf/build.nim",
+      "type": "file",
+      "sha256": "acd7fa8c84817bdbce87f40a28ecbf0663d66e0627e14f079735aa1d4fd0848a"
+    },
+    {
+      "path": "src/leaf/gpui_bridge.nim",
+      "type": "file",
+      "sha256": "49ebe2b3f5569e93b33603e604f39b7e7b69c0600f7ddb59787d3b0d64852586"
+    },
+    {
+      "path": "crates/leaf-gpui/src/bridge.rs",
+      "type": "file",
+      "sha256": "059b011f5cdd0de24bf1b14fded817e19eeacb60f0cba90aa838a63d446f2ea1"
+    },
+    {
+      "path": "crates/leaf-gpui/src/desktop.rs",
+      "type": "file",
+      "sha256": "56c0764c1b0be833c678919324951a7a531635c21fc590dd259b0f20ac359d94"
+    },
+    {
+      "path": "tests/nim/test_gpui_bridge.nim",
+      "type": "file",
+      "sha256": "2e7e90e6547f1c7b4f8ddac727bf5291e143c99c9b6d239e19d407cfb891b494"
+    },
+    {
+      "path": "tests/nim/test_bootstrap.nim",
+      "type": "file",
+      "sha256": "90812ebb0b709835d3061cc80732c3eeb58ec81faff5b9c5f49c468b743f62bb"
+    },
+    {
+      "path": "docs/development.md",
+      "type": "file",
+      "sha256": "45fe9eeab7832093aed7eb47dd61fc1b34b4b493b409ba3c9cafb37b4f62ea64"
+    },
+    {
+      "path": "docs/verification.md",
+      "type": "file",
+      "sha256": "1a1a3ccf825168664365e9ba522e58711f8cde982a81995df6155488d2fa10e1"
+    }
+  ],
+  "execution_record": {
+    "path": "docs/superpowers/plans/2026-10-06-windows-dpi-36dbf599-execution-r0.md",
+    "sha256": "cd2a32365ecc431273a465472575c01944f03f962821eeac190f1d7907eb6a27"
+  }
+}

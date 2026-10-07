@@ -1,5 +1,5 @@
 import std/[unittest,json,os,tempfiles]
-import leaf/[core,widgets,gpui_bridge]
+import leaf/[core,widgets,gpui_bridge,diagnostics]
 suite "Nim GPUI ABI requests":
   test "a failed replacement list preserves successful rows and callbacks":
     var failRows=false
@@ -97,3 +97,61 @@ suite "Nim GPUI ABI requests":
     let accepted=host.request(%*{"op":"event","id":"entry","kind":"change","value":"新值"})
     check not accepted.hasKey("error")
     check accepted["snapshot"]["root"]["text"].getStr=="新值"
+
+suite "Rendering diagnostics negotiation":
+  test "old ready and new ready retain watch receipt and filtered metadata":
+    let directory=createTempDir("leaf-rendering-", "")
+    let receipt=directory/"ready.json"
+    let log=directory/"trace.jsonl"
+    let previous=getEnv("LEAF_WATCH_READY")
+    putEnv("LEAF_WATCH_READY", receipt)
+    defer:
+      if previous.len==0:delEnv("LEAF_WATCH_READY")
+      else:putEnv("LEAF_WATCH_READY",previous)
+      if fileExists(receipt):removeFile(receipt)
+      if fileExists(log):removeFile(log)
+      removeDir(directory)
+    let d=newDiagnostics(logFile=log)
+    defer:d.close()
+    let app=Application(title:"DPI",width:640,height:480,render:proc(ctx:BuildContext):Node=text("中文"))
+    let host=newDesktopBridge(app,d)
+    let old=host.request(%*{"op":"ready"})
+    check not old.hasKey("error")
+    check old["capabilities"]["rendering_diagnostics"].getBool
+    let first=readFile(receipt)
+    let snapshot=old["snapshot"]
+    let sample = %*{"scale_factor":1.5,"logical_size":{"width":640,"height":480},
+      "device_size_calculated":{"width":960,"height":720},"dpi_from_scale_calculated":144,
+      "editor_value":"must not be logged"}
+    check not host.request(%*{"op":"rendering","rendering":sample}).hasKey("error")
+    check readFile(receipt)==first
+    check host.runtime.snapshot.toJson()==snapshot
+    var recorded=false
+    for line in lines(log):
+      let entry=parseJson(line)
+      if entry["phase"].getStr=="rendering":
+        recorded=true
+        check entry["details"]["scale_factor"].getFloat==1.5
+        check entry["details"]["device_size_calculated"]["width"].getInt==960
+        check not entry["details"].hasKey("editor_value")
+    check recorded
+    let fresh=host.request(%*{"op":"ready","rendering":sample})
+    check not fresh.hasKey("error")
+    check fresh["capabilities"]["rendering_diagnostics"].getBool
+  test "malformed diagnostic cannot poison subsequent ready or status":
+    let app=Application(title:"Isolation",width:640,height:480,render:proc(ctx:BuildContext):Node=text("OK"))
+    let host=newDesktopBridge(app)
+    let before=host.runtime.snapshot.toJson()
+    check host.request(%*{"op":"rendering","rendering":{"scale_factor":"invalid"}}).hasKey("error")
+    check host.runtime.snapshot.toJson()==before
+    check not host.request(%*{"op":"status"}).hasKey("error")
+    let ready=host.request(%*{"op":"ready"})
+    check not ready.hasKey("error")
+    check ready["capabilities"]["rendering_diagnostics"].getBool
+  test "failed ready never negotiates capability":
+    let app=Application(title:"Failure",width:640,height:480,render:proc(ctx:BuildContext):Node=text("OK"))
+    let host=newDesktopBridge(app)
+    discard host.request(%*{"op":"unknown"})
+    let ready=host.request(%*{"op":"ready","rendering":{"scale_factor":1.5}})
+    check ready.hasKey("error")
+    check not ready.hasKey("capabilities")

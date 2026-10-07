@@ -1,5 +1,5 @@
 ## Nim owns application state and the response buffer. GPUI calls on the UI thread.
-import std/[json,os,tables]
+import std/[json,os,tables,math]
 import ./[core,diagnostics,watch_ipc,gpui_styles]
 type
   ActiveRow = tuple[key:string,index:int]
@@ -31,9 +31,32 @@ proc newDesktopBridge*(app:Application,diagnostics:Diagnostics=nil):DesktopBridg
       for child in mounted.children:visit(child)
     visit(candidate.snapshot.root))
 
+proc recordRendering(host:DesktopBridge, value:JsonNode):bool =
+  # Copy only numeric diagnostics; never forward arbitrary payload/editor data.
+  if value == nil or value.kind != JObject:return false
+  proc number(node:JsonNode):bool =
+    node != nil and node.kind in {JInt,JFloat} and
+      classify(node.getFloat) notin {fcNan,fcInf,fcNegInf} and node.getFloat>0
+  let scale=value.getOrDefault("scale_factor")
+  let logical=value.getOrDefault("logical_size")
+  let device=value.getOrDefault("device_size_calculated")
+  let dpi=value.getOrDefault("dpi_from_scale_calculated")
+  if not number(scale) or not number(dpi):return false
+  for dimensions in [logical,device]:
+    if dimensions == nil or dimensions.kind != JObject:return false
+    if not number(dimensions.getOrDefault("width")) or not number(dimensions.getOrDefault("height")):return false
+  host.runtime.diagnostic("rendering","ok",%*{
+    "scale_factor":scale,
+    "logical_size":{"width":logical["width"],"height":logical["height"]},
+    "device_size_calculated":{"width":device["width"],"height":device["height"]},
+    "dpi_from_scale_calculated":dpi})
+  true
+
 proc request*(host:DesktopBridge,message:JsonNode):JsonNode =
   var rows=newJArray()
   var located = -1
+  var readySucceeded=false
+  var diagnosticError=""
   try:
     case message["op"].getStr
     of "event":
@@ -86,19 +109,29 @@ proc request*(host:DesktopBridge,message:JsonNode):JsonNode =
     of "status":
       let status=readStatus(getEnv("LEAF_WATCH_STATUS"))
       if status.valid:host.externalError=status.message
+    of "rendering":
+      if not host.recordRendering(message.getOrDefault("rendering")):
+        diagnosticError="invalid rendering diagnostics"
+        host.runtime.diagnostic("rendering","error",%*{"message":diagnosticError})
     of "ready":
       if host.error.len>0 or host.viewportError.len>0:fail("GPUI initial viewport failed")
       let path=getEnv("LEAF_WATCH_READY")
       if path.len>0:writeReady(path,getEnv("LEAF_WATCH_TOKEN"),getCurrentProcessId())
+      readySucceeded=true
+      let sample=message.getOrDefault("rendering")
+      if sample != nil:discard host.recordRendering(sample)
     else:fail("unknown GPUI request")
   except Exception as error:
-    if message.getOrDefault("op").getStr=="list":host.viewportError=error.msg
+    if message.getOrDefault("op").getStr=="rendering":diagnosticError=error.msg
+    elif message.getOrDefault("op").getStr=="list":host.viewportError=error.msg
     else:host.error=error.msg
     host.runtime.diagnostic("gpui","error",%*{"message":error.msg})
   result = %*{"snapshot":host.runtime.snapshot.toJson(),"rows":rows}
   if located>=0:result["index"] = %located
   let error=host.error & (if host.viewportError.len>0:"\n" & host.viewportError else:"") & (if host.externalError.len>0:"\n" & host.externalError else:"")
   if error.len>0:result["error"] = %error
+  elif diagnosticError.len>0:result["error"] = %diagnosticError
+  elif readySucceeded:result["capabilities"] = %*{"rendering_diagnostics":true}
 
 proc desktopCallback*(context:pointer,data:ptr uint8,len:csize_t):cstring {.cdecl.} =
   let host=cast[DesktopBridge](context)
