@@ -42,7 +42,8 @@
         "src/lowdb/postgres.nim": "756aa6b6258520fae7483fb9528ec432d47fa642b7fcadaabcff520004738970",
         "src/lowdb/sqlite.nim": "c7e9d043893f265705b77d892dfa2bd95a8ba937a053869f8eccc6c336a2c00f",
         "src/lowdb/wrappers/libpq.nim": "07e1daa67765489e8519064e96b989ed77d5798ae5090975cb8afb2816e974b5",
-        "src/lowdb/wrappers/sqlite3.nim": "a29d194a4663de04dfc3774affd7398ec513880c5f049ccdc3eb73cfdc6481e8"
+        "src/lowdb/wrappers/sqlite3.nim": "a29d194a4663de04dfc3774affd7398ec513880c5f049ccdc3eb73cfdc6481e8",
+        "LICENSE.MIT": "59a48aa9170313e4234dfc68697065477fdbaa5171a4a20f9a7c2b91220fb6d7"
       }
     },
     {
