@@ -275,6 +275,57 @@ suite "Backend-neutral incremental reconciliation":
     expect UiError:
       reconciler.accept(first)
 
+  test "same-revision acceptance rejects an older plan":
+    let reconciler = newReconciler()
+    proc tree(value: string): Node = column(@[text(value, key = "label")], key = "root")
+
+    let first = reconciler.plan(snapshotOf(tree("A")), 1)
+    reconciler.accept(first)
+    # An older pending plan is generated from the accepted A@1 state.
+    let oldPending = reconciler.plan(snapshotOf(tree("OLD")), 2)
+    # A newer description is then accepted at the same revision number.
+    let newer = reconciler.plan(snapshotOf(tree("NEW")), 1)
+    reconciler.accept(newer)
+    # The older plan must not roll the live description back.
+    expect UiError:
+      reconciler.accept(oldPending)
+    let probe = reconciler.plan(snapshotOf(tree("NEW")), 3)
+    check probe.batch.ops.len == 0
+    # A no-change plan generated from the current accepted state is still safe.
+    let noChange = reconciler.plan(snapshotOf(tree("NEW")), 1)
+    check noChange.batch.ops.len == 0
+    reconciler.accept(noChange)
+    # Accepting the no-change plan advanced the state generation again.
+    expect UiError:
+      reconciler.accept(newer)
+    check reconciler.plan(snapshotOf(tree("NEW")), 4).batch.ops.len == 0
+
+  test "foreign plan is rejected and receiver keeps allocating unique handles":
+    let owner = newReconciler()
+    let receiver = newReconciler()
+    proc empty(): Node = column(@[], key = "root")
+    proc withChild(): Node = column(@[text("x", key = "child")], key = "root")
+
+    let ownerPlan = owner.plan(snapshotOf(empty()), 1)
+    expect UiError:
+      receiver.accept(ownerPlan)
+
+    let rootId = identity(mount(empty()), "root")
+    let first = receiver.plan(snapshotOf(empty()), 1)
+    receiver.accept(first)
+    let rootHandle = first.byNodeId[rootId]
+
+    let secondMounted = mount(withChild())
+    let second = receiver.plan(snapshotOf(withChild()), 2)
+    let childHandle = second.byNodeId[identity(secondMounted, "child")]
+    check second.byNodeId[rootId] == rootHandle
+    check childHandle != rootHandle
+    var handles: seq[NodeHandle]
+    for handle in second.entities.keys: handles.add(handle)
+    check handles.len == 2
+    check counts(second.batch.ops).creates == 1
+    receiver.accept(second)
+
   test "capabilities reject required features and strict decoration":
     var capabilities = fullCapabilities()
 

@@ -13,17 +13,26 @@ type
     batch*: UpdateBatch
     entities*: Table[NodeHandle, MountedEntity]
     byNodeId*: Table[string, NodeHandle]
+    owner: uint64
+    baseGeneration: uint64
 
   Reconciler* = ref object
     entities: Table[NodeHandle, MountedEntity]
     byNodeId: Table[string, NodeHandle]
     nextHandle: uint64
     revision: uint64
+    owner: uint64
+    generation: uint64
+
+var ownerCounter: uint64
 
 proc newReconciler*(): Reconciler =
   ## Handles are allocated monotonically and never reclaimed, so a discarded
-  ## or rejected plan cannot make a future plan reuse a dead identity.
-  Reconciler(nextHandle: 1)
+  ## or rejected plan cannot make a future plan reuse a dead identity. Every
+  ## reconciler also carries a unique owner token so it can never accept a
+  ## plan produced by another reconciler.
+  inc ownerCounter
+  Reconciler(nextHandle: 1, owner: ownerCounter)
 
 proc allocate(r: Reconciler): NodeHandle =
   result = NodeHandle(r.nextHandle)
@@ -137,6 +146,8 @@ proc plan*(r: Reconciler, snapshot: Snapshot, revision: uint64): ReconcilePlan =
         props: next.props))
 
   result.baseRevision = r.revision
+  result.baseGeneration = r.generation
+  result.owner = r.owner
   result.revision = revision
   result.entities = entities
   result.byNodeId = byNodeId
@@ -148,15 +159,23 @@ proc plan*(r: Reconciler, snapshot: Snapshot, revision: uint64): ReconcilePlan =
   result.batch = UpdateBatch(revision: revision, ops: ops)
 
 proc accept*(r: Reconciler, plan: ReconcilePlan) =
-  ## Publish a candidate. A stale plan (created before the current accepted
-  ## state) or a plan that would move the accepted revision backwards is
-  ## rejected and leaves the accepted map and revision untouched.
-  if plan.baseRevision != r.revision:
-    fail("stale reconcile plan: base revision " & $plan.baseRevision &
-      " does not match accepted " & $r.revision)
+  ## Publish a candidate. The authoritative baseline token is the private
+  ## accepted-state generation, not the public revision number: a plan is
+  ## rejected before any table changes when it was produced by another
+  ## reconciler or generated before the current accepted state. Every
+  ## successful accept advances the generation, so an older plan can never
+  ## roll a live description back to an earlier baseline, even at the same
+  ## revision. A no-change plan generated from the current state is still
+  ## safe: it matches the generation, and accepting it simply advances it.
+  if plan.owner != r.owner:
+    fail("foreign reconcile plan: not produced by this reconciler")
+  if plan.baseGeneration != r.generation:
+    fail("stale reconcile plan: base generation " & $plan.baseGeneration &
+      " does not match accepted generation " & $r.generation)
   if plan.revision < r.revision:
     fail("reconcile plan would move the accepted revision backwards: " &
       $plan.revision & " < " & $r.revision)
   r.entities = plan.entities
   r.byNodeId = plan.byNodeId
   r.revision = plan.revision
+  inc r.generation
