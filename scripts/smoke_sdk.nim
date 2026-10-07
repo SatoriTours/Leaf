@@ -1,5 +1,6 @@
 ## Verify a relocated SDK builds a SQLite application without checkout overrides.
 import std/[os, osproc, strtabs, streams, json, tempfiles, strutils]
+when defined(windows): import ../src/leaf/windows_paths
 
 type CommandResult* = object
   output*: string
@@ -40,9 +41,20 @@ proc checkedCommand*(command: string, arguments: seq[string] = @[], workingDir =
 proc require(condition: bool, message: string) =
   if not condition: raise newException(ValueError, message)
 
-proc within(path, directory: string): bool =
-  let relative = relativePath(absolutePath(path), absolutePath(directory))
-  not relative.isAbsolute and relative != ".." and not relative.startsWith(".." & DirSep)
+proc within*(path, directory: string): bool =
+  try:
+    # Resolve both ends: macOS /var aliases and Windows junctions refer to
+    # existing SDK files, while a link inside the SDK may really escape it.
+    when defined(windows):
+      let full = windows_paths.realPath(path)
+      let base = windows_paths.realPath(directory)
+    else:
+      let full = expandFilename(path)
+      let base = expandFilename(directory)
+    let relative = relativePath(full, base)
+    result = not relative.isAbsolute and relative != ".." and not relative.startsWith(".." & DirSep)
+  except OSError:
+    result = false
 
 proc smokeSdk*(sdkPath: string, headlessOnly = false) =
   let sdk = absolutePath(sdkPath)
