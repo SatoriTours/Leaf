@@ -3,18 +3,24 @@ import std/[strutils, sets]
 import ./[core, project]
 
 type
+  ScaffoldMode* = enum
+    smApplication, smResource
   ScaffoldOptions* = object
-    target*, project*: string
+    target*: string
     fields*: seq[string]
     dryRun*: bool
+    mode*: ScaffoldMode
   FieldSpec* = object
     name*, kind*: string
   ResourceSpec* = object
     model*, singular*, plural*: string
     fields*: seq[FieldSpec]
-    migration*: int
+    migration*: int64
   ScaffoldManifest* = object
     schema*: int
+    modelSchema*: int
+    modelApi*: int
+    timestamps*: bool
     resources*: seq[ResourceSpec]
   ScaffoldFile* = object
     path*, content*: string
@@ -39,7 +45,7 @@ proc snake(name: string): string =
       result.add('_')
     result.add(c.toLowerAscii)
 
-proc parseResource*(name: string, fields: seq[string], migration: int): ResourceSpec =
+proc parseResource*(name: string, fields: seq[string], migration: int64): ResourceSpec =
   checkIdentifier(name)
   result.singular = snake(name)
   discard portableRelative(result.singular)
@@ -69,25 +75,25 @@ proc parseResource*(name: string, fields: seq[string], migration: int): Resource
     result.fields.add(FieldSpec(name: parts[0], kind: parts[1]))
 
 proc parseScaffoldOptions*(args: seq[string]): ScaffoldOptions =
-  if args.len == 0 or args[0].startsWith("--"):
-    fail("usage: leaf g scaffold DIRECTORY | MODEL FIELD:TYPE... --project DIRECTORY [--dry-run]")
-  result.target = args[0]
-  var i = 1
-  var projectSeen, previewSeen: bool
-  while i < args.len:
-    case args[i]
-    of "--project":
-      if projectSeen or i+1 >= args.len or args[i+1].len == 0 or args[i+1].startsWith("--"):
-        fail("--project requires one directory and cannot be repeated")
-      projectSeen = true
-      inc i
-      result.project = args[i]
+  ## Pure parser. No positional arguments means a full application in the
+  ## current directory; otherwise the first argument is the MODEL of a resource.
+  ## The retired DIRECTORY/--project selectors are rejected outright.
+  result.mode = smApplication
+  var previewSeen = false
+  var positionals: seq[string]
+  for argument in args:
+    case argument
     of "--dry-run":
       if previewSeen: fail("duplicated --dry-run")
       previewSeen = true
       result.dryRun = true
+    of "--project":
+      fail("--project is no longer supported; resource commands use the current project")
     else:
-      if args[i].startsWith("-"): fail("unknown scaffold option: " & args[i])
-      result.fields.add(args[i])
-    inc i
-  if not projectSeen and result.fields.len > 0: fail("resource fields require --project DIRECTORY")
+      if argument.startsWith("-"): fail("unknown scaffold option: " & argument)
+      positionals.add(argument)
+  if positionals.len == 0: return
+  result.mode = smResource
+  result.target = positionals[0]
+  if positionals.len == 1: fail("resource scaffold needs at least one name:type field")
+  result.fields = positionals[1..^1]

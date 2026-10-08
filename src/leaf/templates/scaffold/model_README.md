@@ -6,7 +6,7 @@ This Leaf application uses page groups, inherited models and SQLite migrations.
 leaf --check .
 leaf --watch .
 leaf --headless --change task_draft 'First task' --click task_add .
-leaf g scaffold Note title:string archived:bool --project .
+leaf g scaffold Note title:string archived:bool
 leaf pack . --target linux --output dist
 nim c -r --path:/path/to/leaf/src tests/test_home.nim
 ```

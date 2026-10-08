@@ -9,7 +9,7 @@ import ./types
 
 const
   MigrationsRelative = "db/migrations"
-  GenerationLockRelative = "target/leaf-migration-generation.lock"
+  GenerationLockRelative* = "target/leaf-migration-generation.lock"
   # Same list as scaffold_types.Keywords: a generated template must never emit
   # `migration <keyword>:`, which the DSL rejects at compile time.
   NimKeywords = ["addr", "and", "as", "asm", "bind", "block", "break", "case",

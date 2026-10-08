@@ -6,6 +6,11 @@ let base = createTempDir("leaf-model-scaffold-", "")
 removeDirectoryOnExit(base)
 let fixture = currentSourcePath().parentDir.parentDir / "fixtures/scaffold_v1"
 
+proc migrationText(app, suffix: string): string =
+  for path in walkFiles(app / "db/migrations/*.nim"):
+    if path.extractFilename.endsWith(suffix): return readFile(path)
+  ""
+
 type LegacyTask = ref object of TimestampedRecord
   title: string
   done: bool
@@ -14,18 +19,22 @@ defineModel(LegacyTask, table = "tasks")
 suite "model scaffold versions":
   test "new applications use model declarations and no CRUD services":
     let app = base / "modern"
-    discard generateScaffold(ScaffoldOptions(target: app))
+    createDir(app)
+    discard generateScaffold(ScaffoldOptions(mode: smApplication), app)
     let manifest = parseFile(app / ".leaf/scaffold.json")
-    check manifest["schema"].getInt == 2
+    check manifest["schema"].getInt == 3
+    check manifest["model_schema"].getInt == 2
     check manifest["model_api"].getInt == 1
     check manifest["timestamps"].getBool
     check not fileExists(app / "app/services/task_service.nim")
     check "defineAbstractModel" in readFile(app / "app/models/application_record.nim")
     check "defineModel" in readFile(app / "app/models/task.nim")
     check "executionScope" in readFile(app / "app/application.nim")
-    discard generateScaffold(ScaffoldOptions(target: "Note", project: app, fields: @["title:string"]))
+    discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Note",
+      fields: @["title:string"]), app)
     check not fileExists(app / "app/services/note_service.nim")
-    check "REAL NOT NULL" in readFile(app / "db/migrations/002_create_notes.up.sql")
+    check "timestamps()" in migrationText(app, "_create_notes.nim")
+    check "string title, nullable = false" in migrationText(app, "_create_notes.nim")
     check "editingId, selectedId: int64" in readFile(app / "app/pages/notes/logic.nim")
     check "generatedPages*()" in readFile(app / "app/generated/pages.nim")
 
@@ -34,12 +43,16 @@ suite "model scaffold versions":
     copyDir(fixture, app)
     let oldMigration = readFile(app / "db/migrations/001_create_tasks.up.sql")
     let oldModel = readFile(app / "app/models/task.nim")
-    discard generateScaffold(ScaffoldOptions(target: "Note", project: app, fields: @["title:string"]))
-    check parseFile(app / ".leaf/scaffold.json")["schema"].getInt == 1
+    discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Note",
+      fields: @["title:string"]), app)
+    let manifest = parseFile(app / ".leaf/scaffold.json")
+    check manifest["schema"].getInt == 3
+    check manifest["model_schema"].getInt == 1
     check readFile(app / "db/migrations/001_create_tasks.up.sql") == oldMigration
     check readFile(app / "app/models/task.nim") == oldModel
     check fileExists(app / "app/services/note_service.nim")
     check "id*: int" in readFile(app / "app/models/note.nim")
+    check "autoIncrement = true" in migrationText(app, "_create_notes.nim")
     var env = newStringTable(modeCaseSensitive)
     for key, value in envPairs(): env[key] = value
     env["LEAF_DATABASE_PATH"] = app / "target/test.sqlite3"
@@ -59,6 +72,11 @@ suite "model scaffold versions":
     ran.close()
     let db = openDatabase(env["LEAF_DATABASE_PATH"])
     check db.query("SELECT title FROM tasks")[0][0].asString == "legacy task"
+    # The frozen SQL history stays authentic and the new Nim migration applied.
+    let history = db.query("SELECT version, name, sql FROM leaf_schema_migrations ORDER BY version")
+    check history.len == 2
+    check history[0][1].asString == "001_create_tasks"
+    check history[0][2].asString == oldMigration
     db.close()
 
   test "timestamps for old data are a new migration, not a rewritten create":
@@ -80,7 +98,8 @@ suite "model scaffold versions":
 
   test "unsupported schema and model metadata fail before writing":
     let app = base / "metadata"
-    discard generateScaffold(ScaffoldOptions(target: app))
+    createDir(app)
+    discard generateScaffold(ScaffoldOptions(mode: smApplication), app)
     let path = app / ".leaf/scaffold.json"
     for invalid in ["{\"schema\":3,\"resources\":[]}",
       "{\"schema\":2,\"resources\":[],\"timestamps\":true}",
@@ -88,13 +107,16 @@ suite "model scaffold versions":
       "{\"schema\":2,\"resources\":[],\"model_api\":2,\"timestamps\":true}"]:
       writeFile(path, invalid)
       expect CatchableError:
-        discard generateScaffold(ScaffoldOptions(target: "Note", project: app, fields: @["title:string"]))
+        discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Note",
+          fields: @["title:string"]), app)
       check not fileExists(app / "app/models/note.nim")
 
   test "generated resource editor completes committed writes even when notifications fail":
     let app = base / "notifications"
-    discard generateScaffold(ScaffoldOptions(target: app))
-    discard generateScaffold(ScaffoldOptions(target: "Note", project: app, fields: @["title:string"]))
+    createDir(app)
+    discard generateScaffold(ScaffoldOptions(mode: smApplication), app)
+    discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Note",
+      fields: @["title:string"]), app)
     let modelPath = app / "app/models/note.nim"
     var declaration = readFile(modelPath)
     declaration = declaration.replace("defineModel(Note,", "proc notify(record: Note, event: ModelEvent) =\n  raise newException(ValueError, \"notification unavailable\")\n\ndefineModel(Note,")

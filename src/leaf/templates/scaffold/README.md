@@ -6,8 +6,8 @@ This Leaf application uses page groups, shared models and services, and independ
 leaf --check .
 leaf --watch .
 leaf --headless --change task_draft 'First task' --click task_add .
-leaf g scaffold Note title:string archived:bool --project .
-leaf g scaffold Metric count:int amount:float --project . --dry-run
+leaf g scaffold Note title:string archived:bool
+leaf g scaffold Metric count:int amount:float --dry-run
 leaf pack . --target linux --output dist
 ```
 

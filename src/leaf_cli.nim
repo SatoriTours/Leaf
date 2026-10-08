@@ -1,6 +1,6 @@
 ## Developer CLI: native Nim applications are compiled before execution.
 import std/[os, json, strutils, strtabs]
-import leaf/[core, project, build, doctor, developer_options, diagnostics, watch, process_io, pack, scaffold, sdk]
+import leaf/[core, project, project_context, build, doctor, developer_options, diagnostics, watch, process_io, pack, scaffold, sdk]
 export build
 
 proc execute(exe: string, args: seq[string], workingDir: string): int =
@@ -21,9 +21,9 @@ proc main*(args: seq[string]): int =
     if args.len == 0 or args[0] in ["--help", "-h"]:
       stdout.writeLine("""Leaf Nim developer tools
   leaf init DIRECTORY              Create a native Nim application
-  leaf g scaffold DIRECTORY [--dry-run] Create a full page-group application
-  leaf g scaffold MODEL FIELD:TYPE... --project DIRECTORY [--dry-run]
-                                   Add a resource with CRUD pages, routes and SQL
+  leaf g scaffold [--dry-run]       Create a full page-group application in the cwd
+  leaf g scaffold MODEL FIELD:TYPE... [--dry-run]
+                                   Add a resource with CRUD pages, routes and migrations
   leaf generate scaffold ...       Alias for leaf g scaffold
   leaf build PROJECT [--output EXE] Compile a release application
   leaf pack PROJECT --target TARGET [--binary EXE] [--output DIR]
@@ -47,9 +47,12 @@ Release TARGET: linux, macos, windows or all. Foreign targets need native binari
       if args.len notin [3, 4]: fail("usage: leaf --verify-sdk CHANNEL TARGET [VERSION]")
       verifySdk(args[1], args[2], if args.len == 4: args[3] else: "")
     of "g", "generate":
-      if args.len < 3 or args[1] != "scaffold":
-        fail("usage: leaf g scaffold DIRECTORY | MODEL FIELD:TYPE... --project DIRECTORY [--dry-run]")
-      for action in generateScaffold(parseScaffoldOptions(args[2..^1])):
+      if args.len < 2 or args[1] != "scaffold":
+        fail("usage: leaf g scaffold [MODEL FIELD:TYPE...] [--dry-run]")
+      let options = parseScaffoldOptions(args[2..^1])
+      let root = if options.mode == smApplication: getCurrentDir()
+        else: requireCurrentProject().root
+      for action in generateScaffold(options, root):
         stdout.writeLine(action)
     of "init":
       if args.len != 2: fail("usage: leaf init DIRECTORY")

@@ -148,6 +148,23 @@ proc newProjectConfig*(name, entry: string, included: seq[string]): JsonNode =
   %*{"name": name, "identifier": "org.example." & slug,
     "version": "0.1.0", "entry": entry, "include": included}
 
+proc matchesMinimalTemplate*(root: string): bool =
+  ## True only when the four minimal `init` artifacts are byte-identical to the
+  ## current template, so an untouched init can be safely upgraded in place.
+  if not fileExists(root / "leaf.json") or
+      readFile(root / "leaf.json") !=
+        pretty(newProjectConfig(absolutePath(root).extractFilename, "src/main.nim",
+          @["src", "assets"])) & "\n":
+    return false
+  if not fileExists(root / "assets" / "message.txt") or
+      readFile(root / "assets" / "message.txt") != "多文件应用 · 资源随发布包迁移\n":
+    return false
+  if not fileExists(root / "src" / "main.nim") or readFile(root / "src" / "main.nim") != MainTemplate:
+    return false
+  if not fileExists(root / "src" / "app.nim") or readFile(root / "src" / "app.nim") != AppTemplate:
+    return false
+  true
+
 proc initProject*(path: string) =
   if fileExists(path) or dirExists(path): fail("refusing to overwrite existing project: " & path)
   let config = newProjectConfig(path.normalizedPath.extractFilename, "src/main.nim", @["src", "assets"])

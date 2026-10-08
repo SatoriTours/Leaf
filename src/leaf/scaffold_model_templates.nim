@@ -56,3 +56,27 @@ proc modelTestCodeV2*(resource: ResourceSpec): string =
   if resource.fields.anyIt(it.kind == "string"):
     result.add("  let invalid = " & m & ".build()\n  doAssert not invalid.save()\n  doAssert errors(invalid).fullMessages.len > 0\n")
   result.add("storage.close(connection)\necho " & (resource.plural & " model tests passed").escape & "\n")
+
+proc migrationSource*(resource: ResourceSpec, modelSchema: int): string =
+  ## Restricted executable Nim DSL (never pending(), never SQL). The declaration
+  ## name matches the `<version>_create_<plural>.nim` filename logical name.
+  let table = resource.plural
+  result = "import leaf/migrations\n\nmigration create_" & table & ":\n  change:\n"
+  if modelSchema == 1:
+    result.add("    createTable " & table & ", autoIncrement = true:\n")
+  else:
+    result.add("    createTable " & table & ":\n")
+  for field in resource.fields:
+    let kind = case field.kind
+      of "string": "string"
+      of "bool": "boolean"
+      of "int": "integer"
+      else: "float"
+    result.add("      " & kind & " " & field.name & ", nullable = false\n")
+  if modelSchema != 1:
+    result.add("      timestamps()\n")
+
+proc migrationFile*(resource: ResourceSpec, modelSchema: int): ScaffoldFile =
+  checkModelFields(resource)
+  ScaffoldFile(path: "db/migrations/" & $resource.migration & "_create_" & resource.plural & ".nim",
+    content: migrationSource(resource, modelSchema))

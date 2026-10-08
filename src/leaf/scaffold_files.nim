@@ -27,13 +27,17 @@ proc guardedPath*(root, relative: string): string =
 proc checkPlan*(root: string, plan: seq[ScaffoldFile], newProject: bool) =
   if newProject and (fileExists(root) or dirExists(root) or symlinkExists(root)):
     fail("refusing to overwrite existing project: " & root)
+  # Aggregate every conflict before any write so a normal conflict is zero-write.
+  var conflicts: seq[string]
   for file in plan:
     let path = guardedPath(root, file.path)
     if file.update:
       if not fileExists(path) or readFile(path) != file.previous:
-        fail("generated file was modified; preserve it and resolve the conflict: " & file.path)
+        conflicts.add(file.path)
     elif fileExists(path) or dirExists(path):
-      fail("scaffold file already exists: " & file.path)
+      conflicts.add(file.path)
+  if conflicts.len > 0:
+    fail("scaffold target already exists or was modified: " & conflicts.join(", "))
 
 proc writePlan*(root: string, plan: seq[ScaffoldFile], newProject: bool) =
   checkPlan(root, plan, newProject)
