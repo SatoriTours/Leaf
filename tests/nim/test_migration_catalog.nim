@@ -307,3 +307,102 @@ suite "discoverMigrations catalog":
       check probe.code != 0
       check "symbolic link" in probe.output
       check toSeq(walkDirRec(outside)).len == 0
+
+suite "migration catalog fix round 1":
+  test "fingerprint tracks the actual file names, not only identity":
+    let directory = base / "fingerprint-rename" / "migrations"
+    createDir(directory)
+    writeFile(directory / "001_sample.up.sql", "CREATE TABLE sample (id INTEGER);")
+    let before = catalogInputFingerprint(directory)
+    moveFile(directory / "001_sample.up.sql", directory / "1_sample.up.sql")
+    let after = catalogInputFingerprint(directory)
+    check before != after
+    let moved = base / "fingerprint-moved" / "migrations"
+    createDir(moved.parentDir)
+    copyDir(directory, moved)
+    check catalogInputFingerprint(moved) == after
+    writeFile(directory / "002_create_tasks.nim", nimMigration("create_tasks", "tasks", "title"))
+    let nimBefore = catalogInputFingerprint(directory)
+    moveFile(directory / "002_create_tasks.nim", directory / "2_create_tasks.nim")
+    check catalogInputFingerprint(directory) != nimBefore
+
+  when defined(posix):
+    test "symlinked or broken migration paths are rejected":
+      let root = base / "symlink paths"
+      createDir(root)
+      createSymlink(root / "absent", root / "broken")
+      let brokenError = scanError(root / "broken")
+      check "broken" in brokenError
+      check "symbolic link" in brokenError
+      let real = root / "real"
+      createDir(real)
+      writeFile(real / "001_sample.up.sql", "SELECT 1;")
+      createSymlink(root, root / "ancestor")
+      let ancestorError = scanError(root / "ancestor" / "real")
+      check "ancestor" in ancestorError
+      check "symbolic link" in ancestorError
+
+    test "the artifact guard rejects a visible symlinked project root":
+      let realProject = base / "guard real project"
+      createDir(realProject)
+      createSymlink(realProject, base / "guard aliased project")
+      var message = ""
+      try:
+        rejectSymlinkPath(base / "guard aliased project")
+      except MigrationError as error:
+        message = error.msg
+      check "symbolic link" in message
+      check "guard aliased project" in message
+
+    test "the compiler canonicalizes aliased project roots before macros run":
+      # Evidence for the coordinator: `projectFull`, `projectPath` and module
+      # lineInfo all report the real path, so a compile-time alias is invisible
+      # and artifacts belong to the canonical project root.
+      let realProject = base / "canonical real"
+      writeProbeFiles(realProject, @[
+        ("db/catalog.nim", catalogSource),
+        ("db/migrations/001_create_tasks.nim", nimMigration("create_tasks", "tasks", "title")),
+        ("main.nim", mainSource)])
+      createSymlink(realProject, base / "canonical alias")
+      let probe = buildProbe(base, "canonical alias/main.nim", base / "canonical-cache",
+        "canonical-app")
+      check probe.code == 0
+      if probe.code != 0:
+        checkpoint(probe.output)
+      else:
+        check toSeq(walkDirRec(realProject / "target" / "leaf-migrations")).len == 1
+
+  test "catalog escapes quoted relative directories":
+    let project = base / "quoted directory"
+    writeProbeFiles(project, @[
+      ("db/catalog.nim", """
+import leaf/migrations
+
+discoverMigrations("mig\"quoted", applicationMigrations)
+"""),
+      ("db/mig\"quoted/001_create_tasks.nim", nimMigration("create_tasks", "tasks", "title")),
+      ("main.nim", mainSource)])
+    let probe = buildProbe(project, "main.nim", project / "target" / "cache", "app")
+    check probe.code == 0
+    if probe.code != 0:
+      checkpoint(probe.output)
+    else:
+      let run = runBinary(probe.binary, project)
+      check run.code == 0
+      check "count=1" in run.output
+
+  when defined(posix):
+    test "catalog escapes literal backslash relative directories":
+      let project = base / "backslash directory"
+      writeProbeFiles(project, @[
+        ("db/catalog.nim", "import leaf/migrations\n\ndiscoverMigrations(\"mig\\\\slash\", applicationMigrations)\n"),
+        ("db/mig\\slash/001_create_tasks.nim", nimMigration("create_tasks", "tasks", "title")),
+        ("main.nim", mainSource)])
+      let probe = buildProbe(project, "main.nim", project / "target" / "cache", "app")
+      check probe.code == 0
+      if probe.code != 0:
+        checkpoint(probe.output)
+      else:
+        let run = runBinary(probe.binary, project)
+        check run.code == 0
+        check "count=1" in run.output

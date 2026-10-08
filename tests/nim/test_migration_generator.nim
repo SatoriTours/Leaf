@@ -173,3 +173,46 @@ suite "migration template generation":
       second.close()
       check (firstCode == 0) != (secondCode == 0)
       check scanMigrationFiles(root / "db" / "migrations").len == 1
+
+suite "migration generator fix round 1":
+  test "clock overflow is a MigrationError, not an OverflowDefect":
+    try:
+      discard nextMigrationVersion(@[], dateTime(922338, mJan, 1, zone = utc()).toTime)
+      check false
+    except MigrationError as error:
+      check error.issueCode == "migration_version_overflow"
+    let maximum = dateTime(9999, mDec, 31, 23, 59, 59, 999_000_000, zone = utc()).toTime
+    check nextMigrationVersion(@[], maximum) == 99991231235959999'i64
+
+  test "clock overflow is a MigrationError in release builds":
+    let tools = base / "clock-release"
+    writeProbeFiles(tools, @[("clock.nim", """
+import std/times
+import leaf/migrations
+
+try:
+  discard nextMigrationVersion(@[], dateTime(922338, mJan, 1, zone = utc()).toTime)
+  echo "no-error"
+except MigrationError as error:
+  echo error.issueCode
+""")])
+    let probe = buildProbe(tools, "clock.nim", base / "clock-cache", "clock",
+      extraArgs = @["-d:release"])
+    check probe.code == 0
+    if probe.code != 0:
+      checkpoint(probe.output)
+    else:
+      let run = runBinary(probe.binary, tools)
+      check run.code == 0
+      check run.output.strip() == "migration_version_overflow"
+
+  test "Nim keywords are refused before any write":
+    for keyword in ["object", "nil", "type", "method", "addr", "block"]:
+      let root = base / ("keyword-" & keyword)
+      createDir(root)
+      writeFile(root / "unrelated.txt", "keep")
+      let before = snapshot(root)
+      expect MigrationError: discard generateMigration(root, keyword)
+      check snapshot(root) == before
+      check not dirExists(root / "target")
+      check not dirExists(root / "db")

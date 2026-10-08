@@ -1,5 +1,5 @@
 import ./cleanup_support
-import std/[os, osproc, strutils, tempfiles, unittest]
+import std/[monotimes, os, osproc, strutils, tempfiles, times, unittest]
 import leaf/migrations
 import ./migration_compile_support
 
@@ -99,3 +99,73 @@ suite "migration file locks":
           lock.release()
         else:
           child.close()
+
+when defined(linux):
+  proc prctl(option: cint, arg2, arg3, arg4, arg5: culong): cint {.
+    importc, header: "<sys/prctl.h>".}
+  const PrSetChildSubreaper = 36.cint
+  discard prctl(PrSetChildSubreaper, 1, 0, 0, 0)
+
+const execHolderSource = """
+import std/[os, times]
+import leaf/migrations
+when defined(posix):
+  import std/posix
+  let lock = acquireFileLock(paramStr(1), 2000)
+  let child = fork()
+  if int(child) == 0:
+    discard execl("/bin/sleep", "sleep", "30", cast[cstring](nil))
+    quit(1)
+  writeFile(paramStr(2), $child)
+  sleep(30000)
+  lock.release()
+"""
+
+suite "migration locking fix round 1":
+  test "permanent lock path errors fail promptly and distinctly":
+    let started = getMonoTime()
+    let missing = timeoutError(base / "absent-parent" / "lock", 2000)
+    check missing.code == "lock_path_error"
+    check (getMonoTime() - started) < initDuration(milliseconds = 1000)
+    check "lock" in missing.message
+    let directory = base / "a-directory"
+    createDir(directory)
+    check timeoutError(directory, 2000).code == "lock_path_error"
+    check timeoutError("", 100).code == "invalid_lock_path"
+    check timeoutError("bad\0path", 100).code == "invalid_lock_path"
+
+  when defined(linux):
+    test "locks do not leak into exec descendants after the owner is killed":
+      let tools = base / "exec-holder-tools"
+      writeProbeFiles(tools, @[("holder.nim", execHolderSource)])
+      let holder = buildProbe(tools, "holder.nim", base / "exec-holder-cache", "holder")
+      check holder.code == 0
+      if holder.code == 0:
+        let path = base / "exec.lock"
+        let marker = base / "exec-child.pid"
+        removeFile(marker)
+        let owner = startProcess(holder.binary, args = @[path, marker],
+          options = {poStdErrToStdOut})
+        var childPid = 0
+        try:
+          var waited = 0
+          while not fileExists(marker) and waited < 15000:
+            sleep(20)
+            waited += 20
+          check fileExists(marker)
+          if fileExists(marker):
+            childPid = parseInt(readFile(marker).strip())
+            discard posix.kill(Pid(owner.processID), SIGKILL)
+            discard owner.waitForExit()
+            let lock = acquireFileLock(path, 2000)
+            check lock != nil
+            lock.release()
+        finally:
+          if owner.peekExitCode() == -1:
+            discard posix.kill(Pid(owner.processID), SIGKILL)
+            discard owner.waitForExit()
+          owner.close()
+          if childPid > 0:
+            discard posix.kill(Pid(childPid), SIGKILL)
+            var status: cint
+            discard posix.waitpid(Pid(childPid), status, 0)

@@ -2,7 +2,7 @@
 ## POSIX flock / Windows LockFileEx. The lock file's existence never means
 ## ownership: the OS releases the lock on process exit, and release never
 ## unlinks the file.
-import std/[monotimes, os, times]
+import std/[monotimes, os, oserrors, times]
 import ./types
 
 when defined(windows):
@@ -65,9 +65,13 @@ proc release*(lock: FileLock) =
   if lock == nil: return
   lock[].closeHandle()
 
+proc lockPathError(path, detail: string): ref MigrationError =
+  migrationError("lock_path_error", "cannot lock " & path & ": " & detail)
+
 proc acquireFileLock*(path: string, timeoutMs = DefaultLockTimeoutMs): FileLock =
   ## Take an exclusive lock, polling until `timeoutMs` elapses. A pre-existing
-  ## but unheld lock file is acquired immediately.
+  ## but unheld lock file is acquired immediately. Permanent open/permission
+  ## errors fail at once; only real contention or EINTR waits.
   if path.len == 0 or '\0' in path:
     raise migrationError("invalid_lock_path", "lock path is empty or contains NUL")
   let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
@@ -77,20 +81,36 @@ proc acquireFileLock*(path: string, timeoutMs = DefaultLockTimeoutMs): FileLock 
         DWORD(GENERIC_READ) or DWORD(GENERIC_WRITE),
         DWORD(FILE_SHARE_READ) or DWORD(FILE_SHARE_WRITE), nil,
         DWORD(OPEN_ALWAYS), DWORD(FILE_ATTRIBUTE_NORMAL), Handle(0))
-      if handle != INVALID_HANDLE_VALUE:
+      if handle == INVALID_HANDLE_VALUE:
+        let error = int(winlean.getLastError())
+        if error != ERROR_LOCK_VIOLATION and error != 32:
+          raise lockPathError(path, osErrorMsg(OSErrorCode(error)))
+      else:
         var overlapped: Overlapped
         if lockFileEx(handle, LockFileExclusiveLock or LockFileFailImmediately,
             0, 1, 0, addr overlapped) != 0:
           result = FileLock(handle: handle, acquired: true)
           return
+        let error = int(winlean.getLastError())
         discard winlean.closeHandle(handle)
+        if error != ERROR_LOCK_VIOLATION and error != 32:
+          raise lockPathError(path, osErrorMsg(OSErrorCode(error)))
     else:
-      let fd = posix.open(path.cstring, O_RDWR or O_CREAT, 0o644)
-      if fd >= 0:
-        if cFlock(fd, LockExclusive or LockNonBlocking) == 0:
-          result = FileLock(fd: fd, acquired: true)
-          return
-        discard posix.close(fd)
+      # O_CLOEXEC keeps the locked description out of exec descendants, so the
+      # lock is released as soon as its owning process dies.
+      let fd = posix.open(path.cstring, O_RDWR or O_CREAT or O_CLOEXEC, 0o644)
+      if fd < 0:
+        let error = osLastError()
+        if int(error) == int(EINTR): continue
+        raise lockPathError(path, osErrorMsg(error))
+      if cFlock(fd, LockExclusive or LockNonBlocking) == 0:
+        result = FileLock(fd: fd, acquired: true)
+        return
+      let error = osLastError()
+      discard posix.close(fd)
+      if int(error) == int(EINTR): continue
+      if int(error) != int(EWOULDBLOCK) and int(error) != int(EAGAIN):
+        raise lockPathError(path, osErrorMsg(error))
     if getMonoTime() >= deadline:
       raise migrationError("concurrent_migration",
         "timed out waiting for migration lock: " & path)

@@ -55,12 +55,32 @@ proc pathIsSymlink*(path: string): bool =
   ## VM-compatible symlink detection: `walkDir` reports link components while
   ## `symlinkExists`/`getFileInfo` are FFI and unavailable at compile time.
   let normalized = normalizedPath(path)
-  let parent = normalized.parentDir
-  if parent.len == 0 or not dirExists(parent): return false
+  var parent = normalized.parentDir
+  if parent.len == 0: parent = "."
+  if not dirExists(parent): return false
   for kind, entry in walkDir(parent, relative = false):
     if kind in {pcLinkToFile, pcLinkToDir} and normalizedPath(entry) == normalized:
       return true
   false
+
+proc isSystemAlias(path: string): bool =
+  ## The only aliases guardedPath trusts; VM code cannot expand them.
+  when defined(macosx):
+    path in ["/tmp", "/var", "/etc"]
+  else:
+    false
+
+proc rejectSymlinkPath*(path: string) =
+  ## Reject a symlink at `path` or any ancestor, including broken links and
+  ## links above the project root. macOS standard system aliases are exempt.
+  var current = normalizedPath(path)
+  while current.len > 0:
+    if not isSystemAlias(current) and pathIsSymlink(current):
+      raise migrationError("symlink_migration",
+        "path cannot be a symbolic link: " & current)
+    let parent = current.parentDir
+    if parent == current or parent.len == 0: break
+    current = parent
 
 proc looksLikeMigration(filename: string): bool =
   ## Helper files (README.md, .gitkeep, notes.txt) are ignored; anything with a
@@ -75,13 +95,11 @@ proc looksLikeMigration(filename: string): bool =
 proc scanMigrationFiles*(directory: string): seq[MigrationFile] =
   ## List the direct migration files of `directory`, sorted by version.
   let normalized = normalizedPath(directory)
+  rejectSymlinkPath(normalized)
   if fileExists(normalized) and not dirExists(normalized):
     raise migrationError("invalid_migration_directory",
       "migration path is not a directory: " & directory)
   if not dirExists(normalized): return @[]
-  if pathIsSymlink(normalized):
-    raise migrationError("symlink_migration",
-      "migration directory cannot be a symbolic link: " & directory)
   var ups: seq[MigrationFile]
   var downs: Table[string, string]
   for kind, path in walkDir(normalized, relative = false):

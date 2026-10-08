@@ -41,7 +41,7 @@ proc writeProbeFiles*(root: string, files: seq[tuple[path, content: string]]) =
     writeFile(target, file.content)
 
 proc buildProbe*(root, mainPath, nimcache: string, outName = "probe",
-    outPath = ""): tuple[code: int, output: string, binary: string] =
+    outPath = "", extraArgs: seq[string] = @[]): tuple[code: int, output: string, binary: string] =
   ## Compile an existing root with an explicit nimcache, keeping the binary.
   ## `outPath` keeps `--out` away from fixture paths that contain `$`.
   let compiler = getEnv("NIM", findExe("nim"))
@@ -49,7 +49,9 @@ proc buildProbe*(root, mainPath, nimcache: string, outName = "probe",
   result.binary = if outPath.len > 0: outPath
     else: root / (outName & (when defined(windows): ".exe" else: ""))
   var args = @["c", "--hints:off", "--path:" & leafSourceRoot,
-    "--nimcache:" & nimcache, "--out:" & result.binary, mainPath]
+    "--nimcache:" & nimcache, "--out:" & result.binary]
+  args.add extraArgs
+  args.add mainPath
   let process = startProcess(compiler, workingDir = root, args = args,
     options = {poUsePath, poStdErrToStdOut})
   result.output = process.outputStream.readAll()

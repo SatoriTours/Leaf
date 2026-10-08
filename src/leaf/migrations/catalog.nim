@@ -29,16 +29,19 @@ proc sqlDefinition(file: MigrationFile): MigrationDefinition =
     legacyUp: upBytes, legacyDown: downBytes, hasDown: hasDown, pending: false)
 
 proc catalogInputFingerprint*(directory: string): string =
-  ## Sorted name/content fingerprint for build invalidation. Relative file names
-  ## and bytes only, so the result survives SDK relocation.
+  ## Sorted name/content fingerprint for build invalidation. It includes the
+  ## exact relative file names (so a `001_x` -> `1_x` rename is detected), the
+  ## bytes and SQL down presence; absolute paths are never hashed.
   let files = scanMigrationFiles(directory)
   var canonical = "leaf-migration-catalog-v1\n"
   for file in files:
     canonical.add "version=" & $file.version & " name=" & encode(file.name) &
       " format=" & $file.format & "\n"
+    canonical.add "upfile=" & encode(extractFilename(file.upPath)) & "\n"
     canonical.add "up=" & sha256Text(readFile(file.upPath)) & "\n"
     if file.format == mfSqlV1:
       if file.downPath.len > 0:
+        canonical.add "downfile=" & encode(extractFilename(file.downPath)) & "\n"
         canonical.add "down=" & sha256Text(readFile(file.downPath)) & "\n"
       else:
         canonical.add "down=absent\n"
@@ -88,6 +91,29 @@ proc validateNimProtocol(path: string, report: NimNode) =
   if migrations != 1:
     error("migration must declare exactly one migration: " & path, report)
 
+proc nimLiteral(value: string): string =
+  ## Emit a Nim string literal for generated `include` paths (quotes,
+  ## backslashes and control characters must be escaped).
+  result = "\""
+  for c in value:
+    case c
+    of '\\': result.add "\\\\"
+    of '"': result.add "\\\""
+    of '\n': result.add "\\n"
+    of '\r': result.add "\\r"
+    of '\t': result.add "\\t"
+    else:
+      if ord(c) < 32 or ord(c) == 127: result.add "\\x" & toHex(ord(c), 2)
+      else: result.add c
+  result.add "\""
+
+proc normalizedSeparators(path: string): string =
+  ## Only Windows uses `\` as a separator; a POSIX backslash is a literal name.
+  when defined(windows):
+    path.replace('\\', '/')
+  else:
+    path
+
 proc artifactDirectory(projectRoot, nimcache: string): string =
   ## Standard `db/catalog.nim` maps to `<project>/target`, never `db/target`.
   ## The nimcache-derived subdirectory isolates concurrent builds.
@@ -95,13 +121,11 @@ proc artifactDirectory(projectRoot, nimcache: string): string =
   if nimcache.len > 0:
     result = result / sha256Text(nimcache)[0 ..< 16]
 
-proc rejectSymlinkAncestors(projectRoot, relative: string, report: NimNode) =
-  var path = projectRoot
-  for part in relative.split('/'):
-    path = path / part
-    if pathIsSymlink(path):
-      error("generated migration artifacts cannot escape through a symbolic link: " &
-        path, report)
+proc validateArtifactPath(path: string, report: NimNode) =
+  try:
+    rejectSymlinkPath(path)
+  except MigrationError as failure:
+    error(failure.msg, report)
 
 macro discoverMigrations*(relativeDir: static[string], procName: untyped): untyped =
   ## Emit `proc <procName>(): seq[MigrationDefinition]` for the migrations in
@@ -128,8 +152,8 @@ macro discoverMigrations*(relativeDir: static[string], procName: untyped): untyp
   if projectRoot.len == 0: projectRoot = "."
   let artifactDir = artifactDirectory(projectRoot,
     querySetting(SingleValueSetting.nimcacheDir))
-  rejectSymlinkAncestors(projectRoot, relativePath(artifactDir, projectRoot).replace('\\', '/'),
-    procName)
+  validateArtifactPath(projectRoot, procName)
+  validateArtifactPath(artifactDir, procName)
 
   result = newStmtList()
   var items = nnkBracket.newTree()
@@ -141,13 +165,13 @@ macro discoverMigrations*(relativeDir: static[string], procName: untyped): untyp
       if pathIsSymlink(wrapperPath):
         error("generated migration wrapper cannot be a symbolic link: " & wrapperPath,
           procName)
-      let includeTarget = relativePath(file.sourcePath, artifactDir).replace('\\', '/')
-      let content = "include \"" & includeTarget & "\"\n"
+      let includeTarget = normalizedSeparators(relativePath(file.sourcePath, artifactDir))
+      let content = "include " & nimLiteral(includeTarget) & "\n"
       if not fileExists(wrapperPath) or readFile(wrapperPath) != content:
         createDir(artifactDir)
         writeFile(wrapperPath, content)
       let alias = "leafMigration" & $wrapperIndex
-      var importPath = relativePath(wrapperPath, callerDir).replace('\\', '/')
+      var importPath = normalizedSeparators(relativePath(wrapperPath, callerDir))
       if importPath.endsWith(".nim"): importPath = importPath[0 ..< importPath.len - 4]
       let importNode = nnkImportStmt.newTree(
         nnkInfix.newTree(ident"as", newLit(importPath), ident(alias)))
