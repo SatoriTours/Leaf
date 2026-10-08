@@ -77,6 +77,8 @@ proc migrationSource*(resource: ResourceSpec, modelSchema: int): string =
     result.add("      timestamps()\n")
 
 proc migrationFile*(resource: ResourceSpec, modelSchema: int): ScaffoldFile =
-  checkModelFields(resource)
+  # Only schema2 models own reserved timestamp columns; schema1 services keep
+  # ordinary fields even when their names look like timestamps.
+  if modelSchema == 2: checkModelFields(resource)
   ScaffoldFile(path: "db/migrations/" & $resource.migration & "_create_" & resource.plural & ".nim",
     content: migrationSource(resource, modelSchema))

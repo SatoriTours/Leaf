@@ -80,6 +80,25 @@ proc parseDecimalVersion(raw: string): int64 =
   if value <= 0: fail("invalid scaffold migration version")
   value
 
+proc requireCatalogConsistency(root: string, resources: seq[ResourceSpec]) =
+  ## A registered resource must correspond to an actual migration file with the
+  ## same logical name and version; a forged or stale manifest is rejected.
+  let files = migrations.scanMigrationFiles(root / MigrationsDir)
+  for resource in resources:
+    let expected = "create_" & resource.plural
+    var found = false
+    for file in files:
+      if file.name == expected and file.version == resource.migration: found = true
+    if not found:
+      fail("scaffold manifest resource " & resource.model & " does not match migration " &
+        expected & " at version " & $resource.migration)
+
+proc ensureNoMigrationCollision(root: string, resource: ResourceSpec) =
+  ## The proposed logical migration name must not already exist in the catalog.
+  for file in migrations.scanMigrationFiles(root / MigrationsDir):
+    if file.name == "create_" & resource.plural:
+      fail("migration already exists: create_" & resource.plural)
+
 proc checkResource(resources: seq[ResourceSpec], resource: ResourceSpec) =
   if identity(resource.model) == "task": fail("Task already exists in the home example")
   if resource.plural == "leaf_schema_migrations" or resource.plural.startsWith("sqlite_"):
@@ -131,6 +150,7 @@ proc loadManifest(root: string): ScaffoldManifest =
     let registered = guardedPath(root, file.path)
     if not fileExists(registered) or readFile(registered) != file.content:
       fail("generated registry was modified or is missing: " & file.path)
+  requireCatalogConsistency(root, result.resources)
 
 proc appFiles(name: string, taskVersion: int64): seq[ScaffoldFile] =
   const
@@ -205,7 +225,14 @@ proc generateScaffold*(options: ScaffoldOptions, root: string): seq[string] =
     let name = normalized.extractFilename
     if name.len == 0 or name in [".", "/"]:
       fail("cannot derive an application name from " & root)
-    var plan = appFiles(name, migrations.nextMigrationVersion(newSeq[MigrationFile](), getTime()))
+    let existingFiles = migrations.scanMigrationFiles(normalized / MigrationsDir)
+    for file in existingFiles:
+      if file.name == "create_tasks":
+        fail("migration already exists: create_tasks")
+    var plan = appFiles(name, migrations.nextMigrationVersion(existingFiles, getTime()))
+    # Guard every retained minimal artifact before reading it for the matcher.
+    for retained in ["leaf.json", "assets/message.txt", "src/main.nim", "src/app.nim"]:
+      discard guardedPath(normalized, retained)
     if matchesMinimalTemplate(normalized):
       # Untouched `leaf init` upgrade: only leaf.json and the example asset are
       # replaced; src/main.nim and src/app.nim stay exactly as generated.
@@ -221,6 +248,7 @@ proc generateScaffold*(options: ScaffoldOptions, root: string): seq[string] =
   var loaded = loadManifest(project.root)
   var resource = parseResource(options.target, options.fields, nextVersion(project.root))
   checkResource(loaded.resources, resource)
+  ensureNoMigrationCollision(project.root, resource)
   var plan = resourcePlan(project.root, project.name, loaded, resource)
   # Ordinary static conflicts are rejected before the coordination lock.
   checkPlan(project.root, plan, false)
@@ -234,6 +262,7 @@ proc generateScaffold*(options: ScaffoldOptions, root: string): seq[string] =
     loaded = loadManifest(project.root)
     resource = parseResource(options.target, options.fields, nextVersion(project.root))
     checkResource(loaded.resources, resource)
+    ensureNoMigrationCollision(project.root, resource)
     plan = resourcePlan(project.root, project.name, loaded, resource)
     checkPlan(project.root, plan, false)
     result = actions(plan)

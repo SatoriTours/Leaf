@@ -31,11 +31,22 @@ proc migrationsReadmeSource*(): string =
     "discovered by `db/catalog.nim`. Legacy `.up.sql`/`.down.sql` pairs remain\n" &
     "readable and are never rewritten.\n"
 
-proc recognizedDatabaseConfig*(previous: string): bool =
-  ## The exact old generated startup that delegates to a per-file registry.
-  "import ../app/generated/migrations" in previous and
-    "generatedMigrations()" in previous and
-    "databasePath*" in previous and "openApplicationDatabase*" in previous
+proc legacyDatabaseConfigSource*(name: string): string =
+  ## The exact old generated startup that delegated to a per-file registry.
+  "## Importing configuration does not open storage; application startup does.\n" &
+    "import std/os\nimport leaf/sqlite\nimport ../app/generated/migrations\nexport sqlite\n\n" &
+    "proc databasePath*(): string =\n" &
+    "  getEnv(\"LEAF_DATABASE_PATH\", getDataDir() / " & name.escape &
+    " / \"application.sqlite3\")\n\n" &
+    "proc openApplicationDatabase*(path = databasePath()): Database =\n" &
+    "  result = openDatabase(path)\n" &
+    "  try:\n    result.migrate(generatedMigrations())\n" &
+    "  except CatchableError:\n    result.close()\n    raise\n"
+
+proc recognizedDatabaseConfig*(previous, name: string): bool =
+  ## Ownership requires byte-exact equality with the canonical old renderer; a
+  ## marker or comment is not proof of generated ownership.
+  previous == legacyDatabaseConfigSource(name)
 
 proc databaseIncludeUpdate*(root: string): tuple[content, previous: string, needed: bool] =
   ## Validated JSON update: keep every existing field and append the database
@@ -61,7 +72,7 @@ proc databaseIncludeUpdate*(root: string): tuple[content, previous: string, need
 
 proc addDatabaseFile(plan: var seq[ScaffoldFile], root, path, content: string,
     recognized: proc(previous: string): bool, what: string) =
-  let target = root / path
+  let target = guardedPath(root, path)
   if not fileExists(target):
     plan.add(ScaffoldFile(path: path, content: content))
   else:
@@ -75,9 +86,11 @@ proc addDatabaseFile(plan: var seq[ScaffoldFile], root, path, content: string,
 proc databaseInitPlan*(root, name: string): seq[ScaffoldFile] =
   ## Config/catalog/readme/include additions; empty when everything matches.
   addDatabaseFile(result, root, DatabaseConfigPath, databaseConfigSource(name),
-    recognizedDatabaseConfig, "config/database.nim")
+    proc(previous: string): bool = recognizedDatabaseConfig(previous, name),
+    "config/database.nim")
+  # Only the exact current catalog is owned; any other content is custom.
   addDatabaseFile(result, root, CatalogPath, catalogSource(),
-    proc(previous: string): bool = previous.startsWith(GeneratedHeader), "db/catalog.nim")
+    proc(previous: string): bool = false, "db/catalog.nim")
   let readmePath = root / MigrationsDir / "README.md"
   if not fileExists(readmePath):
     result.add(ScaffoldFile(path: MigrationsDir / "README.md", content: migrationsReadmeSource()))

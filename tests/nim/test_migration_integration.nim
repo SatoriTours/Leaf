@@ -168,3 +168,81 @@ echo "ok"
       var versions: seq[int64]
       for file in files: versions.add(file.version)
       check versions.len == versions.deduplicate().len
+
+suite "scaffold hardening (fix round 1)":
+  test "customized config and catalog are never overwritten":
+    let custom = base / "custom-config"
+    copyDir(fixture, custom)
+    let path = custom / "config/database.nim"
+    writeFile(path, readFile(path).replace(
+      "getDataDir() / \"scaffold_v1\" / \"application.sqlite3\"",
+      "getCurrentDir() / \"KEEP_MY_PRIVATE_DATABASE.sqlite3\""))
+    let customBytes = readFile(path)
+    expect CatchableError: discard initializeDatabaseProject(readProject(custom))
+    check readFile(path) == customBytes
+    let cat = base / "custom-catalog"
+    initProject(cat)
+    discard initializeDatabaseProject(readProject(cat))
+    let catPath = cat / "db/catalog.nim"
+    writeFile(catPath, readFile(catPath) & "\n# user comment\n")
+    let catBytes = readFile(catPath)
+    expect CatchableError: discard initializeDatabaseProject(readProject(cat))
+    check readFile(catPath) == catBytes
+
+  test "existing migration names and forged manifest versions are rejected":
+    let coll = base / "collision"
+    createDir(coll)
+    discard generateScaffold(ScaffoldOptions(mode: smApplication), coll)
+    createDir(coll / "db/migrations")
+    writeFile(coll / "db/migrations/001_create_notes.nim",
+      "import leaf/migrations\n\nmigration create_notes:\n  change:\n    createTable custom_notes:\n      string title\n")
+    expect CatchableError:
+      discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Note",
+        fields: @["title:string"]), coll)
+    let appColl = base / "app-collision"
+    createDir(appColl / "db/migrations")
+    writeFile(appColl / "db/migrations/001_create_tasks.nim",
+      "import leaf/migrations\n\nmigration create_tasks:\n  change:\n    createTable custom_tasks:\n      string title\n")
+    expect CatchableError:
+      discard generateScaffold(ScaffoldOptions(mode: smApplication), appColl)
+    let forged = base / "forged"
+    createDir(forged)
+    discard generateScaffold(ScaffoldOptions(mode: smApplication), forged)
+    discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Note",
+      fields: @["title:string"]), forged)
+    let manifestPath = forged / ".leaf/scaffold.json"
+    var value = parseFile(manifestPath)
+    value["resources"][0]["migration"] = %"1"
+    writeFile(manifestPath, pretty(value) & "\n")
+    expect CatchableError:
+      discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Metric",
+        fields: @["count:int"]), forged)
+
+  when defined(posix):
+    test "reads and retained artifacts go through the path guard":
+      let sym = base / "symlink"
+      initProject(sym)
+      discard initializeDatabaseProject(readProject(sym))
+      let outside = base / "outside-config.nim"
+      writeFile(outside, readFile(sym / "config/database.nim"))
+      removeFile(sym / "config/database.nim")
+      createSymlink(outside, sym / "config/database.nim")
+      expect CatchableError: discard initializeDatabaseProject(readProject(sym))
+      check symlinkExists(sym / "config/database.nim")
+      let minimal = base / "minimal-symlink"
+      initProject(minimal)
+      writeFile(base / "outside-main.nim", readFile(minimal / "src/main.nim"))
+      removeFile(minimal / "src/main.nim")
+      createSymlink(base / "outside-main.nim", minimal / "src/main.nim")
+      expect CatchableError:
+        discard generateScaffold(ScaffoldOptions(mode: smApplication), minimal)
+
+  test "schema 1 keeps ordinary timestamp-named fields":
+    let legacy = base / "schema1-audit"
+    copyDir(fixture, legacy)
+    discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Audit",
+      fields: @["createdAt:string"]), legacy)
+    check fileExists(legacy / "app/models/audit.nim")
+    var migration = ""
+    for path in walkFiles(legacy / "db/migrations/*_create_audits.nim"): migration = readFile(path)
+    check "string createdAt" in migration
