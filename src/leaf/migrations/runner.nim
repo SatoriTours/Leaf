@@ -275,26 +275,38 @@ proc runMigrations*(db: Database, catalog: openArray[MigrationDefinition],
     return
   var lock: FileLock
   try:
-    # Read once before the lock so an unreadable history fails fast and the
-    # known state is available for later error reports.
+    # Fail fast before creating a lock file: read, plan and gate the selection
+    # (spec §7); the known state is preserved for later error reports.
     let initial = readHistorySafe(db, result)
     if not initial.ok: return
     var history = initial.history
     applyKnownState(result, catalog, history)
-    let lockPath = migrationLockPath(db)
+    var plan: MigrationPlan
+    try:
+      plan = planMigrations(catalog, history, request)
+      checkSelectedCapabilities(db, catalog, plan)
+    except MigrationError as error:
+      result.errors.add issueFromError(error)
+      return
+    var lockPath: string
+    try:
+      lockPath = migrationLockPath(db)
+    except OSError as error:
+      result.errors.add MigrationIssue(code: "migration_lock_path_failed",
+        message: error.msg)
+      return
     if lockPath.len > 0:
       try:
         lock = acquireFileLock(lockPath, LockTimeoutMs)
       except MigrationError as error:
         result.errors.add issueFromError(error)
         return
-    # After the lock: re-read, revalidate and replan. The full selected-plan
+    # After the lock: re-read, revalidate and replan; the full selected-plan
     # preflight still happens before any history or DDL mutation.
     let locked = readHistorySafe(db, result)
     if not locked.ok: return
     history = locked.history
     applyKnownState(result, catalog, history)
-    var plan: MigrationPlan
     try:
       plan = planMigrations(catalog, history, request)
       checkSelectedCapabilities(db, catalog, plan)

@@ -60,7 +60,8 @@ proc resultText*(migration: MigrationResult): string =
   lines.add(migration.command & ": " &
     (if migration.database.len > 0: migration.database else: ":memory:"))
   if not migration.executionConfirmed:
-    lines.add("execution not confirmed; committed state is unknown")
+    # Never present caller-supplied unconfirmed fields as committed facts.
+    lines.add("execution not confirmed; run status to verify the committed state")
   for status in migration.statuses:
     var line = "status " & $status.version & " " & status.state & " " & status.name
     if status.file.len > 0: line.add " " & status.file
@@ -71,15 +72,18 @@ proc resultText*(migration: MigrationResult): string =
     lines.add("planned " & directionName(step.direction) & " " & $step.version & " " &
       step.name)
     for statement in step.statements: lines.add "  sql: " & statement.replace("\n", " ")
-  for step in migration.executed:
-    lines.add("executed " & directionName(step.direction) & " " & $step.version & " " &
-      step.name)
+  if migration.executionConfirmed:
+    for step in migration.executed:
+      lines.add("executed " & directionName(step.direction) & " " & $step.version & " " &
+        step.name)
   for version in migration.skipped: lines.add("skipped " & $version)
   if migration.executionConfirmed:
     lines.add("current version: " &
       (if migration.currentVersion.isSome: $migration.currentVersion.get() else: "unknown"))
     if migration.currentVersion.isSome and migration.pendingVersions.len > 0:
       lines.add("pending versions: " & migration.pendingVersions.mapIt($it).join(", "))
+  else:
+    lines.add("current version: unknown (not confirmed)")
   for error in migration.errors:
     var line = "error " & error.code & ": " & error.message
     if error.version.isSome: line.add " (version " & $error.version.get() & ")"

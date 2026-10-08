@@ -1,4 +1,5 @@
-import std/[json, options, os, sequtils, strutils, unittest]
+import ./cleanup_support
+import std/[json, monotimes, options, os, sequtils, strutils, tempfiles, times, unittest]
 import leaf/sqlite
 import leaf/migrations
 
@@ -28,6 +29,9 @@ proc sqlDefinition(version: int64, basename, up: string, down = ""): MigrationDe
   MigrationDefinition(version: version, name: basename, sourcePath: basename & ".up.sql",
     sourceChecksum: sha256Text(up), format: mfSqlV1,
     legacyUp: up, legacyDown: down, hasDown: down.len > 0)
+
+let busyRoot = createTempDir("leaf-runner-fix2-", "")
+removeDirectoryOnExit(busyRoot)
 
 proc tableExists(db: Database, name: string): bool =
   db.query("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -181,7 +185,7 @@ suite "transactional migration runner":
     check history[0].downChecksum == downFingerprint(descriptor)
 
   test "status inspects a supplied handle without locking or writing":
-    let path = "/tmp/leaf-runner-status.sqlite3"
+    let path = busyRoot / "status.sqlite3"
     removeFile(path)
     removeFile(path & ".leaf-migrate.lock")
     let db = openDatabase(path)
@@ -388,7 +392,7 @@ proc signalCancel(context: ptr SqlContext, argc: cint, argv: ptr ptr SqlArg) {.c
 
 suite "migration runner fix round 1":
   test "busy database returns a report instead of escaping":
-    let path = "/tmp/leaf-runner-busy.sqlite3"
+    let path = busyRoot / "busy.sqlite3"
     for candidate in [path, path & "-wal", path & "-shm", path & ".leaf-migrate.lock"]:
       removeFile(candidate)
     let db = openDatabase(path)
@@ -408,7 +412,7 @@ suite "migration runner fix round 1":
     discard blocker.execute("ROLLBACK")
 
   test "a busy second step preserves the first commit":
-    let path = "/tmp/leaf-runner-busy2.sqlite3"
+    let path = busyRoot / "busy2.sqlite3"
     for candidate in [path, path & "-wal", path & "-shm", path & ".leaf-migrate.lock"]:
       removeFile(candidate)
     let db = openDatabase(path)
@@ -505,3 +509,102 @@ suite "migration runner fix round 1":
     check resultExitCode(result) == 0
     check result.executed.len == 1
     check db.query("SELECT leaf_schema_migrations FROM normal")[0][0].asString == "b"
+
+suite "migration script guard fix round 2":
+  test "qualified and case-variant history mutations are denied":
+    let db = openDatabase(":memory:")
+    defer: db.close()
+    discard db.execute("BEGIN")
+    discard createMigrationHistory(db)
+    discard db.execute("COMMIT")
+    expect DatabaseError:
+      executeMigrationScript(db, "ALTER TABLE main.leaf_schema_migrations ADD COLUMN corrupt TEXT")
+    expect DatabaseError:
+      executeMigrationScript(db, "ALTER TABLE leaf_schema_migrations RENAME TO renamed_history")
+    expect DatabaseError:
+      executeMigrationScript(db, "ALTER TABLE MAIN.LEAF_SCHEMA_MIGRATIONS ADD COLUMN corrupt TEXT")
+    expect DatabaseError:
+      executeMigrationScript(db,
+        "CREATE TEMP TRIGGER erase AFTER INSERT ON main.leaf_schema_migrations BEGIN DELETE FROM leaf_schema_migrations; END")
+    expect DatabaseError:
+      executeMigrationScript(db,
+        "CREATE TRIGGER keep AFTER INSERT ON leaf_schema_migrations BEGIN SELECT 1; END")
+    expect DatabaseError:
+      executeMigrationScript(db, "CREATE INDEX hidx ON leaf_schema_migrations (version)")
+    expect DatabaseError:
+      executeMigrationScript(db, "CREATE TEMP TABLE leaf_schema_migrations (version INTEGER)")
+    check db.query("PRAGMA main.table_info(leaf_schema_migrations)").len == 7
+    check not db.isScriptGuardActive and not db.isProgressActive
+    executeMigrationScript(db, "CREATE TABLE normal (leaf_schema_migrations TEXT)")
+    executeMigrationScript(db, "UPDATE normal SET leaf_schema_migrations = 'b'")
+
+suite "migration runner fix round 2":
+  test "a history trigger migration is rejected before any mutation":
+    let db = openDatabase(":memory:")
+    defer: db.close()
+    let trigger = sqlDefinition(1, "001_trigger",
+      "CREATE TABLE work(id INTEGER); CREATE TEMP TRIGGER erase_history AFTER INSERT ON " &
+      "main.leaf_schema_migrations BEGIN DELETE FROM leaf_schema_migrations; END;")
+    let result = runMigrations(db, @[trigger], MigrationRequest(kind: mrMigrate))
+    check resultExitCode(result) == 1
+    check result.executed.len == 0
+    check not tableExists(db, "work")
+    check readMigrationHistory(db).len == 0
+
+    let db2 = openDatabase(":memory:")
+    defer: db2.close()
+    discard runMigrations(db2, @[one], MigrationRequest(kind: mrMigrate))
+    let alter = sqlDefinition(2, "002_alter",
+      "ALTER TABLE main.leaf_schema_migrations ADD COLUMN corrupt TEXT;")
+    let altered = runMigrations(db2, @[one, alter], MigrationRequest(kind: mrMigrate))
+    check altered.executed.len == 0
+    check altered.errors.len == 1
+    check readMigrationHistory(db2).mapIt(it.version) == @[1'i64]
+    check db2.query("PRAGMA main.table_info(leaf_schema_migrations)").len == 7
+
+  test "pending preflight happens before the lock":
+    let path = busyRoot / "pending-lock.sqlite3"
+    removeFile(path & ".leaf-migrate.lock")
+    let db = openDatabase(path)
+    defer:
+      db.close()
+      removeFile(path)
+      removeFile(path & ".leaf-migrate.lock")
+    let owner = acquireFileLock(migrationLockPath(db))
+    var pending = sqlDefinition(2, "002_pending", "")
+    pending.pending = true
+    let started = getMonoTime()
+    let result = runMigrations(db, @[one, pending], MigrationRequest(kind: mrMigrate))
+    let elapsed = (getMonoTime() - started).inMilliseconds
+    check result.errors[0].code == "pending_migration"
+    check elapsed < 2000
+    owner.release()
+
+  test "an unlinked database returns a controlled lock-path report":
+    let path = busyRoot / "unlinked.sqlite3"
+    let db = openDatabase(path)
+    defer: db.close()
+    removeFile(path)
+    let result = runMigrations(db, @[one], MigrationRequest(kind: mrMigrate))
+    check result.errors.len == 1
+    check result.errors[0].code == "migration_lock_path_failed"
+    check result.executed.len == 0
+    check not db.isMigrationRunnerActive
+
+  test "unconfirmed reports never claim committed executions":
+    let arbitrary = MigrationStep(version: 77, direction: mdUp, name: "not_confirmed",
+      sourcePath: "unknown.nim")
+    let terminated = MigrationResult(command: "migrate", executionConfirmed: false,
+      planned: @[arbitrary], executed: @[arbitrary], currentVersion: some(77'i64),
+      pendingVersions: @[78'i64])
+    let node = resultJson(terminated)
+    check node["executed"].kind == JNull
+    check node["current_version"].kind == JNull
+    check node["pending_versions"].kind == JNull
+    let text = resultText(terminated)
+    check "not confirmed" in text
+    check "status" in text
+    check "executed up 77" notin text
+    check "current version: 77" notin text
+    check "pending versions" notin text
+    check resultExitCode(terminated) == 130

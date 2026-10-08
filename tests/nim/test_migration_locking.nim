@@ -9,6 +9,65 @@ when defined(posix): import std/posix
 let base = createTempDir("leaf-migration-locking-", "")
 removeDirectoryOnExit(base)
 
+proc killAndClose(child: Process) =
+  ## Bounded best-effort kill/reap/close; never masks the caller's error.
+  if child == nil: return
+  try:
+    if child.peekExitCode() == -1:
+      when defined(posix):
+        discard posix.kill(Pid(child.processID), SIGKILL)
+      else:
+        child.terminate()
+      discard child.waitForExit()
+  except CatchableError:
+    discard
+  try:
+    child.close()
+  except CatchableError:
+    discard
+
+type
+  FixtureChild = ref object
+    process: Process
+    finished: bool
+
+proc startChild(binary: string, args: seq[string]): FixtureChild =
+  FixtureChild(process: startProcess(binary, args = args, options = {poStdErrToStdOut}))
+
+proc stopChild(child: FixtureChild) =
+  ## Exactly-once kill/reap/close on every path.
+  if child == nil or child.process == nil or child.finished: return
+  child.finished = true
+  killAndClose(child.process)
+
+proc finishChild(child: FixtureChild,
+    timeoutMs = 30000): tuple[code: int, data: JsonNode] =
+  ## Bounded wait; parse before marking finished so a failure still cleans up.
+  if child == nil or child.process == nil: return (1, newJNull())
+  let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+  while child.process.peekExitCode() == -1 and getMonoTime() < deadline:
+    sleep(20)
+  if child.process.peekExitCode() == -1:
+    stopChild(child)
+    raise newException(IOError, "fixture process did not exit within the deadline")
+  result.code = child.process.waitForExit()
+  let output = child.process.outputStream.readAll()
+  child.finished = true
+  try: child.process.close()
+  except CatchableError: discard
+  result.data = newJNull()
+  for line in output.splitLines():
+    let trimmed = line.strip()
+    if trimmed.startsWith("{"): result.data = parseJson(trimmed)
+
+proc runChild(binary: string, args: seq[string],
+    timeoutMs = 30000): tuple[code: int, data: JsonNode] =
+  let child = startChild(binary, args)
+  try:
+    result = finishChild(child, timeoutMs)
+  finally:
+    stopChild(child)
+
 const holderSource = """
 import std/[os, times]
 import leaf/migrations
@@ -86,20 +145,20 @@ suite "migration file locks":
         let marker = base / "holder-ready"
         let child = startProcess(holder.binary, args = @[path, marker],
           options = {poStdErrToStdOut})
-        var waited = 0
-        while not fileExists(marker) and waited < 15000:
-          sleep(20)
-          waited += 20
-        check fileExists(marker)
-        if fileExists(marker):
-          discard posix.kill(Pid(child.processID), SIGKILL)
-          discard child.waitForExit()
-          child.close()
-          let lock = acquireFileLock(path, 2000)
-          check lock != nil
-          lock.release()
-        else:
-          child.close()
+        try:
+          var waited = 0
+          while not fileExists(marker) and waited < 15000:
+            sleep(20)
+            waited += 20
+          check fileExists(marker)
+          if fileExists(marker):
+            discard posix.kill(Pid(child.processID), SIGKILL)
+            discard child.waitForExit()
+            let lock = acquireFileLock(path, 2000)
+            check lock != nil
+            lock.release()
+        finally:
+          killAndClose(child)
 
 when defined(linux):
   proc prctl(option: cint, arg2, arg3, arg4, arg5: culong): cint {.
@@ -171,21 +230,6 @@ suite "migration locking fix round 1":
             var status: cint
             discard posix.waitpid(Pid(childPid), status, 0)
 
-proc startFixture(binary: string, args: seq[string]): Process =
-  startProcess(binary, args = args, options = {poStdErrToStdOut})
-
-proc finishFixture(process: Process): tuple[code: int, data: JsonNode] =
-  result.code = process.waitForExit()
-  let output = process.outputStream.readAll()
-  process.close()
-  result.data = newJNull()
-  for line in output.splitLines():
-    let trimmed = line.strip()
-    if trimmed.startsWith("{"): result.data = parseJson(trimmed)
-
-proc runFixture(binary: string, args: seq[string]): tuple[code: int, data: JsonNode] =
-  finishFixture(startFixture(binary, args))
-
 let fixtureBuild = block:
   let tools = base / "migration-tools"
   writeProbeFiles(tools, @[("fixture.nim",
@@ -207,15 +251,6 @@ proc waitForMarker(marker: string): bool =
     sleep(20)
     waited += 20
   fileExists(marker)
-
-proc stopChild(child: Process) =
-  if child.peekExitCode() == -1:
-    when defined(posix):
-      discard posix.kill(Pid(child.processID), SIGKILL)
-    else:
-      child.terminate()
-    discard child.waitForExit()
-  child.close()
 
 suite "database migration locks":
   test "canonical database aliases share one lock path":
@@ -246,14 +281,14 @@ suite "database migration locks":
       checkpoint(fixture.output)
     else:
       let dbPath = base / "process.sqlite3"
-      let first = runFixture(fixture.binary, @["migrate", dbPath])
+      let first = runChild(fixture.binary, @["migrate", dbPath])
       check first.code == 0
       check first.data["executed"].len == 2
-      let second = runFixture(fixture.binary, @["migrate", dbPath])
+      let second = runChild(fixture.binary, @["migrate", dbPath])
       check second.code == 0
       check second.data["executed"].len == 0
       check second.data["current_version"].getStr == "2"
-      let rolled = runFixture(fixture.binary, @["rollback", dbPath, "1"])
+      let rolled = runChild(fixture.binary, @["rollback", dbPath, "1"])
       check rolled.code == 0
       check rolled.data["executed"][0]["direction"].getStr == "down"
       check rolled.data["current_version"].getStr == "1"
@@ -262,12 +297,11 @@ suite "database migration locks":
       removeFile(timeoutDb & ".leaf-migrate.lock")
       let timeoutMarker = base / "timeout-marker"
       removeFile(timeoutMarker)
-      let holder = startProcess(fixture.binary,
-        args = @["hold", timeoutDb, timeoutMarker, "8000"], options = {poStdErrToStdOut})
+      let holder = startChild(fixture.binary, @["hold", timeoutDb, timeoutMarker, "8000"])
       try:
         check waitForMarker(timeoutMarker)
         let started = getMonoTime()
-        let blocked = runFixture(fixture.binary, @["migrate", timeoutDb])
+        let blocked = runChild(fixture.binary, @["migrate", timeoutDb])
         let elapsed = (getMonoTime() - started).inMilliseconds
         check blocked.code == 1
         check blocked.data["errors"][0]["code"].getStr == "concurrent_migration"
@@ -280,23 +314,22 @@ suite "database migration locks":
       removeFile(killDb & ".leaf-migrate.lock")
       let killMarker = base / "kill-marker"
       removeFile(killMarker)
-      let killed = startProcess(fixture.binary,
-        args = @["hold", killDb, killMarker, "30000"], options = {poStdErrToStdOut})
+      let killed = startChild(fixture.binary, @["hold", killDb, killMarker, "30000"])
       try:
         check waitForMarker(killMarker)
         when defined(posix):
-          discard posix.kill(Pid(killed.processID), SIGKILL)
+          discard posix.kill(Pid(killed.process.processID), SIGKILL)
         else:
-          killed.terminate()
-        discard killed.waitForExit()
+          killed.process.terminate()
+        discard killed.process.waitForExit()
       finally:
         stopChild(killed)
-      let afterKill = runFixture(fixture.binary, @["migrate", killDb])
+      let afterKill = runChild(fixture.binary, @["migrate", killDb])
       check afterKill.code == 0
       check afterKill.data["executed"].len == 2
 
       let cancelDb = base / "cancel.sqlite3"
-      let cancelled = runFixture(fixture.binary, @["cancel-migrate", cancelDb, "20"])
+      let cancelled = runChild(fixture.binary, @["cancel-migrate", cancelDb, "20"])
       check cancelled.code == 130
       check cancelled.data["execution_confirmed"].getBool
       check cancelled.data["executed"].len == 1
@@ -306,7 +339,7 @@ suite "database migration locks":
       check readMigrationHistory(cancelReader).mapIt(it.version) == @[1'i64]
       check cancelReader.query("SELECT count(*) FROM sqlite_master WHERE name = 'big'")[0][0].asInt == 0
       cancelReader.close()
-      let cancelRetry = runFixture(fixture.binary, @["migrate", cancelDb])
+      let cancelRetry = runChild(fixture.binary, @["migrate", cancelDb])
       check cancelRetry.code == 0
       check cancelRetry.data["executed"].len == 1
 
@@ -314,8 +347,7 @@ suite "database migration locks":
       removeFile(replanDb & ".leaf-migrate.lock")
       let replanMarker = base / "replan-marker"
       removeFile(replanMarker)
-      let replanHolder = startProcess(fixture.binary,
-        args = @["hold", replanDb, replanMarker, "2500"], options = {poStdErrToStdOut})
+      let replanHolder = startChild(fixture.binary, @["hold", replanDb, replanMarker, "2500"])
       try:
         check waitForMarker(replanMarker)
         let writer = openDatabase(replanDb)
@@ -330,7 +362,7 @@ suite "database migration locks":
             dbValue(downFingerprint(v1))])
         discard writer.execute("COMMIT")
         writer.close()
-        let waiter = runFixture(fixture.binary, @["migrate", replanDb])
+        let waiter = runChild(fixture.binary, @["migrate", replanDb])
         check waiter.code == 0
         check waiter.data["executed"].len == 1
         check waiter.data["executed"][0]["version"].getStr == "2"
@@ -347,11 +379,10 @@ suite "database migration locks":
         createSymlink(realAlias, aliasPath)
         let aliasMarker = base / "alias-marker"
         removeFile(aliasMarker)
-        let aliasHolder = startProcess(fixture.binary,
-          args = @["hold", realAlias, aliasMarker, "7000"], options = {poStdErrToStdOut})
+        let aliasHolder = startChild(fixture.binary, @["hold", realAlias, aliasMarker, "7000"])
         try:
           check waitForMarker(aliasMarker)
-          let aliased = runFixture(fixture.binary, @["migrate", aliasPath])
+          let aliased = runChild(fixture.binary, @["migrate", aliasPath])
           check aliased.code == 1
           check aliased.data["errors"][0]["code"].getStr == "concurrent_migration"
         finally:
@@ -379,29 +410,25 @@ suite "simultaneous migration runners":
         for path in [dbPath, dbPath & "-wal", dbPath & "-shm",
             dbPath & ".leaf-migrate.lock", ready, release]:
           removeFile(path)
-        let first = startFixture(fixture.binary,
+        let first = startChild(fixture.binary,
           @["migrate-barrier", dbPath, ready, release])
-        var second: Process
-        var firstDone = false
-        var secondDone = false
+        var second: FixtureChild
         try:
           check waitForMarker(ready)
-          second = startFixture(fixture.binary,
+          second = startChild(fixture.binary,
             (if rollbackMode: @["rollback-barrier", dbPath, "1"]
              else: @["migrate-barrier-catalog", dbPath]))
           sleep(250)
           # The second batch waits; no step-2 DDL/history exists mid-batch.
-          check second.peekExitCode() == -1
+          check second.process.peekExitCode() == -1
           let observer = openDatabase(dbPath)
           check readMigrationHistory(observer).mapIt(it.version) == @[1'i64]
           check observer.query(
             "SELECT count(*) FROM sqlite_master WHERE name = 'two'")[0][0].asInt == 0
           observer.close()
           writeFile(release, "go")
-          let firstOutcome = finishFixture(first)
-          firstDone = true
-          let secondOutcome = finishFixture(second)
-          secondDone = true
+          let firstOutcome = finishChild(first)
+          let secondOutcome = finishChild(second)
           check firstOutcome.code == 0
           check firstOutcome.data["executed"].len == 2
           check secondOutcome.code == 0
@@ -413,8 +440,8 @@ suite "simultaneous migration runners":
             check secondOutcome.data["executed"].len == 0
             check secondOutcome.data["current_version"].getStr == "2"
         finally:
-          if not firstDone: stopChild(first)
-          if second != nil and not secondDone: stopChild(second)
+          stopChild(first)
+          stopChild(second)
 
   when defined(posix):
     test "the lock deadline holds under a signal storm":
@@ -425,24 +452,22 @@ suite "simultaneous migration runners":
         let marker = base / "storm-marker"
         removeFile(dbPath & ".leaf-migrate.lock")
         removeFile(marker)
-        let holder = startFixture(fixture.binary, @["hold", dbPath, marker, "8000"])
-        var waiter: Process
-        var waiterDone = false
+        let holder = startChild(fixture.binary, @["hold", dbPath, marker, "8000"])
+        var waiter: FixtureChild
         try:
           check waitForMarker(marker)
-          waiter = startFixture(fixture.binary, @["migrate", dbPath])
+          waiter = startChild(fixture.binary, @["migrate", dbPath])
           let started = getMonoTime()
-          while waiter.peekExitCode() == -1 and
+          while waiter.process.peekExitCode() == -1 and
               (getMonoTime() - started).inMilliseconds < 9000:
-            discard posix.kill(Pid(waiter.processID), SIGCHLD)
+            discard posix.kill(Pid(waiter.process.processID), SIGCHLD)
             sleep(20)
-          let outcome = finishFixture(waiter)
-          waiterDone = true
+          let outcome = finishChild(waiter)
           check outcome.code == 1
           check outcome.data["errors"][0]["code"].getStr == "concurrent_migration"
           check (getMonoTime() - started).inMilliseconds < 9500
         finally:
-          if waiter != nil and not waiterDone: stopChild(waiter)
+          stopChild(waiter)
           stopChild(holder)
 
   when compileOption("threads"):
@@ -456,3 +481,15 @@ suite "simultaneous migration runners":
       check not db.isMigrationRunnerActive
       check db.query("SELECT count(*) FROM sqlite_master")[0][0].asInt == 0
       db.close()
+
+suite "fixture child cleanup":
+  test "child helpers are bounded and clean up on failure paths":
+    let invalid = runChild(fixtureBuild.binary, @["bad-json"])
+    check invalid.code == 0
+    check invalid.data.kind == JNull
+    let never = startChild(fixtureBuild.binary, @["never-exit"])
+    try:
+      expect IOError: discard finishChild(never, 500)
+    finally:
+      stopChild(never)
+    check never.finished

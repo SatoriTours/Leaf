@@ -69,7 +69,8 @@ proc barrierCatalog(): seq[MigrationDefinition] =
   @[
     MigrationDefinition(version: 1, name: "001_one", sourcePath: "001_one.up.sql",
       sourceChecksum: sha256Text("CREATE TABLE one(id INTEGER);"), format: mfSqlV1,
-      legacyUp: "CREATE TABLE one(id INTEGER);"),
+      legacyUp: "CREATE TABLE one(id INTEGER);", legacyDown: "DROP TABLE one;",
+      hasDown: true),
     MigrationDefinition(version: 2, name: "002_two", sourcePath: "002_two.up.sql",
       sourceChecksum: sha256Text("CREATE TABLE two AS SELECT barrier();"), format: mfSqlV1,
       legacyUp: "CREATE TABLE two AS SELECT barrier();", legacyDown: "DROP TABLE two;",
@@ -108,6 +109,12 @@ proc main(): int =
     echo $resultJson(outcome)
     result = resultExitCode(outcome)
     db.close()
+  of "bad-json":
+    echo "this is not json"
+    result = 0
+  of "never-exit":
+    sleep(30000)
+    result = 0
   of "hold":
     let db = openDatabase(paramStr(2))
     let lock = acquireFileLock(migrationLockPath(db), 5000)

@@ -151,25 +151,32 @@ proc isHistoryName(value: cstring): bool =
 proc migrationGuardAuthorizer(context: pointer, action: cint, first, second,
     database, trigger: cstring): cint {.cdecl.} =
   ## Migration SQL must not control transactions, attach databases, flip
-  ## writable_schema, or create/mutate execution history. Arguments are
-  ## action-specific: `first` is the object for table/view/insert/update/delete,
-  ## while index/trigger actions put the table in `second`. No exception may
-  ## cross the C boundary.
+  ## writable_schema, or create/mutate execution history. Argument semantics
+  ## follow sqlite3.h: index/trigger actions carry the table in `second`,
+  ## ALTER TABLE carries the database in `first` and the table in `second`.
+  ## Reads stay allowed and an ordinary column named like the history table is
+  ## not mistaken for the table itself. No exception may cross the boundary.
   try:
     let code = int(action)
     case code
     of 22, 32: return 1          # TRANSACTION, SAVEPOINT
     of 24, 25: return 1          # ATTACH, DETACH
-    of 19:                       # PRAGMA (arg1 = pragma name)
+    of 19:                       # PRAGMA: arg1 = pragma name
       if first != nil and ($first).toLowerAscii() == "writable_schema": return 1
     else: discard
     case code
-    of 2, 3, 4, 5, 6, 8, 9, 11, 12, 13, 14, 15, 17, 18, 23, 26, 29, 30:
-      # CREATE_TABLE/CREATE_VIEW/DELETE/DROP_*/INSERT/UPDATE/ALTER_TABLE/...
+    # arg1 = table/view name: CREATE/DROP TABLE|VIEW (and TEMP variants),
+    # DELETE, INSERT, UPDATE, ANALYZE, CREATE/DROP VTABLE.
+    of 2, 4, 6, 8, 9, 11, 13, 15, 17, 18, 23, 28, 29, 30:
       if isHistoryName(first): return 1
-    of 1, 7, 10, 16:
-      # CREATE_INDEX, CREATE_TRIGGER, DROP_INDEX, DROP_TRIGGER
-      if isHistoryName(first) or isHistoryName(second): return 1
+    # arg1 = object name, arg2 = table name: CREATE/DROP INDEX|TRIGGER
+    # (including TEMP variants). A trigger on the history table would fire
+    # during the runner's own history write, so it must be denied here.
+    of 1, 3, 5, 7, 10, 12, 14, 16:
+      if isHistoryName(second): return 1
+    # ALTER TABLE: arg1 = database name, arg2 = table name.
+    of 26:
+      if isHistoryName(second): return 1
     else: discard
   except Exception:
     return 1
