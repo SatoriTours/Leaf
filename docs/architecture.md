@@ -47,3 +47,10 @@ Backend 实例通过私有资源占用 token 拒绝跨 Runtime 的同时使用�
 - `backend_session.nim`：`EventEnvelope.bindingGeneration` 默认 0；`bindingValid` 非 nil 时 enqueue 与 process 均复查。`accepted` 仅在成功 accept 后通知（install confirm 无额外 Native apply）。restore 后推进 generation、清队列/sequence 并 `rebind`，失败与 restore 失败同样 fault+freeze。事件处理后、Runtime Scope 完全返回且实体/绑定仍有效时通过 `settle` 结算最新 accepted props；settle 失败 fault+freeze 并停止剩余批。
 - `native_edit.nim`：纯 `EditorState` 状态机（无原生资源）。`settleEditor` 处理普通 ack（同文本不 setText、保留选区/组合；拒绝/格式化同步 accepted 值；组合期不写冲突，`compositionEnd` 按最终模型同步）。`resetEffects` 为显式同值 ack 例外，输出 ForceCancel→forced setText→末尾选区；`completeReset` 仅在 Native 效果全部成功后消费 token。
 - `gpui_bridge.nim`：旧桥接在独立 validator 分支拒绝显式非零 reset token；`gpui_styles` 保持 style-only，不全面强验旧 control 属性。
+
+## A2 T2：有限 DIP 线性布局与 Win32 能力边界
+
+- `native_layout.nim`：纯几何的 row/column 布局。`layoutTree(entities, content, measure)` 以有限 content 为根，递归计算 intrinsic（auto 来自 measure；容器 intrinsic 由子树 + gap/padding 得出；fill 主基数为 0，不递归到无限）。主轴分配 `max(0, 可用 - padding - gaps - bases)`，负余量不 shrink、按 clip 裁剪；`fill` 默认权重 1，显式 `flexGrow > 0` 加权；`justify` 仅消费正余量，`between` 单子不除零；交叉 `stretch` 只扩未显式 fixed 的 auto/fill，不压小 intrinsic。`pixelEdges(rect, dpi)` 用共享边界 round（right/bottom round 累加 extent），并先检查非有限值与 int32 越界。`LayoutBox.rect` 为分配框，`clip` 为继承的可见区域；完全在 clip 外的实体由调用方按身份跳过，不传越界坐标给平台。
+- `backends/win32/capabilities.nim`：纯 Linux 可验证的 `win32Capabilities()`。支持 column/row/text/button/input/checkbox/toggle/progress/tag/separator/spinner、gap/padding/width/height/flex_grow/align/justify/overflow、全部四种 align、start/end/center/between、仅 hidden overflow、仅 default variant、`cfInputReset`；不声明 virtualList、min/max、flex_shrink、around/evenly、scroll/visible，也不声明颜色/字体等装饰。required 值缺失在挂载前拒绝，装饰与 variant 按 compatible 结构化诊断 / strict 拒绝。switch 映射原生 checkbox 语义，不是装饰。
+- 权威结构顺序来自 Session acceptedEntities 的 `index`；`Recording.entities.index` 是历史镜像，不作 layout 坐标权威，只用 `Recording.childrenOf` 作结构对照。
+- 本任务不含 Win32 API、真实字体测量、窗口/DPI 宿主：真实测量属 T4，Linux 测试不声明原生测量通过。
