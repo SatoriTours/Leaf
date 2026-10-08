@@ -85,13 +85,14 @@ proc addDatabaseFile(plan: var seq[ScaffoldFile], root, path, content: string,
 
 proc databaseInitPlan*(root, name: string): seq[ScaffoldFile] =
   ## Config/catalog/readme/include additions; empty when everything matches.
+  discard guardedPath(root, "leaf.json")
   addDatabaseFile(result, root, DatabaseConfigPath, databaseConfigSource(name),
     proc(previous: string): bool = recognizedDatabaseConfig(previous, name),
     "config/database.nim")
   # Only the exact current catalog is owned; any other content is custom.
   addDatabaseFile(result, root, CatalogPath, catalogSource(),
     proc(previous: string): bool = false, "db/catalog.nim")
-  let readmePath = root / MigrationsDir / "README.md"
+  let readmePath = guardedPath(root, MigrationsDir / "README.md")
   if not fileExists(readmePath):
     result.add(ScaffoldFile(path: MigrationsDir / "README.md", content: migrationsReadmeSource()))
   let includeUpdate = databaseIncludeUpdate(root)

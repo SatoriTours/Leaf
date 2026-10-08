@@ -237,6 +237,32 @@ suite "scaffold hardening (fix round 1)":
       expect CatchableError:
         discard generateScaffold(ScaffoldOptions(mode: smApplication), minimal)
 
+  when defined(posix):
+    test "leaf.json, migrations readme and caller-root symlinks are guarded":
+      let lj = base / "leafjson-symlink"
+      initProject(lj)
+      writeFile(base / "outside-leaf.json", readFile(lj / "leaf.json"))
+      removeFile(lj / "leaf.json")
+      createSymlink(base / "outside-leaf.json", lj / "leaf.json")
+      expect CatchableError: discard initializeDatabaseProject(readProject(lj))
+      let rm = base / "readme-symlink"
+      initProject(rm)
+      discard initializeDatabaseProject(readProject(rm))
+      let readme = rm / "db/migrations/README.md"
+      writeFile(base / "outside-readme.md", readFile(readme))
+      removeFile(readme)
+      createSymlink(base / "outside-readme.md", readme)
+      expect CatchableError: discard initializeDatabaseProject(readProject(rm))
+      check symlinkExists(readme)
+      let realRoot = base / "root-real"
+      createDir(realRoot)
+      discard generateScaffold(ScaffoldOptions(mode: smApplication), realRoot)
+      let aliasRoot = base / "root-alias"
+      createSymlink(realRoot, aliasRoot)
+      expect CatchableError:
+        discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Note",
+          fields: @["title:string"]), aliasRoot)
+
   test "schema 1 keeps ordinary timestamp-named fields":
     let legacy = base / "schema1-audit"
     copyDir(fixture, legacy)

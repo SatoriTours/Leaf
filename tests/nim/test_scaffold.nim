@@ -195,7 +195,9 @@ else: doAssert false
     let permissions = getFilePermissions(path)
     defer: setFilePermissions(path, permissions)
     setFilePermissions(path, {fpUserRead, fpGroupRead, fpOthersRead})
-    let before = files(app)
+    var before: Table[string, string]
+    for key, value in files(app):
+      if key != "target/leaf-migration-generation.lock": before[key] = value
     check runCliIn(app, @["g", "scaffold", "Note", "title:string"]) == 1
     # The persistent generation lock is a coordination artifact; no generated
     # product may be left behind.

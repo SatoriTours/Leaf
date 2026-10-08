@@ -225,25 +225,42 @@ proc generateScaffold*(options: ScaffoldOptions, root: string): seq[string] =
     let name = normalized.extractFilename
     if name.len == 0 or name in [".", "/"]:
       fail("cannot derive an application name from " & root)
-    let existingFiles = migrations.scanMigrationFiles(normalized / MigrationsDir)
-    for file in existingFiles:
-      if file.name == "create_tasks":
-        fail("migration already exists: create_tasks")
-    var plan = appFiles(name, migrations.nextMigrationVersion(existingFiles, getTime()))
-    # Guard every retained minimal artifact before reading it for the matcher.
-    for retained in ["leaf.json", "assets/message.txt", "src/main.nim", "src/app.nim"]:
-      discard guardedPath(normalized, retained)
-    if matchesMinimalTemplate(normalized):
-      # Untouched `leaf init` upgrade: only leaf.json and the example asset are
-      # replaced; src/main.nim and src/app.nim stay exactly as generated.
-      for index in 0 ..< plan.len:
-        if plan[index].path in ["leaf.json", "assets/message.txt"]:
-          plan[index].update = true
-          plan[index].previous = readFile(normalized / plan[index].path)
+    proc applicationPlan(): seq[ScaffoldFile] =
+      # Allocate from the ACTUAL existing migrations, never an empty catalog.
+      let existingFiles = migrations.scanMigrationFiles(normalized / MigrationsDir)
+      for file in existingFiles:
+        if file.name == "create_tasks":
+          fail("migration already exists: create_tasks")
+      result = appFiles(name, migrations.nextMigrationVersion(existingFiles, getTime()))
+      # Guard every retained minimal artifact before reading it for the matcher.
+      for retained in ["leaf.json", "assets/message.txt", "src/main.nim", "src/app.nim"]:
+        discard guardedPath(normalized, retained)
+      if matchesMinimalTemplate(normalized):
+        # Untouched `leaf init` upgrade: only leaf.json and the example asset are
+        # replaced; src/main.nim and src/app.nim stay exactly as generated.
+        for index in 0 ..< result.len:
+          if result[index].path in ["leaf.json", "assets/message.txt"]:
+            result[index].update = true
+            result[index].previous = readFile(normalized / result[index].path)
+    var plan = applicationPlan()
+    # Ordinary static conflicts are rejected before the coordination lock.
     checkPlan(normalized, plan, false)
-    result = actions(plan)
-    if not options.dryRun: writePlan(normalized, plan, false)
+    if options.dryRun:
+      return actions(plan)
+    let lockPath = guardedPath(normalized, GenerationLockRelative)
+    createDir(lockPath.parentDir)
+    let lock = acquireFileLock(lockPath)
+    try:
+      # The lock spans the catalog re-read, allocation and the whole write plan.
+      plan = applicationPlan()
+      checkPlan(normalized, plan, false)
+      result = actions(plan)
+      writePlan(normalized, plan, false)
+    finally:
+      lock.release()
     return
+  # Reject a visible symlinked caller root before readProject canonicalizes it.
+  discard guardedPath(normalized, ManifestPath)
   let project = readProject(normalized)
   var loaded = loadManifest(project.root)
   var resource = parseResource(options.target, options.fields, nextVersion(project.root))
