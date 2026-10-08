@@ -488,6 +488,39 @@ echo "ok"
     check probe.code == 0
     check "ok" in probe.output
 
+  test "typed float32 literals follow declared single-precision semantics":
+    let probe = compileProbe(@[
+      ("db/migrations/033_float32_literals.nim", """
+import leaf/migrations
+
+migration float32_literals:
+  change:
+    createTable samples:
+      float rounded, default = 1.23456789'f32
+      float negated, default = -1.23456789'f32
+      float max_value, default = 3.4028234663852886e38'f32
+      float tiny, default = 1e-45'f32
+      float unsuffixed, default = 1.23456789
+      float double_precision, default = 1.23456789'f64
+"""),
+      ("main.nim", """
+import std/strutils
+include "db/migrations/033_float32_literals.nim"
+let columns = migrationDefinition.upOps[0].tableSpec.columns
+doAssert columns[0].defaultValue.get().number == 1.2345678806304932
+doAssert columns[1].defaultValue.get().number == -1.2345678806304932
+doAssert columns[2].defaultValue.get().number == 3.4028234663852886e38
+doAssert columns[3].defaultValue.get().number == 1.401298464324817e-45
+doAssert columns[4].defaultValue.get().number == 1.23456789
+doAssert columns[5].defaultValue.get().number == 1.23456789
+let sql = renderStatements(migrationDefinition.upOps)[0]
+doAssert "DEFAULT 1.2345678806304932" in sql
+doAssert "DEFAULT -1.2345678806304932" in sql
+echo "ok"
+""")], "main.nim", run = true)
+    check probe.code == 0
+    check "ok" in probe.output
+
   test "invalid declarations fail with located DSL errors":
     let cases = @[
       (file: "001_bad_string_name.nim", source: """
@@ -682,6 +715,22 @@ migration infinite_float:
   change:
     createTable samples:
       float amount, default = 1e400
+""", expected: "invalid default for column: amount"),
+      (file: "034_float32_overflow.nim", source: """
+import leaf/migrations
+
+migration float32_overflow:
+  change:
+    createTable samples:
+      float amount, default = 1.0e300'f32
+""", expected: "invalid default for column: amount"),
+      (file: "035_float32_negative_overflow.nim", source: """
+import leaf/migrations
+
+migration float32_negative_overflow:
+  change:
+    createTable samples:
+      float amount, default = -1.0e300'f32
 """, expected: "invalid default for column: amount")]
     for item in cases:
       let probe = compileProbe(@[

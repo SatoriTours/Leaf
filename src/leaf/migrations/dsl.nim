@@ -69,6 +69,36 @@ const
   SignedIntLiterals = {nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit}
   FloatLiterals = {nnkFloatLit, nnkFloat32Lit, nnkFloat64Lit, nnkFloat128Lit}
 
+proc widenFloat32(value: float64): float64 =
+  ## Round a float64 to the nearest float32 and widen it exactly back. The Nim
+  ## VM folds `float64(float32(x))` to `x`, so decode the narrowed bits instead.
+  let bits = cast[uint32](float32(value))
+  let sign = uint64(bits shr 31) shl 63
+  let exponent = (bits shr 23) and 0xFF'u32
+  var fraction = uint64(bits and 0x7FFFFF'u32)
+  if exponent == 0xFF'u32:
+    let payload = if fraction != 0: 0x8000000000000'u64 else: 0'u64
+    return cast[float64](sign or 0x7FF0000000000000'u64 or payload)
+  if exponent == 0'u32:
+    if fraction == 0: return cast[float64](sign)
+    var unbiased = -126
+    while (fraction and 0x800000'u64) == 0:
+      fraction = fraction shl 1
+      dec unbiased
+    fraction = fraction and 0x7FFFFF'u64
+    return cast[float64](sign or (uint64(unbiased + 1023) shl 52) or (fraction shl 29))
+  return cast[float64](sign or (uint64(int(exponent) - 127 + 1023) shl 52) or
+    (fraction shl 29))
+
+proc floatLiteral(node: NimNode): float =
+  ## Apply the declared precision of a supported float literal before storing it
+  ## as a SQLite REAL: an f32 literal rounds to single precision first, so its
+  ## finite/overflow boundaries follow Nim literal semantics, not raw float64.
+  if node.kind == nnkFloat32Lit:
+    widenFloat32(node.floatVal)
+  else:
+    node.floatVal
+
 proc defaultLiteral(node: NimNode, kind: ColumnKind, columnName: string,
     nullable: bool): Option[SqlValue] =
   let label = "invalid default for column: " & columnName
@@ -99,7 +129,8 @@ proc defaultLiteral(node: NimNode, kind: ColumnKind, columnName: string,
     dslError(node, label)
   of ckReal, ckDateTime:
     if literal.kind in FloatLiterals:
-      let number = if signedNegative: -literal.floatVal else: literal.floatVal
+      var number = floatLiteral(literal)
+      if signedNegative: number = -number
       if classify(number) in {fcNan, fcInf, fcNegInf}: dslError(node, label)
       return some(SqlValue(kind: sqlFloat, number: number))
     if literal.kind in SignedIntLiterals:
