@@ -398,3 +398,25 @@ suite "migration history fix round 1":
     check missingEntry[0].state == "missing"
     check missingEntry[0].file == ""
     check missingEntry[0].issues[0].file == ""
+
+suite "migration history fix round 2":
+  test "composite or wrong primary keys are refused":
+    let composite = openDatabase(":memory:")
+    defer: composite.close()
+    composite.executeScript("CREATE TABLE leaf_schema_migrations (version INTEGER, name TEXT, sql TEXT, PRIMARY KEY(version, name));")
+    expect MigrationError: discard readMigrationHistory(composite)
+    expect MigrationError: upgradeMigrationHistory(composite, @[])
+    check tableColumns(composite, "leaf_schema_migrations") == @["version", "name", "sql"]
+
+    let wrongKey = openDatabase(":memory:")
+    defer: wrongKey.close()
+    wrongKey.executeScript("CREATE TABLE leaf_schema_migrations (version INTEGER, name TEXT PRIMARY KEY, sql TEXT);")
+    expect MigrationError: discard readMigrationHistory(wrongKey)
+
+    let compositeUpgrade = openDatabase(":memory:")
+    defer: compositeUpgrade.close()
+    compositeUpgrade.executeScript("CREATE TABLE leaf_schema_migrations (version INTEGER, name TEXT, sql TEXT, PRIMARY KEY(version, name));")
+    discard compositeUpgrade.execute("BEGIN")
+    expect MigrationError: upgradeMigrationHistory(compositeUpgrade, @[])
+    discard compositeUpgrade.execute("ROLLBACK")
+    check tableColumns(compositeUpgrade, "leaf_schema_migrations") == @["version", "name", "sql"]

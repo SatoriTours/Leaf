@@ -235,3 +235,43 @@ suite "pure migration planner":
     check raw.steps == 0
     expect MigrationError:
       discard planMigrations(catalog, history, MigrationRequest(kind: mrRollback, steps: raw.steps))
+
+suite "pure migration planner fix round 2":
+  test "early issues keep a known source path and tagged direction":
+    let record = nimRecord(one)
+    var unknown = record
+    unknown.format = "future-v9"
+    let unknownIssues = recordIssues(@[one], unknown)
+    check unknownIssues[0].code == "unknown_history_format"
+    check unknownIssues[0].file == one.sourcePath
+    check unknownIssues[0].version == some(1'i64)
+    try:
+      discard planMigrations(@[one], @[unknown],
+        MigrationRequest(kind: mrUp, target: some(1'i64)))
+      check false
+    except MigrationError as error:
+      check error.issueCode == "unknown_history_format"
+      check error.file == one.sourcePath
+      check error.migrationVersion == some(1'i64)
+    var corrupt = record
+    corrupt.name = ""
+    let corruptIssues = recordIssues(@[one], corrupt)
+    check corruptIssues[0].code == "corrupt_history"
+    check corruptIssues[0].file == one.sourcePath
+    # A genuinely absent definition has no actual path to fabricate.
+    let absentIssues = recordIssues(@[one], nimRecord(three))
+    check absentIssues[0].code == "history_missing_file"
+    check absentIssues[0].file == ""
+
+  test "raiseIssue preserves an existing direction unless overridden":
+    let tagged = MigrationIssue(code: "sample", message: "sample", file: one.sourcePath,
+      version: some(1'i64), direction: some(mdDown))
+    try:
+      raiseIssue(tagged)
+    except MigrationError as error:
+      check error.direction == some(mdDown)
+      check error.file == one.sourcePath
+    try:
+      raiseIssue(tagged, some(mdUp))
+    except MigrationError as error:
+      check error.direction == some(mdUp)

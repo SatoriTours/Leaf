@@ -37,16 +37,19 @@ proc issueFor(definition: MigrationDefinition, code, message: string): Migration
   MigrationIssue(code: code, message: message, file: definition.sourcePath,
     version: some(definition.version))
 
+proc recordIssue(record: MigrationRecord, path, code, message: string): MigrationIssue =
+  MigrationIssue(code: code, message: message, file: path, version: some(record.version))
+
 proc bareIssue*(record: MigrationRecord, code, message: string): MigrationIssue =
   ## No known definition: there is no actual source path to fabricate.
-  MigrationIssue(code: code, message: message, file: "", version: some(record.version))
+  recordIssue(record, "", code, message)
 
 proc raiseIssue*(issue: MigrationIssue,
     direction = none(MigrationDirection)) {.noreturn.} =
   let error = migrationError(issue.code, issue.message)
   error.migrationVersion = issue.version
   error.file = issue.file
-  error.direction = direction
+  error.direction = if direction.isSome: direction else: issue.direction
   raise error
 
 proc catalogIssues*(catalog: openArray[MigrationDefinition]): seq[MigrationIssue] =
@@ -98,14 +101,18 @@ proc catalogIssues*(catalog: openArray[MigrationDefinition]): seq[MigrationIssue
 
 proc recordIssues*(catalog: openArray[MigrationDefinition],
     record: MigrationRecord): seq[MigrationIssue] =
-  if record.version <= 0 or record.name.len == 0 or record.sql.len == 0:
-    return @[bareIssue(record, "corrupt_history", "history row is missing version, name or sql")]
-  if record.format notin ["sql-v1", "nim-v1"]:
-    return @[bareIssue(record, "unknown_history_format",
-      "unknown history format: " & record.format)]
+  # Resolve identity first so even an unknown-format or corrupt row reports the
+  # real source path when its version is known; a missing version stays empty.
   let index = findDefinition(catalog, record.version)
+  let knownPath = if index >= 0: catalog[index].sourcePath else: ""
+  if record.version <= 0 or record.name.len == 0 or record.sql.len == 0:
+    return @[recordIssue(record, knownPath, "corrupt_history",
+      "history row is missing version, name or sql")]
+  if record.format notin ["sql-v1", "nim-v1"]:
+    return @[recordIssue(record, knownPath, "unknown_history_format",
+      "unknown history format: " & record.format)]
   if index < 0:
-    return @[bareIssue(record, "history_missing_file",
+    return @[recordIssue(record, knownPath, "history_missing_file",
       "no migration file for applied version " & $record.version)]
   let definition = catalog[index]
   let expectedFormat = if definition.format == mfNimV1: "nim-v1" else: "sql-v1"

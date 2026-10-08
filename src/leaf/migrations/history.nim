@@ -37,15 +37,15 @@ proc validateHistoryShape(db: Database, name: string): seq[string] =
   ## Validate the declared schema even when the table is empty: an INTEGER
   ## PRIMARY KEY version, text columns, and either the legacy three columns or
   ## the complete four-column metadata set. Never repaired silently.
-  var versionPk = false
   var versionInteger = false
   var textColumns = true
+  var primaryKeys: seq[string]
   for row in db.query("PRAGMA main.table_info(" & quoteName(name) & ")"):
     let column = row[1].asString
     let declared = row[2].asString
     result.add column
+    if row[5].asInt != 0: primaryKeys.add column
     if column == "version":
-      versionPk = row[5].asInt != 0
       versionInteger = "INT" in declared.toUpperAscii()
     elif column in ["name", "sql", "format", "source_sha256", "operations_sha256", "down_sha256"]:
       if not textAffinity(declared): textColumns = false
@@ -58,8 +58,9 @@ proc validateHistoryShape(db: Database, name: string): seq[string] =
   for column in result:
     if column notin LegacyColumns and column notin MetadataColumns:
       raise migrationError("corrupt_history", name & " has an unknown column " & column)
-  if not versionPk or not versionInteger:
-    raise migrationError("corrupt_history", name & " version must be an INTEGER PRIMARY KEY")
+  if primaryKeys.len != 1 or primaryKeys[0] != "version" or not versionInteger:
+    raise migrationError("corrupt_history", name &
+      " version must be the single INTEGER PRIMARY KEY")
   if not textColumns:
     raise migrationError("corrupt_history", name & " has a non-text column")
 
