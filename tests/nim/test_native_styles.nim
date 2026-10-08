@@ -1,5 +1,5 @@
-import std/[unittest, options, math]
-import leaf/[core, widgets, styles, gpui_styles]
+import std/[unittest, options, math, tables, json]
+import leaf/[core, widgets, styles, gpui_styles, backend, gpui_bridge]
 
 proc rejectsStyle(pairs: openArray[(string, string)]): bool =
   try:
@@ -161,3 +161,88 @@ suite "Backend-neutral typed control properties":
       validateStyles(mount(button("b", styles = style({"gap": "NaN"}))))
     expect UiError:
       validateStyles(mount(button("b", styles = style({"unknown": "1"}))))
+
+suite "Native reset token signal":
+  test "input reset token is additive and typed":
+    let plain = input("v", key = "i")
+    check plain.attributes.len == 0
+    check normalizeProps(plain).control.resetToken.isNone
+
+    let zero = input("v", key = "i", resetToken = 0)
+    check zero.attributes.len == 0
+    check normalizeProps(zero).control.resetToken.isNone
+
+    let token = input("v", key = "i", resetToken = 2)
+    check token.attributes["input_reset_token"] == "2"
+    check normalizeProps(token).control.resetToken.get == 2
+
+    let high = input("v", key = "i", resetToken = high(uint64))
+    check high.attributes["input_reset_token"] == $high(uint64)
+    check normalizeProps(high).control.resetToken.get == high(uint64)
+
+    proc rejectsToken(raw: string): bool =
+      try:
+        discard normalizeProps(ui(NodeKind.input,
+          attributes = style({"input_reset_token": raw})))
+        false
+      except UiError:
+        true
+    check rejectsToken("-1")
+    check rejectsToken("1.5")
+    check rejectsToken("abc")
+    check rejectsToken("")
+    check rejectsToken("18446744073709551616")
+    check not rejectsToken("0")
+    check not rejectsToken("1")
+
+    check rejectsNode(ui(NodeKind.button, text = "b",
+      attributes = style({"input_reset_token": "1"})))
+    check rejectsNode(ui(NodeKind.checkbox,
+      attributes = style({"input_reset_token": "1"})))
+
+  test "reset token requires the declared control capability":
+    check cfInputReset in fullCapabilities().controls
+    let node = input("v", key = "i", resetToken = 1)
+    var capabilities = fullCapabilities()
+    capabilities.controls = {}
+    expect UiError:
+      discard checkCapabilities(mount(node), capabilities, compatible)
+    expect UiError:
+      discard checkCapabilities(mount(node), capabilities, strict)
+    check checkCapabilities(mount(node), fullCapabilities(), compatible).len == 0
+    capabilities.controls = {}
+    check checkCapabilities(mount(input("v", key = "i")), capabilities,
+      compatible).len == 0
+    check checkCapabilities(mount(input("v", key = "i", resetToken = 0)),
+      capabilities, compatible).len == 0
+
+  test "default input JSON and DSL are unchanged":
+    let node = input("v", key = "i")
+    check node.attributes.len == 0
+    let snapshot = Snapshot(title: "t", width: 320, height: 200, root: mount(node))
+    check snapshot.toJson()["root"]["attributes"] == %*{}
+
+  test "GPUI bridge rejects the new token while styles stay style-only":
+    # gpui_styles remains style-only and does not enforce control attributes.
+    validateStyles(mount(ui(NodeKind.checkbox,
+      attributes = style({"checked": "maybe"}))))
+    expect UiError:
+      discard normalizeProps(ui(NodeKind.checkbox,
+        attributes = style({"checked": "maybe"})))
+    expect UiError:
+      rejectNativeResetSignals(mount(input("v", key = "i", resetToken = 1)))
+    rejectNativeResetSignals(mount(input("v", key = "i", resetToken = 0)))
+    rejectNativeResetSignals(mount(input("v", key = "i")))
+
+  test "old variants and lazy illegal attributes are preserved":
+    check normalizeProps(button("b", variant = "outline")).control.variant.get ==
+      variantOutline
+    check normalizeProps(tag("t", variant = "ghost")).control.variant.get ==
+      variantGhost
+    expect UiError:
+      discard normalizeProps(ui(NodeKind.button, text = "b",
+        attributes = style({"variant": "neon"})))
+    let lazy = ui(NodeKind.input, text = "v", attributes = style({"bogus": "1"}))
+    check lazy.attributes["bogus"] == "1"
+    expect UiError:
+      discard normalizeProps(lazy)

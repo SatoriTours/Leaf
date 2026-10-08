@@ -1249,3 +1249,205 @@ suite "Recording backend sessions":
     check recording.entities.len == 2
     check oldRecording.restoreCalls == 0
     dispose(session)
+
+  test "zero diff rejection settles the accepted value once":
+    var model = "7"
+    proc render(ctx: BuildContext): Node =
+      column(@[input(model, key = "field",
+        onChange = proc(e: Event) = discard)], key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    var settlements: seq[EventSettlement]
+    recording.backend.settle = proc(value: EventSettlement) = settlements.add(value)
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let handle = session.handleFor(runtime.find("field").id)
+    check session.enqueue(userEvent(session, handle, 1,
+      Event(kind: change, value: "x")))
+    session.drainEvents()
+    check settlements.len == 1
+    check settlements[0].handle == handle
+    check settlements[0].props.control.value.get == "7"
+    check settlements[0].revision == runtime.acceptedRevision
+    check recording.prepared.len == 0
+    check model == "7"
+
+  test "settle happens for disabled controls and missing handlers":
+    proc render(ctx: BuildContext): Node =
+      column(@[input("v", key = "plain"), button("b", key = "off", disabled = true)],
+        key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    var settlements = 0
+    recording.backend.settle = proc(value: EventSettlement) = inc settlements
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let plain = session.handleFor(runtime.find("plain").id)
+    let off = session.handleFor(runtime.find("off").id)
+    check session.enqueue(userEvent(session, plain, 1,
+      Event(kind: change, value: "v2")))
+    check session.enqueue(userEvent(session, off, 2, Event(kind: click)))
+    session.drainEvents()
+    check settlements == 2
+
+  test "accepted notification follows a successful accept only":
+    var model = "a"
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        input(model, key = "field", onChange = proc(e: Event) = model = e.value),
+        button("go", key = "go", onClick = proc(e: Event) = model = "b")], key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    var acceptedCalls = 0
+    var lastRevision = 0'u64
+    recording.backend.accepted = proc(entities: Table[NodeHandle, MountedEntity],
+                                      revision: uint64) =
+      inc acceptedCalls
+      lastRevision = revision
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    check acceptedCalls == 1
+    check runtime.dispatch("go", Event(kind: click))
+    check acceptedCalls == 2
+    check lastRevision == runtime.acceptedRevision
+    check recording.entities == session.acceptedEntities
+
+  test "restore rebinds the new generation once":
+    var a, b = 0
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        text($a, key = "a"), text($b, key = "b"),
+        button("go", key = "go", onClick = proc(e: Event) = (inc a; inc b))],
+        key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    var sessionRef: BackendSession
+    var restoreGeneration = 0'u64
+    var rebinds: seq[uint64]
+    let originalRestore = recording.backend.restore
+    recording.backend.restore = proc(entities: Table[NodeHandle, MountedEntity]) =
+      restoreGeneration = sessionRef.mountGeneration
+      originalRestore(entities)
+    recording.backend.rebind = proc(sessionId, mountGeneration: uint64) =
+      rebinds.add(mountGeneration)
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    sessionRef = session
+    check rebinds.len == 1
+    check rebinds[0] == session.mountGeneration
+    let generationBefore = session.mountGeneration
+
+    recording.failApplyAt = 2
+    expect UiError:
+      discard runtime.dispatch("go", Event(kind: click))
+    check restoreGeneration == generationBefore
+    check rebinds.len == 2
+    check rebinds[1] == generationBefore + 1
+    check session.mountGeneration == generationBefore + 1
+    check not session.faulted
+    check not runtime.eventsFrozen
+
+  test "rebind failure faults the session and freezes direct dispatch":
+    var a, b = 0
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        text($a, key = "a"), text($b, key = "b"),
+        button("go", key = "go", onClick = proc(e: Event) = (inc a; inc b))],
+        key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    var failRebind = false
+    recording.backend.rebind = proc(sessionId, mountGeneration: uint64) =
+      if failRebind: raise newException(UiError, "rebind failure")
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    failRebind = true
+    recording.failApplyAt = 2
+    expect UiError:
+      discard runtime.dispatch("go", Event(kind: click))
+    check session.faulted
+    check runtime.eventsFrozen
+    expect UiError:
+      discard runtime.dispatch("go", Event(kind: click))
+
+  test "stale binding is never dispatched or settled":
+    var count = 0
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        text($count, key = "count"),
+        button("go", key = "go", onClick = proc(e: Event) = inc count)], key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    var validBinding = true
+    var settlements = 0
+    recording.backend.bindingValid = proc(handle: NodeHandle,
+                                          bindingGeneration: uint64): bool =
+      validBinding
+    recording.backend.settle = proc(value: EventSettlement) = inc settlements
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let handle = session.handleFor(runtime.find("go").id)
+    var envelope = userEvent(session, handle, 1, Event(kind: click))
+    envelope.bindingGeneration = 5
+    check session.enqueue(envelope)
+    validBinding = false
+    session.drainEvents()
+    check count == 0
+    check settlements == 0
+    check not session.enqueue(userEvent(session, handle, 2, Event(kind: click)))
+
+  test "callback error still settles old accepted and is never replayed":
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        button("go", key = "go", onClick = proc(e: Event) =
+          raise newException(UiError, "business boom"))], key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    var settlements: seq[EventSettlement]
+    recording.backend.settle = proc(value: EventSettlement) = settlements.add(value)
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let handle = session.handleFor(runtime.find("go").id)
+    check session.enqueue(userEvent(session, handle, 1, Event(kind: click)))
+    session.drainEvents()
+    check settlements.len == 1
+    check settlements[0].handle == handle
+    check settlements[0].props.control.label.get == "go"
+    session.drainEvents()
+    check settlements.len == 1
+
+  test "settle failure faults and stops the remaining batch":
+    var count = 0
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        text($count, key = "count"),
+        button("go", key = "go", onClick = proc(e: Event) = inc count)], key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    recording.backend.settle = proc(value: EventSettlement) =
+      raise newException(UiError, "settle failure")
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let handle = session.handleFor(runtime.find("go").id)
+    check session.enqueue(userEvent(session, handle, 1, Event(kind: click)))
+    check session.enqueue(userEvent(session, handle, 2, Event(kind: click)))
+    session.drainEvents()
+    check session.faulted
+    check runtime.eventsFrozen
+    check count == 1
+
+  test "nil optional hooks keep the A1 session behaviour":
+    var count = 0
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        text($count, key = "count"),
+        button("go", key = "go", onClick = proc(e: Event) = inc count)], key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let handle = session.handleFor(runtime.find("go").id)
+    check session.enqueue(userEvent(session, handle, 1, Event(kind: click)))
+    session.drainEvents()
+    check count == 1
+    check runtime.find("count").node.text == "1"

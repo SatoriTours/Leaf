@@ -17,10 +17,16 @@ type
     separator, spinner, virtualList
   EventKind* = enum
     click, change, submit
+  CompositionPhase* = enum
+    ## Additive native IME/editing phase metadata. `compositionNone` is the
+    ## default so existing events and JSON are unchanged.
+    compositionNone, compositionStart, compositionUpdate, compositionResult,
+    compositionEnd
   Event* = object
     kind*: EventKind
     value*: string
     checked*: bool
+    composition*: CompositionPhase
   Callback* = proc(event: Event) {.closure.}
   Styles* = Table[string, string]
   Node* = ref object

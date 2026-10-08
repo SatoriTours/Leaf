@@ -4,7 +4,7 @@
 ## The session is the only place that coordinates the Runtime commit gate with
 ## a backend. It never renders business state, never runs a business callback
 ## before the backend confirms a batch, and never executes platform lifecycle.
-import std/[tables, sets, math, strutils]
+import std/[tables, sets, math, strutils, json]
 import ./[core, styles, backend, reconcile]
 
 type
@@ -21,6 +21,7 @@ type
     observedRevision*: uint64
     source*: EventSource
     event*: Event
+    bindingGeneration*: uint64
 
   ViewportState = object
     keys: seq[string]
@@ -92,9 +93,10 @@ proc recover(session: BackendSession,
              previous: Table[NodeHandle, MountedEntity]): string =
   ## Apply failed after touching native state. Restore the old accepted
   ## entities; a successful restore advances the mount generation so old
-  ## native notifications are invalidated. A failed restore faults the session
-  ## and permanently freezes business dispatch on the runtime. Returns "" on
-  ## success, otherwise the restore failure detail.
+  ## native notifications are invalidated, then re-arms the backend through
+  ## `rebind`. A failed restore or rebind faults the session and permanently
+  ## freezes business dispatch on the runtime. Returns "" on success,
+  ## otherwise the failure detail.
   session.frozen = true
   try:
     session.backend.restore(previous)
@@ -106,6 +108,13 @@ proc recover(session: BackendSession,
   session.queue.setLen(0)
   session.lastQueued = 0
   session.lastProcessed = 0
+  if session.backend.rebind != nil:
+    try:
+      session.backend.rebind(session.sessionId, session.mountGeneration)
+    except CatchableError as error:
+      session.faulted = true
+      session.runtime.freezeEvents("backend rebind failed: " & error.msg)
+      return error.msg
   session.frozen = false
   ""
 
@@ -147,6 +156,10 @@ proc acceptPlan(session: BackendSession, plan: ReconcilePlan) =
   session.migrateViewports(previous, plan)
   session.entities = plan.entities
   session.byNodeId = plan.byNodeId
+  # Pure framework metadata notification: copy the accepted map and revision.
+  # Never renders, applies native changes or runs business callbacks.
+  if session.backend.accepted != nil:
+    session.backend.accepted(session.entities, plan.revision)
 
 proc confirmInstall(session: BackendSession) =
   ## Pure framework publication, after the installation scope has exited.
@@ -276,6 +289,9 @@ proc attachBackend*(runtime: Runtime, backend: Backend, host: HostContext,
   session.backendToken = backend.reserveSession()
 
   try:
+    # Tell the host its identity before the first prepare, inside this lease.
+    if backend.rebind != nil:
+      backend.rebind(session.sessionId, session.mountGeneration)
     session.committerToken = runtime.installCommitter(
       proc(accepted: Runtime, candidate: Runtime) =
         session.commit(accepted, candidate),
@@ -358,6 +374,9 @@ proc enqueue*(session: BackendSession, envelope: EventEnvelope): bool =
   if envelope.observedRevision > session.runtime.acceptedRevision: return false
   if envelope.sequence <= session.lastQueued: return false
   if not session.entities.hasKey(envelope.handle): return false
+  if session.backend.bindingValid != nil and
+      not session.backend.bindingValid(envelope.handle, envelope.bindingGeneration):
+    return false
   session.lastQueued = envelope.sequence
   session.queue.add(envelope)
   true
@@ -369,11 +388,39 @@ proc eventEligible(session: BackendSession): bool =
   not session.disposed and not session.faulted and not session.frozen and
     not session.closing
 
+proc settleEvent(session: BackendSession, envelope: EventEnvelope) =
+  ## UI metadata effect: settle the latest accepted props for a live entity
+  ## after the Runtime scope has fully returned. Never reads business/DB,
+  ## renders or installs hooks. A settlement failure faults and freezes.
+  if session.backend.settle == nil: return
+  if not session.eventEligible: return
+  if envelope.mountGeneration != session.mountGeneration: return
+  if not session.entities.hasKey(envelope.handle): return
+  if session.backend.bindingValid != nil and
+      not session.backend.bindingValid(envelope.handle, envelope.bindingGeneration):
+    return
+  let settlement = EventSettlement(
+    sessionId: session.sessionId,
+    mountGeneration: session.mountGeneration,
+    bindingGeneration: envelope.bindingGeneration,
+    sequence: envelope.sequence,
+    revision: session.runtime.acceptedRevision,
+    handle: envelope.handle,
+    props: session.entities[envelope.handle].props)
+  try:
+    session.backend.settle(settlement)
+  except CatchableError as error:
+    session.faulted = true
+    session.runtime.freezeEvents("backend settle failed: " & error.msg)
+    session.runtime.diagnostic("settle", "error",
+      %*{"handle": $envelope.handle, "message": error.msg})
+
 proc process(session: BackendSession, envelope: EventEnvelope) =
   ## Revalidate against the live accepted state immediately before running the
   ## callback. A failed dispatch leaves the old accepted tree and never
   ## re-executes the business closure. The eligibility guard runs before any
-  ## sequence or Runtime access.
+  ## sequence or Runtime access. Every handled event on a live entity settles
+  ## the latest accepted props, including disabled/no-handler/no-op cases.
   if not session.eventEligible: return
   if envelope.session != session.sessionId: return
   if envelope.mountGeneration != session.mountGeneration: return
@@ -381,18 +428,21 @@ proc process(session: BackendSession, envelope: EventEnvelope) =
   session.lastProcessed = envelope.sequence
   if not session.entities.hasKey(envelope.handle): return
   let entity = session.entities[envelope.handle]
+  if session.backend.bindingValid != nil and
+      not session.backend.bindingValid(envelope.handle, envelope.bindingGeneration):
+    return
   var mounted: MountedNode
   try:
     mounted = session.runtime.find(entity.nodeId)
   except UiError:
     return
   let node = mounted.node
-  if node.disabled: return
-  if node.handler(envelope.event.kind) == nil: return
-  try:
-    discard session.runtime.dispatch(entity.nodeId, envelope.event)
-  except CatchableError:
-    discard
+  if not node.disabled and node.handler(envelope.event.kind) != nil:
+    try:
+      discard session.runtime.dispatch(entity.nodeId, envelope.event)
+    except CatchableError:
+      discard
+  session.settleEvent(envelope)
 
 proc drainEvents*(session: BackendSession) =
   ## Explicit host drain. A commit in progress (or a reentrant drain) returns

@@ -33,6 +33,11 @@ type
     dfColor, dfBackground, dfBorderColor, dfRadius, dfBorderWidth,
     dfOpacity, dfFontSize, dfWeight
 
+  ControlFeature* = enum
+    ## Explicit control behaviours a backend must declare. These are required
+    ## capabilities: an undeclared one is rejected, never degraded.
+    cfInputReset
+
   BackendCapabilities* = object
     ## Everything a backend explicitly supports. Extended enum values are
     ## listed individually so supporting `justify` never implies `around`.
@@ -43,6 +48,7 @@ type
     overflows*: set[Overflow]
     decorations*: set[DecorationFeature]
     variants*: set[ControlVariant]
+    controls*: set[ControlFeature]
 
   MountedEntity* = object
     ## Backend-visible accepted entity. `props` are the complete normalized
@@ -59,7 +65,9 @@ type
 
   UpdateOp* = object
     ## A single batch operation. create/update carry complete typed properties;
-    ## there is no callback, Node reference or platform pointer.
+    ## there is no callback, Node reference or platform pointer. `opRemove` is
+    ## authoritative by `handle`; its `index` is historical and must not be
+    ## used for sibling positioning.
     kind*: UpdateKind
     handle*: NodeHandle
     parent*: NodeHandle
@@ -72,6 +80,18 @@ type
     revision*: uint64
     ops*: seq[UpdateOp]
 
+  EventSettlement* = object
+    ## UI metadata emitted after an event has been handled and the Runtime
+    ## scope has fully returned. It carries no Node, callback or native handle
+    ## beyond the opaque entity handle.
+    sessionId*: uint64
+    mountGeneration*: uint64
+    bindingGeneration*: uint64
+    sequence*: uint64
+    revision*: uint64
+    handle*: NodeHandle
+    props*: NormalizedProps
+
   Backend* = ref object
     ## Synchronous backend contract. `prepare` must not mutate visible entities;
     ## `restore` remounts the accepted descriptions and rebuilds listener
@@ -82,6 +102,11 @@ type
     discardPrepared*: proc() {.closure.}
     restore*: proc(entities: Table[NodeHandle, MountedEntity]) {.closure.}
     dispose*: proc() {.closure.}
+    accepted*: proc(entities: Table[NodeHandle, MountedEntity],
+                     revision: uint64) {.closure, raises: [].}
+    rebind*: proc(sessionId, mountGeneration: uint64) {.closure.}
+    bindingValid*: proc(handle: NodeHandle, bindingGeneration: uint64): bool {.closure.}
+    settle*: proc(value: EventSettlement) {.closure.}
     sessionOwner: uint64
     sessionCounter: uint64
 
@@ -131,7 +156,8 @@ proc fullCapabilities*(): BackendCapabilities =
     decorations: {dfColor, dfBackground, dfBorderColor, dfRadius, dfBorderWidth,
       dfOpacity, dfFontSize, dfWeight},
     variants: {variantDefault, variantPrimary, variantDanger, variantSuccess,
-      variantWarning, variantInfo, variantOutline, variantGhost, variantSecondary})
+      variantWarning, variantInfo, variantOutline, variantGhost, variantSecondary},
+    controls: {cfInputReset})
 
 proc checkCapabilities*(root: MountedNode, capabilities: BackendCapabilities,
                         mode = compatible): seq[CapabilityIssue] =
@@ -198,6 +224,10 @@ proc checkCapabilities*(root: MountedNode, capabilities: BackendCapabilities,
       report(nodeId, "weight", "decoration not supported")
     if props.control.variant.isSome and props.control.variant.get notin capabilities.variants:
       report(nodeId, "variant", "variant not supported")
+    # Required control behaviour: never degraded, even in compatible mode.
+    if props.control.resetToken.isSome and props.control.resetToken.get != 0 and
+        cfInputReset notin capabilities.controls:
+      fail("backend does not support input reset token: " & nodeId)
 
     for child in mounted.children: visit(child)
 

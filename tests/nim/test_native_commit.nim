@@ -484,3 +484,26 @@ suite "Runtime candidate commit gate and accepted revision":
     check rejected == 2
     check token != 0
     check not runtime.installingUpdate
+
+  test "composition metadata is additive and old event fields stay":
+    let plain = Event(kind: click)
+    check plain.composition == compositionNone
+    check plain.value == ""
+    check not plain.checked
+    let composing = Event(kind: change, value: "abc",
+      composition: compositionUpdate)
+    check composing.kind == change
+    check composing.value == "abc"
+    check composing.composition == compositionUpdate
+    check not composing.checked
+
+  test "old snapshot event JSON shape is unchanged":
+    proc render(ctx: BuildContext): Node =
+      button("go", key = "go", onClick = proc(e: Event) = discard)
+    let runtime = newRuntime(app(render))
+    let events = runtime.snapshot.toJson()["root"]["events"]
+    check events.kind == JObject
+    check events.len == 3
+    check events.hasKey("click")
+    check events.hasKey("change")
+    check events.hasKey("submit")

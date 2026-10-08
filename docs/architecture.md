@@ -36,3 +36,14 @@ CLI 通过 Cargo 增量构建桥接库，再通过 Nim 编译业务程序。桥�
 Backend 实例通过私有资源占用 token 拒绝跨 Runtime 的同时使用。占用拒绝不 prepare/apply/dispose 输入实例；attach 只清理本次实际取得的资源。清理错误附加到 primary 异常；若合法 Scope 未能移除本次 hook，则保留仍被引用的 Backend 并报告失败。成功 Session dispose 后释放占用，失败关闭仍可重试。
 
 输入法 / composition、导航历史、移动生命周期与 SQLite、Canvas、原生构建与实机验收不在 A1 范围。
+
+## A2 T1：平台消费最小协议与受控编辑状态机（additive）
+
+以下为 Native 平台消费所需的最小可选协议，已由 Nim 测试验证；不代表任何原生平台已验收。
+
+- `core.nim`：`Event.composition: CompositionPhase`（默认 `compositionNone`）。不新增 `EventKind`，旧 `value`/`checked` 与 snapshot 事件 JSON 形状不变。
+- `styles.nim` / `widgets.nim`：`input(..., resetToken = 0)` 仅在末尾追加可选参数；非零时在 attributes 输出 `input_reset_token` 十进制字符串，0/省略不产生属性。`ControlProps.resetToken: Option[uint64]` 只接受 input 的无符号十进制 0..high(uint64)，负数/溢出/浮点/错 kind 均报错，不走 float style 路径。
+- `backend.nim`：`ControlFeature`/`BackendCapabilities.controls` 为必需能力，`cfInputReset` 由 `fullCapabilities` 声明；非零 reset token 在 compatible 也不降级，缺失直接拒绝。新增可选 hook `accepted`（纯 framework metadata）、`rebind`、`bindingValid`、`settle`，原五必需字段与旧调用保持兼容。
+- `backend_session.nim`：`EventEnvelope.bindingGeneration` 默认 0；`bindingValid` 非 nil 时 enqueue 与 process 均复查。`accepted` 仅在成功 accept 后通知（install confirm 无额外 Native apply）。restore 后推进 generation、清队列/sequence 并 `rebind`，失败与 restore 失败同样 fault+freeze。事件处理后、Runtime Scope 完全返回且实体/绑定仍有效时通过 `settle` 结算最新 accepted props；settle 失败 fault+freeze 并停止剩余批。
+- `native_edit.nim`：纯 `EditorState` 状态机（无原生资源）。`settleEditor` 处理普通 ack（同文本不 setText、保留选区/组合；拒绝/格式化同步 accepted 值；组合期不写冲突，`compositionEnd` 按最终模型同步）。`resetEffects` 为显式同值 ack 例外，输出 ForceCancel→forced setText→末尾选区；`completeReset` 仅在 Native 效果全部成功后消费 token。
+- `gpui_bridge.nim`：旧桥接在独立 validator 分支拒绝显式非零 reset token；`gpui_styles` 保持 style-only，不全面强验旧 control 属性。

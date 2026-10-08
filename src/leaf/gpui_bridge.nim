@@ -1,5 +1,5 @@
 ## Nim owns application state and the response buffer. GPUI calls on the UI thread.
-import std/[json,os,tables,math]
+import std/[json,os,tables,math,strutils]
 import ./[core,diagnostics,watch_ipc,gpui_styles]
 type
   ActiveRow = tuple[key:string,index:int]
@@ -13,9 +13,28 @@ type
     externalError: string
     viewports: Viewports
 
+proc rejectNativeResetSignals*(root: MountedNode) =
+  ## The legacy GPUI bridge has no native reset signal. Reject the new explicit
+  ## non-zero token here without enforcing the full native control-attribute
+  ## rules; `gpui_styles` remains style-only.
+  if root.node.kind == NodeKind.input and
+      "input_reset_token" in root.node.attributes:
+    let raw = root.node.attributes["input_reset_token"]
+    var token = 0'u64
+    try:
+      token = uint64(parseBiggestUInt(raw))
+    except ValueError:
+      fail("GPUI does not support input reset token: " & raw)
+    if token != 0: fail("GPUI does not support input reset token: " & raw)
+  for child in root.children: rejectNativeResetSignals(child)
+
+proc bridgeValidator(snapshot: Snapshot) =
+  validateStyles(snapshot.root)
+  rejectNativeResetSignals(snapshot.root)
+
 proc newDesktopBridge*(app:Application,diagnostics:Diagnostics=nil):DesktopBridge =
   let viewports=Viewports()
-  result=DesktopBridge(runtime:newRuntime(app,validator=proc(snapshot:Snapshot)=validateStyles(snapshot.root),diagnostics=diagnostics),viewports:viewports)
+  result=DesktopBridge(runtime:newRuntime(app,validator=bridgeValidator,diagnostics=diagnostics),viewports:viewports)
   # Validate the current viewports inside core's isolated candidate before an
   # event publishes a replacement source. Failure retains rows and callbacks.
   result.runtime.setPreparer(proc(candidate:Runtime) =

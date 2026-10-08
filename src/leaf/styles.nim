@@ -62,6 +62,7 @@ type
     checked*: Option[bool]
     progress*: Option[float64]
     variant*: Option[ControlVariant]
+    resetToken*: Option[uint64]
     hasClick*, hasChange*, hasSubmit*: bool
 
   AccessibilityProps* = object
@@ -247,7 +248,17 @@ proc attributeAllowed(kind: NodeKind, name: string): bool =
   of NodeKind.button, NodeKind.tag: name == "variant"
   of NodeKind.checkbox, NodeKind.toggle: name == "checked"
   of NodeKind.progress: name == "value"
+  of NodeKind.input: name == "input_reset_token"
   else: false
+
+proc parseResetToken(value: string): uint64 =
+  ## Reset tokens are unsigned decimal integers in 0..high(uint64). They are
+  ## deliberately not parsed through the float style path: negatives, floats,
+  ## non-digits and overflow are rejected.
+  try:
+    result = uint64(parseBiggestUInt(value))
+  except ValueError:
+    fail("invalid input reset token: " & value)
 
 proc controlFrom(node: Node): ControlProps =
   for name, value in node.attributes:
@@ -270,6 +281,8 @@ proc controlFrom(node: Node): ControlProps =
     result.value = some(node.text)
     if node.placeholder.len > 0: result.placeholder = some(node.placeholder)
     result.enabled = some(not node.disabled)
+    if "input_reset_token" in node.attributes:
+      result.resetToken = some(parseResetToken(node.attributes["input_reset_token"]))
   of NodeKind.checkbox, NodeKind.toggle:
     result.label = some(node.text)
     result.enabled = some(not node.disabled)
