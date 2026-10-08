@@ -7,6 +7,8 @@ type
   DatabaseError* = object of ValueError
     code*, extendedCode*: int
   ConstraintError* = object of DatabaseError
+  ScopeError* = object of DatabaseError
+    scopeCode*: string
   SqlKind* = enum sqlNull, sqlInteger, sqlFloat, sqlText
   SqlValue* = object
     case kind*: SqlKind
@@ -17,6 +19,9 @@ type
   DatabaseHandle = object
     connection: ptr native.SqliteConnection
     ownerThread: int
+    scriptGuardActive: bool
+    progressActive: bool
+    runnerActive: bool
   Database* = ref DatabaseHandle
   Migration* = object
     version*: int
@@ -139,6 +144,80 @@ proc sqliteRuntimeVersion*(): tuple[major, minor, patch: int] =
   let version = int(native.libraryVersionNumber())
   (major: version div 1_000_000, minor: (version div 1_000) mod 1_000,
     patch: version mod 1_000)
+
+proc isHistoryName(value: cstring): bool =
+  value != nil and ($value).toLowerAscii() == "leaf_schema_migrations"
+
+proc migrationGuardAuthorizer(context: pointer, action: cint, first, second,
+    database, trigger: cstring): cint {.cdecl.} =
+  ## Migration SQL must not control transactions, attach databases, flip
+  ## writable_schema, or create/mutate execution history. No exception may
+  ## cross the C boundary.
+  try:
+    case int(action)
+    of 22, 32: return 1          # TRANSACTION, SAVEPOINT
+    of 24, 25: return 1          # ATTACH, DETACH
+    of 19:                       # PRAGMA (arg1 = name, arg2 = value)
+      if first != nil and ($first).toLowerAscii() == "writable_schema": return 1
+    else: discard
+    if int(action) in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+        18, 23, 26, 29, 30]:
+      if isHistoryName(first) or isHistoryName(second): return 1
+  except Exception:
+    return 1
+  0
+
+proc isScriptGuardActive*(db: Database): bool =
+  db != nil and db.scriptGuardActive
+
+proc isProgressActive*(db: Database): bool =
+  db != nil and db.progressActive
+
+proc isMigrationRunnerActive*(db: Database): bool =
+  db != nil and db.runnerActive
+
+proc beginScriptGuard*(db: Database) =
+  ## Install the framework authorizer for one migration script. Reentrant or
+  ## overlapping framework scopes are rejected rather than silently stacked.
+  db.requireUsable()
+  if db.scriptGuardActive:
+    let error = newException(ScopeError, "migration script guard is already active")
+    error.scopeCode = "migration_guard_active"
+    raise error
+  db.check(native.setAuthorizer(db.connection, migrationGuardAuthorizer, nil))
+  db.scriptGuardActive = true
+
+proc endScriptGuard*(db: Database) =
+  if db == nil or db.connection == nil or not db.scriptGuardActive: return
+  db.scriptGuardActive = false
+  db.check(native.setAuthorizer(db.connection, nil, nil))
+
+proc installProgress*(db: Database, interval: cint, callback: native.ProgressHandler,
+    context: pointer) =
+  db.requireUsable()
+  if db.progressActive:
+    let error = newException(ScopeError, "migration progress handler is already active")
+    error.scopeCode = "migration_progress_active"
+    raise error
+  native.setProgressHandler(db.connection, interval, callback, context)
+  db.progressActive = true
+
+proc clearProgress*(db: Database) =
+  if db == nil or db.connection == nil or not db.progressActive: return
+  db.progressActive = false
+  native.setProgressHandler(db.connection, 0, nil, nil)
+
+proc beginMigrationRunner*(db: Database) =
+  db.requireUsable()
+  if db.runnerActive or db.scriptGuardActive or db.progressActive:
+    let error = newException(ScopeError, "migration runner scope is already active")
+    error.scopeCode = "migration_runner_active"
+    raise error
+  db.runnerActive = true
+
+proc endMigrationRunner*(db: Database) =
+  if db == nil: return
+  db.runnerActive = false
 
 proc prepare(db: Database, sql: string, values: openArray[SqlValue]): ptr native.SqliteStatement =
   db.requireUsable()

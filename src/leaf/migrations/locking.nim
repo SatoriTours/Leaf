@@ -20,6 +20,10 @@ when defined(posix):
     LockExclusive = 2.cint
     LockNonBlocking = 4.cint
     LockUnlock = 8.cint
+  when defined(linux):
+    const ONoFollow = cint(0o400000)
+  else:
+    var ONoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
 
 when defined(windows):
   type
@@ -80,7 +84,8 @@ proc acquireFileLock*(path: string, timeoutMs = DefaultLockTimeoutMs): FileLock 
       let handle = winlean.createFileW(newWideCString(path),
         DWORD(GENERIC_READ) or DWORD(GENERIC_WRITE),
         DWORD(FILE_SHARE_READ) or DWORD(FILE_SHARE_WRITE), nil,
-        DWORD(OPEN_ALWAYS), DWORD(FILE_ATTRIBUTE_NORMAL), Handle(0))
+        DWORD(OPEN_ALWAYS),
+        DWORD(FILE_ATTRIBUTE_NORMAL) or DWORD(FILE_FLAG_OPEN_REPARSE_POINT), Handle(0))
       if handle == INVALID_HANDLE_VALUE:
         let error = int(winlean.getLastError())
         if error != ERROR_LOCK_VIOLATION and error != 32:
@@ -97,20 +102,22 @@ proc acquireFileLock*(path: string, timeoutMs = DefaultLockTimeoutMs): FileLock 
           raise lockPathError(path, osErrorMsg(OSErrorCode(error)))
     else:
       # O_CLOEXEC keeps the locked description out of exec descendants, so the
-      # lock is released as soon as its owning process dies.
-      let fd = posix.open(path.cstring, O_RDWR or O_CREAT or O_CLOEXEC, 0o644)
+      # lock is released as soon as its owning process dies. O_NOFOLLOW refuses
+      # a hostile symlink at the lock path.
+      let fd = posix.open(path.cstring, O_RDWR or O_CREAT or O_CLOEXEC or ONoFollow, 0o644)
       if fd < 0:
         let error = osLastError()
-        if int(error) == int(EINTR): continue
-        raise lockPathError(path, osErrorMsg(error))
-      if cFlock(fd, LockExclusive or LockNonBlocking) == 0:
-        result = FileLock(fd: fd, acquired: true)
-        return
-      let error = osLastError()
-      discard posix.close(fd)
-      if int(error) == int(EINTR): continue
-      if int(error) != int(EWOULDBLOCK) and int(error) != int(EAGAIN):
-        raise lockPathError(path, osErrorMsg(error))
+        if int(error) != int(EINTR): raise lockPathError(path, osErrorMsg(error))
+      else:
+        if cFlock(fd, LockExclusive or LockNonBlocking) == 0:
+          result = FileLock(fd: fd, acquired: true)
+          return
+        let error = osLastError()
+        discard posix.close(fd)
+        if int(error) != int(EINTR) and int(error) != int(EWOULDBLOCK) and
+            int(error) != int(EAGAIN):
+          raise lockPathError(path, osErrorMsg(error))
+    # EINTR retries fall through here so the monotonic deadline always applies.
     if getMonoTime() >= deadline:
       raise migrationError("concurrent_migration",
         "timed out waiting for migration lock: " & path)

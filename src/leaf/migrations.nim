@@ -12,6 +12,8 @@ import ./migrations/generator
 import ./migrations/history
 import ./migrations/locking
 import ./migrations/planner
+import ./migrations/report
+import ./migrations/runner
 import ./migrations/dsl
 from ./sqlite import SqlValue, SqlKind, DatabaseError, ConstraintError
 
@@ -26,5 +28,7 @@ export generator
 export history
 export locking
 export planner
+export report
+export runner
 export dsl
 export SqlValue, SqlKind, DatabaseError, ConstraintError

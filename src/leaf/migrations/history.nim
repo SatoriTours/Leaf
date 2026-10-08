@@ -29,6 +29,26 @@ proc historyColumns(db: Database, name: string): seq[string] =
   for row in db.query("PRAGMA main.table_info(" & quoteName(name) & ")"):
     result.add row[1].asString
 
+proc migrationHistoryTable*(db: Database): string =
+  ## The main-qualified existing history table name, or "" when absent.
+  let (kind, name) = historyObject(db)
+  if kind.len == 0: ""
+  elif kind != "table":
+    raise migrationError("corrupt_history", HistoryTable & " is not a table: " & kind)
+  else: "main." & quoteName(name)
+
+proc createMigrationHistory*(db: Database): string =
+  ## Create the complete extended history table in main when absent and return
+  ## its main-qualified name. The caller owns the transaction; an existing
+  ## table (any accepted shape) is left untouched.
+  result = migrationHistoryTable(db)
+  if result.len == 0:
+    db.executeScript("CREATE TABLE main." & quoteName(HistoryTable) & " (" &
+      "version INTEGER PRIMARY KEY, name TEXT NOT NULL, sql TEXT NOT NULL, " &
+      "format TEXT NOT NULL DEFAULT 'sql-v1', source_sha256 TEXT, " &
+      "operations_sha256 TEXT, down_sha256 TEXT);")
+    result = "main." & quoteName(HistoryTable)
+
 proc textAffinity(declared: string): bool =
   let upper = declared.toUpperAscii()
   "CHAR" in upper or "CLOB" in upper or "TEXT" in upper
