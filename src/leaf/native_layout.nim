@@ -7,13 +7,13 @@
 ## no min/max, no wrap, no scroll, no around/evenly.
 ##
 ## Measurement contract: `MeasureProc` receives the entity's *effective finite
-## local* constraint, not an ancestor's raw size. A declared fixed axis
-## constrains the entity itself (padding is deducted from the local content)
-## for both leaves and containers; the cache is keyed by the effective
-## constraint. Main-axis allocation and width resolution are shared by the
-## intrinsic measurement and the arrange pass, so a width-sensitive leaf is
-## measured under its final allocated width and auto heights (including auto
-## ancestors) follow that result. Fixed heights are never overridden.
+## local* constraint, not an ancestor's raw size. Preferred/base measurement
+## normalizes fixed axes; once width is allocated, that width takes precedence
+## when measuring preferred height (including fixed-base + explicit grow).
+## Padding is deducted from local content. Preferred extents exclude allocated
+## fill/grow/stretch space, while height follows the resolved child widths.
+## Both passes share these decisions and cache by effective width/height,
+## without including phase in the key. Fixed preferred heights stay declared.
 import std/[tables, sets, algorithm, math, options]
 import ./[core, styles, backend]
 
@@ -35,11 +35,15 @@ type
 
   ConstraintKey = tuple[handle: NodeHandle, width, height: float64]
 
+  ConstraintPhase = enum
+    preferredConstraint, allocatedWidthConstraint
+
   ContainerPlan = object
     widths: seq[float64]
     heights: seq[float64]
     mainTotal: float64
-    crossMax: float64
+    preferredMainTotal: float64
+    preferredCrossMax: float64
 
   LayoutContext = object
     children: Table[NodeHandle, seq[MountedEntity]]
@@ -70,12 +74,14 @@ proc mainDim(entity: MountedEntity, horizontal: bool): Option[Dimension] =
 proc crossDim(entity: MountedEntity, horizontal: bool): Option[Dimension] =
   if horizontal: entity.props.layout.height else: entity.props.layout.width
 
-proc localConstraint(entity: MountedEntity, available: DipSize): DipSize =
-  ## A declared fixed axis is the entity's *effective* finite local constraint
-  ## (leaf or container); other axes inherit the parent's finite constraint.
+proc localConstraint(entity: MountedEntity, available: DipSize,
+                     phase: ConstraintPhase): DipSize =
+  ## Fixed axes constrain the preferred/base phase. Resolved width is already
+  ## authoritative in the height measurement phase; do not undo explicit grow.
   result = available
   let width = entity.props.layout.width
-  if width.isSome and width.get.kind == dkFixed: result.width = width.get.value
+  if phase == preferredConstraint and width.isSome and width.get.kind == dkFixed:
+    result.width = width.get.value
   let height = entity.props.layout.height
   if height.isSome and height.get.kind == dkFixed: result.height = height.get.value
 
@@ -132,15 +138,16 @@ proc intersect(a, b: DipRect): DipRect =
     height: nonNegative(bottom - top))
 
 proc contentIntrinsic(ctx: var LayoutContext, entity: MountedEntity,
-                      available: DipSize): DipSize
+                      available: DipSize,
+                      phase = preferredConstraint): DipSize
 proc allocateMain(ctx: var LayoutContext, entity: MountedEntity,
                   contentSize: DipSize): ContainerPlan
 
 proc allocateMain(ctx: var LayoutContext, entity: MountedEntity,
                   contentSize: DipSize): ContainerPlan =
-  ## Shared width / main-axis allocation. Both the intrinsic measurement and
-  ## the arrange pass use it, so cross sizes always follow the final allocated
-  ## main constraint. Widths are resolved before a column measures heights.
+  ## Shared preferred/base and actual allocation decisions. Preferred totals
+  ## do not include consumed remainder or cross fill/stretch, but preferred
+  ## heights still follow resolved widths, before either pass publishes sizes.
   let horizontal = entity.kind == NodeKind.row
   let props = entity.props.layout
   let gap = props.gap.get(0.0)
@@ -171,18 +178,22 @@ proc allocateMain(ctx: var LayoutContext, entity: MountedEntity,
     else:
       # Cross axis is width: resolve it (with stretch) before measuring height.
       let preliminary = contentIntrinsic(ctx, child, contentSize)
+      result.preferredCrossMax = finite(max(result.preferredCrossMax,
+        crossPreferred(child, preliminary, false)))
       var childWidth = resolveChildWidth(child, preliminary, contentSize.width)
       if align == alignStretch and not isFixedCross(child, false):
         childWidth = max(childWidth, contentSize.width)
       result.widths[index] = nonNegative(childWidth)
       let childIntrinsic = contentIntrinsic(ctx, child,
-        DipSize(width: result.widths[index], height: contentSize.height))
+        DipSize(width: result.widths[index], height: contentSize.height),
+        allocatedWidthConstraint)
       bases[index] = mainBase(child, childIntrinsic, false)
     totalBase = finite(totalBase + bases[index])
     totalWeight = finite(totalWeight + weight)
 
   let mainAvailable = mainOf(contentSize, horizontal)
   let gaps = if count > 1: finite(float64(count - 1) * gap) else: 0.0
+  result.preferredMainTotal = finite(totalBase + gaps)
   # Negative remainder is not shrunk; the overflow is clipped.
   let remainder = nonNegative(mainAvailable - totalBase - gaps)
   var mainTotal = 0.0
@@ -196,12 +207,14 @@ proc allocateMain(ctx: var LayoutContext, entity: MountedEntity,
     mainTotal = finite(mainTotal + main)
     if index > 0: mainTotal = finite(mainTotal + gap)
 
-  var crossMax = 0.0
   for index, child in children:
     if horizontal:
       # Height follows the final allocated width.
       let finalIntrinsic = contentIntrinsic(ctx, child,
-        DipSize(width: result.widths[index], height: contentSize.height))
+        DipSize(width: result.widths[index], height: contentSize.height),
+        allocatedWidthConstraint)
+      result.preferredCrossMax = finite(max(result.preferredCrossMax,
+        crossPreferred(child, finalIntrinsic, true)))
       var childHeight: float64
       if align == alignStretch and not isFixedCross(child, true):
         # Stretch expands auto/fill but never shrinks intrinsic content.
@@ -211,19 +224,15 @@ proc allocateMain(ctx: var LayoutContext, entity: MountedEntity,
         childHeight = nonNegative(resolveCross(child, finalIntrinsic,
           contentSize.height, true))
       result.heights[index] = childHeight
-      crossMax = finite(max(crossMax, childHeight))
-    else:
-      crossMax = finite(max(crossMax, result.widths[index]))
   result.mainTotal = mainTotal
-  result.crossMax = crossMax
 
 proc contentIntrinsic(ctx: var LayoutContext, entity: MountedEntity,
-                      available: DipSize): DipSize =
+                      available: DipSize, phase: ConstraintPhase): DipSize =
   ## Recursive preferred (intrinsic) size under the effective local constraint.
   ## Leaf sizes come from `measure` once per effective constraint; container
-  ## sizes derive from the shared allocation. `fill` contributes a 0 main base,
-  ## so intrinsic measurement never recurses to infinity.
-  let effective = localConstraint(entity, available)
+  ## sizes use the plan's preferred totals, never its allocated extents. Fill
+  ## contributes a 0 main base, while width-sensitive height uses actual width.
+  let effective = localConstraint(entity, available, phase)
   let key: ConstraintKey = (entity.handle, effective.width, effective.height)
   if ctx.cache.hasKey(key): return ctx.cache[key]
   if entity.handle in ctx.visiting: fail("layout cycle detected")
@@ -234,8 +243,8 @@ proc contentIntrinsic(ctx: var LayoutContext, entity: MountedEntity,
     let contentSize = DipSize(width: nonNegative(effective.width - 2.0 * pad),
       height: nonNegative(effective.height - 2.0 * pad))
     let plan = allocateMain(ctx, entity, contentSize)
-    let mainExtent = finite(plan.mainTotal + 2.0 * pad)
-    let crossExtent = finite(plan.crossMax + 2.0 * pad)
+    let mainExtent = finite(plan.preferredMainTotal + 2.0 * pad)
+    let crossExtent = finite(plan.preferredCrossMax + 2.0 * pad)
     if horizontal:
       result = DipSize(width: nonNegative(mainExtent), height: nonNegative(crossExtent))
     else:

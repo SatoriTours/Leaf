@@ -585,3 +585,101 @@ suite "MeasureProc local constraint and finite geometry":
     rowAuto[NodeHandle(1)] = ent(1, 0, row, 0, LayoutProps(align: some(alignStretch)))
     rowAuto[NodeHandle(2)] = ent(2, 1, text, 0)
     check layoutTree(rowAuto, DipSize(width: 100, height: 100), small)[1].rect.height == 100
+
+
+suite "Preferred bases and allocated width measurement phases":
+  test "auto column height excludes allocated fill while explicit dimensions opt in":
+    let small = proc(entity: MountedEntity, available: DipSize): DipSize =
+      DipSize(width: 5, height: 3)
+    for height in [autoDim(), fillDim(), fixedDim(10)]:
+      var entities: Table[NodeHandle, MountedEntity]
+      entities[NodeHandle(1)] = ent(1, 0, row, 0)
+      entities[NodeHandle(2)] = ent(2, 1, column, 0, LayoutProps(height: height))
+      entities[NodeHandle(3)] = ent(3, 2, text, 0, LayoutProps(height: fixedDim(10)))
+      entities[NodeHandle(4)] = ent(4, 2, text, 1, LayoutProps(height: fillDim()))
+      let boxes = layoutTree(entities, DipSize(width: 100, height: 100), small)
+      check boxes.len == 4
+      check boxes[1].handle == NodeHandle(2)
+      check boxes[2].rect.height == 10
+      if height.get.kind == dkFill:
+        check boxes[1].rect.height == 100
+        check boxes[3].rect.height == 90
+      else:
+        check boxes[1].rect.height == 10
+        check boxes[3].rect.height == 0
+
+  test "internal stretch cannot enlarge an auto column preferred width":
+    let small = proc(entity: MountedEntity, available: DipSize): DipSize =
+      DipSize(width: 5, height: 3)
+    for width in [autoDim(), fillDim()]:
+      var entities: Table[NodeHandle, MountedEntity]
+      entities[NodeHandle(1)] = ent(1, 0, row, 0)
+      entities[NodeHandle(2)] = ent(2, 1, column, 0,
+        LayoutProps(width: width, align: some(alignStretch)))
+      entities[NodeHandle(3)] = ent(3, 2, text, 0)
+      let boxes = layoutTree(entities, DipSize(width: 100, height: 100), small)
+      check boxes.len == 3
+      let expectedWidth = if width.get.kind == dkFill: 100.0 else: 5.0
+      check boxes[1].rect.width == expectedWidth
+      check boxes[2].rect.width == expectedWidth
+      check boxes[1].rect.height == 3
+
+  test "grown fixed text uses allocated width and caches each effective constraint once":
+    var entities: Table[NodeHandle, MountedEntity]
+    entities[NodeHandle(1)] = ent(1, 0, row, 0)
+    entities[NodeHandle(2)] = MountedEntity(handle: NodeHandle(2), parent: NodeHandle(1),
+      nodeId: "utf", kind: text, index: 0, props: normalizeProps(ui(NodeKind.text,
+        text = "你好😀世界", styles = style({"width": "10", "flex_grow": "2"}))))
+    var keys: seq[(uint64, float64, float64)]
+    let measure = proc(entity: MountedEntity, available: DipSize): DipSize =
+      check entity.props.accessibility.label.get("") == "你好😀世界"
+      keys.add((uint64(entity.handle), available.width, available.height))
+      DipSize(width: min(50.0, available.width),
+        height: (if available.width <= 20: 30.0 else: 10.0))
+    let boxes = layoutTree(entities, DipSize(width: 100, height: 100), measure)
+    check boxes.len == 2
+    check boxes[1].rect.width == 100
+    check boxes[1].rect.height == 10
+    check keys == @[(2'u64, 10.0, 100.0), (2'u64, 100.0, 100.0)]
+    keys.setLen(0)
+    let second = layoutTree(entities, DipSize(width: 100, height: 100), measure)
+    check second[1].rect.height == 10
+    check keys == @[(2'u64, 10.0, 100.0), (2'u64, 100.0, 100.0)]
+
+  test "unchanged fixed constraints share a cache key across measurement phases":
+    var entities: Table[NodeHandle, MountedEntity]
+    entities[NodeHandle(1)] = ent(1, 0, row, 0)
+    entities[NodeHandle(2)] = ent(2, 1, text, 0,
+      LayoutProps(width: fixedDim(20), height: fixedDim(50)))
+    var keys: seq[(uint64, float64, float64)]
+    let measure = proc(entity: MountedEntity, available: DipSize): DipSize =
+      keys.add((uint64(entity.handle), available.width, available.height))
+      DipSize(width: 5, height: 3)
+    let boxes = layoutTree(entities, DipSize(width: 100, height: 100), measure)
+    check boxes[1].rect.width == 20
+    check boxes[1].rect.height == 50
+    check keys == @[(2'u64, 20.0, 50.0)]
+
+  test "grown fixed container propagates its allocated width to UTF preferred height":
+    var entities: Table[NodeHandle, MountedEntity]
+    entities[NodeHandle(1)] = ent(1, 0, row, 0)
+    entities[NodeHandle(2)] = ent(2, 1, column, 0,
+      LayoutProps(width: fixedDim(10), flexGrow: some(2.0), align: some(alignStretch)))
+    entities[NodeHandle(3)] = MountedEntity(handle: NodeHandle(3), parent: NodeHandle(2),
+      nodeId: "utf", kind: text, index: 0, props: normalizeProps(ui(NodeKind.text,
+        text = "你好😀世界")))
+    var keys: seq[(uint64, float64, float64)]
+    let measure = proc(entity: MountedEntity, available: DipSize): DipSize =
+      check entity.props.accessibility.label.get("") == "你好😀世界"
+      let key = (uint64(entity.handle), available.width, available.height)
+      check key notin keys
+      keys.add(key)
+      DipSize(width: min(50.0, available.width),
+        height: (if available.width <= 20: 30.0 else: 10.0))
+    let boxes = layoutTree(entities, DipSize(width: 100, height: 100), measure)
+    check boxes.len == 3
+    check boxes[1].rect.width == 100
+    check boxes[1].rect.height == 10
+    check boxes[2].rect.width == 100
+    check boxes[2].rect.height == 10
+    check (3'u64, 100.0, 100.0) in keys
