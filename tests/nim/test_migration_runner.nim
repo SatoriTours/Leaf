@@ -362,3 +362,146 @@ suite "migration result serialization":
     rollback.planned = @[MigrationStep(version: 2, direction: mdDown, name: "two",
       sourcePath: "two.nim")]
     check "not restored" in resultText(rollback)
+
+when defined(windows):
+  const SQLiteLib = "winsqlite3.dll"
+elif defined(macosx):
+  const SQLiteLib = "libsqlite3.dylib"
+else:
+  const SQLiteLib = "libsqlite3.so(|.0)"
+
+type
+  SqlContext {.pure, inheritable.} = object
+  SqlArg {.pure, inheritable.} = object
+  ScalarFn = proc(context: ptr SqlContext, argc: cint, argv: ptr ptr SqlArg) {.cdecl.}
+
+proc createFunction(db: pointer, name: cstring, nArg, coding: cint, data: pointer,
+    scalar: ScalarFn, step, final, destroy: pointer): cint {.
+  cdecl, importc: "sqlite3_create_function_v2", dynlib: SQLiteLib.}
+proc returnInt(context: ptr SqlContext, value: cint) {.
+  cdecl, importc: "sqlite3_result_int", dynlib: SQLiteLib.}
+
+var shortCancelFlag = false
+proc signalCancel(context: ptr SqlContext, argc: cint, argv: ptr ptr SqlArg) {.cdecl.} =
+  shortCancelFlag = true
+  returnInt(context, 1)
+
+suite "migration runner fix round 1":
+  test "busy database returns a report instead of escaping":
+    let path = "/tmp/leaf-runner-busy.sqlite3"
+    for candidate in [path, path & "-wal", path & "-shm", path & ".leaf-migrate.lock"]:
+      removeFile(candidate)
+    let db = openDatabase(path)
+    let blocker = openDatabase(path)
+    defer:
+      db.close()
+      blocker.close()
+      for candidate in [path, path & "-wal", path & "-shm", path & ".leaf-migrate.lock"]:
+        removeFile(candidate)
+    db.executeScript("PRAGMA busy_timeout = 10")
+    discard blocker.execute("BEGIN IMMEDIATE")
+    let result = runMigrations(db, @[one], MigrationRequest(kind: mrMigrate))
+    check result.errors.len == 1
+    check resultExitCode(result) == 1
+    check not db.isMigrationRunnerActive
+    check db.isAutocommit
+    discard blocker.execute("ROLLBACK")
+
+  test "a busy second step preserves the first commit":
+    let path = "/tmp/leaf-runner-busy2.sqlite3"
+    for candidate in [path, path & "-wal", path & "-shm", path & ".leaf-migrate.lock"]:
+      removeFile(candidate)
+    let db = openDatabase(path)
+    let blocker = openDatabase(path)
+    defer:
+      db.close()
+      blocker.close()
+      for candidate in [path, path & "-wal", path & "-shm", path & ".leaf-migrate.lock"]:
+        removeFile(candidate)
+    db.executeScript("PRAGMA busy_timeout = 10")
+    proc blockBeforeSecond(): bool =
+      # Block at the step-2 boundary (autocommit, step 1 already committed),
+      # not during the intra-transaction post-SQL cancellation check.
+      if db.isAutocommit and tableExists(db, "one"):
+        discard blocker.execute("BEGIN IMMEDIATE")
+      false
+    let result = runMigrations(db, @[one, two], MigrationRequest(kind: mrMigrate),
+      blockBeforeSecond)
+    check result.errors.len == 1
+    check result.executed.mapIt(it.version) == @[1'i64]
+    check result.errors[0].version == some(2'i64)
+    check result.currentVersion == some(1'i64)
+    check readMigrationHistory(db).mapIt(it.version) == @[1'i64]
+    check not db.isMigrationRunnerActive
+    discard blocker.execute("ROLLBACK")
+
+  test "a blob in stored history is reported, not raised":
+    let db = openDatabase(":memory:")
+    defer: db.close()
+    discard runMigrations(db, @[one], MigrationRequest(kind: mrMigrate))
+    discard db.execute("UPDATE main.leaf_schema_migrations SET sql = X'0102'")
+    let result = runMigrations(db, @[one], MigrationRequest(kind: mrStatus))
+    check result.errors.len == 1
+    check resultExitCode(result) == 1
+    check result.currentVersion.isNone
+
+  test "status promotes fatal history issues and discloses warnings":
+    let db = openDatabase(":memory:")
+    defer: db.close()
+    discard runMigrations(db, @[one], MigrationRequest(kind: mrMigrate))
+    discard db.execute("UPDATE main.leaf_schema_migrations SET sql = 'changed'")
+    let result = runMigrations(db, @[one], MigrationRequest(kind: mrStatus))
+    check result.statuses.len == 1
+    check result.statuses[0].state == "modified"
+    check resultExitCode(result) == 1
+    check result.errors.len >= 1
+    let text = resultText(result)
+    check "status 1 modified" in text
+    check "history_sql_modified" in text
+    check one.sourcePath in text
+
+  test "short SQL cancellation is honored before commit":
+    shortCancelFlag = false
+    let db = openDatabase(":memory:")
+    defer: db.close()
+    check createFunction(db.borrowSqliteHandle(), "signal_cancel", 0, 1, nil, signalCancel,
+      nil, nil, nil) == 0
+    let short = sqlDefinition(1, "001_short", "CREATE TABLE short AS SELECT signal_cancel();")
+    proc isCancelled(): bool = shortCancelFlag
+    let result = runMigrations(db, @[short], MigrationRequest(kind: mrMigrate), isCancelled)
+    check shortCancelFlag
+    check resultExitCode(result) == 130
+    check result.executed.len == 0
+    check result.errors[0].code == "migration_cancelled"
+    check result.errors[0].version == some(1'i64)
+    check readMigrationHistory(db).len == 0
+    check not tableExists(db, "short")
+
+  test "known state and step identity survive failures":
+    let db = openDatabase(":memory:")
+    defer: db.close()
+    discard runMigrations(db, @[one], MigrationRequest(kind: mrMigrate))
+    let invalid = runMigrations(db, @[one], MigrationRequest(kind: mrUp, target: some(9'i64)))
+    check invalid.errors[0].code == "invalid_migration_target"
+    check invalid.currentVersion == some(1'i64)
+    check invalid.pendingVersions.len == 0
+    let db2 = openDatabase(":memory:")
+    defer: db2.close()
+    proc failing(): bool = raise newException(ValueError, "boundary callback throws")
+    let callback = runMigrations(db2, @[one], MigrationRequest(kind: mrMigrate), failing)
+    check callback.errors[0].code == "migration_callback_failed"
+    check callback.errors[0].version == some(1'i64)
+    check callback.errors[0].file == one.sourcePath
+    check callback.errors[0].direction == some(mdUp)
+
+  test "ordinary columns named like the history table are allowed":
+    let db = openDatabase(":memory:")
+    defer: db.close()
+    let legitimate = sqlDefinition(1, "001_column",
+      "CREATE TABLE normal (leaf_schema_migrations TEXT); " &
+      "INSERT INTO normal VALUES ('a'); " &
+      "UPDATE normal SET leaf_schema_migrations='b';")
+    let result = runMigrations(db, @[legitimate], MigrationRequest(kind: mrMigrate))
+    check resultExitCode(result) == 0
+    check result.executed.len == 1
+    check db.query("SELECT leaf_schema_migrations FROM normal")[0][0].asString == "b"

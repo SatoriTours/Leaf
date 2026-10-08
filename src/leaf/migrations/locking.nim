@@ -91,6 +91,13 @@ proc acquireFileLock*(path: string, timeoutMs = DefaultLockTimeoutMs): FileLock 
         if error != ERROR_LOCK_VIOLATION and error != 32:
           raise lockPathError(path, osErrorMsg(OSErrorCode(error)))
       else:
+        # OPEN_REPARSE_POINT opens the link itself, so inspect the attributes
+        # and refuse a reparse point before locking it.
+        var info: BY_HANDLE_FILE_INFORMATION
+        if winlean.getFileInformationByHandle(handle, addr info) == 0 or
+            (info.dwFileAttributes and DWORD(FILE_ATTRIBUTE_REPARSE_POINT)) != 0:
+          discard winlean.closeHandle(handle)
+          raise lockPathError(path, "lock path is a symbolic link or reparse point")
         var overlapped: Overlapped
         if lockFileEx(handle, LockFileExclusiveLock or LockFileFailImmediately,
             0, 1, 0, addr overlapped) != 0:

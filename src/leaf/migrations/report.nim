@@ -52,20 +52,40 @@ proc resultJson*(migration: MigrationResult): JsonNode =
   result["statuses"] = %migration.statuses.map(statusJson)
   result["errors"] = %migration.errors.map(issueJson)
 
+proc directionName(direction: MigrationDirection): string =
+  if direction == mdUp: "up" else: "down"
+
 proc resultText*(migration: MigrationResult): string =
   var lines: seq[string]
   lines.add(migration.command & ": " &
     (if migration.database.len > 0: migration.database else: ":memory:"))
+  if not migration.executionConfirmed:
+    lines.add("execution not confirmed; committed state is unknown")
+  for status in migration.statuses:
+    var line = "status " & $status.version & " " & status.state & " " & status.name
+    if status.file.len > 0: line.add " " & status.file
+    lines.add line
+    for issue in status.issues:
+      lines.add "  issue " & issue.code & ": " & issue.message
   for step in migration.planned:
-    lines.add("planned " & (if step.direction == mdUp: "up" else: "down") & " " &
-      $step.version & " " & step.name)
+    lines.add("planned " & directionName(step.direction) & " " & $step.version & " " &
+      step.name)
+    for statement in step.statements: lines.add "  sql: " & statement.replace("\n", " ")
   for step in migration.executed:
-    lines.add("executed " & (if step.direction == mdUp: "up" else: "down") & " " &
-      $step.version & " " & step.name)
+    lines.add("executed " & directionName(step.direction) & " " & $step.version & " " &
+      step.name)
   for version in migration.skipped: lines.add("skipped " & $version)
-  for error in migration.errors: lines.add("error " & error.code & ": " & error.message)
-  lines.add("current version: " &
-    (if migration.currentVersion.isSome: $migration.currentVersion.get() else: "unknown"))
+  if migration.executionConfirmed:
+    lines.add("current version: " &
+      (if migration.currentVersion.isSome: $migration.currentVersion.get() else: "unknown"))
+    if migration.currentVersion.isSome and migration.pendingVersions.len > 0:
+      lines.add("pending versions: " & migration.pendingVersions.mapIt($it).join(", "))
+  for error in migration.errors:
+    var line = "error " & error.code & ": " & error.message
+    if error.version.isSome: line.add " (version " & $error.version.get() & ")"
+    if error.direction.isSome: line.add " [" & directionName(error.direction.get()) & "]"
+    if error.file.len > 0: line.add " " & error.file
+    lines.add line
   var destructive = false
   for step in migration.planned:
     if step.direction == mdDown: destructive = true

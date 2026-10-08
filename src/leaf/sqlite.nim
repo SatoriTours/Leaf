@@ -151,18 +151,26 @@ proc isHistoryName(value: cstring): bool =
 proc migrationGuardAuthorizer(context: pointer, action: cint, first, second,
     database, trigger: cstring): cint {.cdecl.} =
   ## Migration SQL must not control transactions, attach databases, flip
-  ## writable_schema, or create/mutate execution history. No exception may
+  ## writable_schema, or create/mutate execution history. Arguments are
+  ## action-specific: `first` is the object for table/view/insert/update/delete,
+  ## while index/trigger actions put the table in `second`. No exception may
   ## cross the C boundary.
   try:
-    case int(action)
+    let code = int(action)
+    case code
     of 22, 32: return 1          # TRANSACTION, SAVEPOINT
     of 24, 25: return 1          # ATTACH, DETACH
-    of 19:                       # PRAGMA (arg1 = name, arg2 = value)
+    of 19:                       # PRAGMA (arg1 = pragma name)
       if first != nil and ($first).toLowerAscii() == "writable_schema": return 1
     else: discard
-    if int(action) in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
-        18, 23, 26, 29, 30]:
+    case code
+    of 2, 3, 4, 5, 6, 8, 9, 11, 12, 13, 14, 15, 17, 18, 23, 26, 29, 30:
+      # CREATE_TABLE/CREATE_VIEW/DELETE/DROP_*/INSERT/UPDATE/ALTER_TABLE/...
+      if isHistoryName(first): return 1
+    of 1, 7, 10, 16:
+      # CREATE_INDEX, CREATE_TRIGGER, DROP_INDEX, DROP_TRIGGER
       if isHistoryName(first) or isHistoryName(second): return 1
+    else: discard
   except Exception:
     return 1
   0

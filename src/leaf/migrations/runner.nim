@@ -83,6 +83,13 @@ proc rollbackCurrent(db: Database) =
   except DatabaseError:
     discard
 
+proc enrichStep(error: ref MigrationError, step: MigrationStep,
+    definition: MigrationDefinition) =
+  ## Preserve existing attributes; fill in the selected step identity.
+  if error.migrationVersion.isNone: error.migrationVersion = some(step.version)
+  if error.file.len == 0: error.file = definition.sourcePath
+  if error.direction.isNone: error.direction = some(step.direction)
+
 proc pendingVersions(catalog: openArray[MigrationDefinition],
     history: openArray[MigrationRecord]): seq[int64] =
   var applied = initHashSet[int64]()
@@ -91,19 +98,35 @@ proc pendingVersions(catalog: openArray[MigrationDefinition],
     if definition.version notin applied: result.add definition.version
   result.sort()
 
+proc applyKnownState(outcome: var MigrationResult, catalog: openArray[MigrationDefinition],
+    history: openArray[MigrationRecord]) =
+  var highest = 0'i64
+  for record in history:
+    if record.version > highest: highest = record.version
+  outcome.currentVersion = some(highest)
+  outcome.pendingVersions = pendingVersions(catalog, history)
+
+proc readHistorySafe(db: Database, outcome: var MigrationResult):
+    tuple[ok: bool, history: seq[MigrationRecord]] =
+  ## Expected DB/read failures become report errors, not escapes.
+  try:
+    result.history = readMigrationHistory(db)
+    result.ok = true
+  except MigrationError as error:
+    outcome.errors.add issueFromError(error)
+  except DatabaseError as error:
+    outcome.errors.add MigrationIssue(code: "migration_history_unreadable",
+      message: error.msg)
+
 proc refreshState(db: Database, catalog: openArray[MigrationDefinition],
     outcome: var MigrationResult) =
+  ## Keep the last known state if a refresh fails; never report unknown as zero.
   try:
-    let history = readMigrationHistory(db)
-    var highest = 0'i64
-    for record in history:
-      if record.version > highest: highest = record.version
-    outcome.currentVersion = some(highest)
-    outcome.pendingVersions = pendingVersions(catalog, history)
+    applyKnownState(outcome, catalog, readMigrationHistory(db))
   except MigrationError:
-    # Unknown state is never reported as zero.
-    outcome.currentVersion = none(int64)
-    outcome.pendingVersions = @[]
+    discard
+  except DatabaseError:
+    discard
 
 proc checkSelectedCapabilities(db: Database, catalog: openArray[MigrationDefinition],
     plan: MigrationPlan) =
@@ -127,8 +150,8 @@ proc checkSelectedCapabilities(db: Database, catalog: openArray[MigrationDefinit
 proc prepareHistory(db: Database, catalog: openArray[MigrationDefinition],
     outcome: var MigrationResult): bool =
   ## One controlled transaction: create or upgrade the history before any step.
-  discard db.execute("BEGIN IMMEDIATE")
   try:
+    discard db.execute("BEGIN IMMEDIATE")
     discard createMigrationHistory(db)
     upgradeMigrationHistory(db, catalog)
     discard db.execute("COMMIT")
@@ -167,6 +190,7 @@ proc executePlan(db: Database, catalog: openArray[MigrationDefinition],
     try:
       cancelled = cancellationRequested(shouldCancel)
     except MigrationError as error:
+      enrichStep(error, step, definition)
       outcome.errors.add issueFromError(error)
       return
     if cancelled:
@@ -175,11 +199,15 @@ proc executePlan(db: Database, catalog: openArray[MigrationDefinition],
         version: some(step.version), file: definition.sourcePath,
         direction: some(step.direction))
       return
-    discard db.execute("BEGIN IMMEDIATE")
     var committed = false
     try:
+      discard db.execute("BEGIN IMMEDIATE")
       for statement in step.statements:
         executeMigrationScript(db, statement, shouldCancel)
+      # A short script can set the cancel flag without ever firing the progress
+      # handler; check again before the history write and COMMIT.
+      if cancellationRequested(shouldCancel):
+        raise migrationError("migration_cancelled", "migration was cancelled")
       if step.direction == mdUp:
         insertHistoryRow(db, table, definition)
       else:
@@ -189,10 +217,7 @@ proc executePlan(db: Database, catalog: openArray[MigrationDefinition],
       committed = true
     except MigrationError as error:
       rollbackCurrent(db)
-      if error.issueCode == "migration_cancelled":
-        error.migrationVersion = some(step.version)
-        error.file = definition.sourcePath
-        error.direction = some(step.direction)
+      enrichStep(error, step, definition)
       outcome.errors.add issueFromError(error)
       return
     except DatabaseError as error:
@@ -207,12 +232,22 @@ proc executePlan(db: Database, catalog: openArray[MigrationDefinition],
 proc runStatus(db: Database, catalog: openArray[MigrationDefinition],
     outcome: var MigrationResult) =
   ## Status on a supplied handle: inspection and report only, no lock or write.
+  ## Fatal history issues are promoted to errors (exit 1) while pending-template
+  ## and legacy-unverified-down stay non-fatal disclosures.
   try:
     let history = readMigrationHistory(db)
     outcome.statuses = inspectMigrationHistory(catalog, history)
-    refreshState(db, catalog, outcome)
+    applyKnownState(outcome, catalog, history)
+    for status in outcome.statuses:
+      for issue in status.issues:
+        if issue.code notin ["pending_template", "legacy_unverified_down"]:
+          outcome.errors.add issue
   except MigrationError as error:
     outcome.errors.add issueFromError(error)
+    outcome.currentVersion = none(int64)
+    outcome.pendingVersions = @[]
+  except DatabaseError as error:
+    outcome.errors.add MigrationIssue(code: "migration_history_unreadable", message: error.msg)
     outcome.currentVersion = none(int64)
     outcome.pendingVersions = @[]
 
@@ -240,13 +275,12 @@ proc runMigrations*(db: Database, catalog: openArray[MigrationDefinition],
     return
   var lock: FileLock
   try:
-    var plan: MigrationPlan
-    try:
-      plan = planMigrations(catalog, readMigrationHistory(db), request)
-      checkSelectedCapabilities(db, catalog, plan)
-    except MigrationError as error:
-      result.errors.add issueFromError(error)
-      return
+    # Read once before the lock so an unreadable history fails fast and the
+    # known state is available for later error reports.
+    let initial = readHistorySafe(db, result)
+    if not initial.ok: return
+    var history = initial.history
+    applyKnownState(result, catalog, history)
     let lockPath = migrationLockPath(db)
     if lockPath.len > 0:
       try:
@@ -254,9 +288,15 @@ proc runMigrations*(db: Database, catalog: openArray[MigrationDefinition],
       except MigrationError as error:
         result.errors.add issueFromError(error)
         return
+    # After the lock: re-read, revalidate and replan. The full selected-plan
+    # preflight still happens before any history or DDL mutation.
+    let locked = readHistorySafe(db, result)
+    if not locked.ok: return
+    history = locked.history
+    applyKnownState(result, catalog, history)
+    var plan: MigrationPlan
     try:
-      # Re-read, revalidate and replan after the lock: no stale pending reuse.
-      plan = planMigrations(catalog, readMigrationHistory(db), request)
+      plan = planMigrations(catalog, history, request)
       checkSelectedCapabilities(db, catalog, plan)
     except MigrationError as error:
       result.errors.add issueFromError(error)

@@ -6,6 +6,34 @@ import leaf/migrations
 
 proc cExit(code: cint) {.importc: "exit", header: "<stdlib.h>", noreturn.}
 
+when defined(windows):
+  const SQLiteLib = "winsqlite3.dll"
+elif defined(macosx):
+  const SQLiteLib = "libsqlite3.dylib"
+else:
+  const SQLiteLib = "libsqlite3.so(|.0)"
+
+type
+  SqlContext {.pure, inheritable.} = object
+  SqlArg {.pure, inheritable.} = object
+  ScalarFn = proc(context: ptr SqlContext, argc: cint, argv: ptr ptr SqlArg) {.cdecl.}
+
+proc createFunction(db: pointer, name: cstring, nArg, coding: cint, data: pointer,
+    scalar: ScalarFn, step, final, destroy: pointer): cint {.
+  cdecl, importc: "sqlite3_create_function_v2", dynlib: SQLiteLib.}
+proc returnInt(context: ptr SqlContext, value: cint) {.
+  cdecl, importc: "sqlite3_result_int", dynlib: SQLiteLib.}
+
+var barrierReady, barrierRelease: string
+
+proc barrierFunction(context: ptr SqlContext, argc: cint, argv: ptr ptr SqlArg) {.cdecl.} =
+  writeFile(barrierReady, "ready")
+  var waited = 0
+  while not fileExists(barrierRelease) and waited < 30000:
+    sleep(10)
+    waited += 10
+  returnInt(context, 1)
+
 proc createTableOp(table: string): SchemaOperation =
   SchemaOperation(kind: moCreateTable,
     tableSpec: TableSpec(name: table, hasId: true), tableDefinitionProvided: true)
@@ -36,6 +64,16 @@ proc slowCatalog(): seq[MigrationDefinition] =
     MigrationDefinition(version: 2, name: "002_big", sourcePath: "002_big.up.sql",
       sourceChecksum: sha256Text(slowSql), format: mfSqlV1,
       legacyUp: slowSql, hasDown: false)]
+
+proc barrierCatalog(): seq[MigrationDefinition] =
+  @[
+    MigrationDefinition(version: 1, name: "001_one", sourcePath: "001_one.up.sql",
+      sourceChecksum: sha256Text("CREATE TABLE one(id INTEGER);"), format: mfSqlV1,
+      legacyUp: "CREATE TABLE one(id INTEGER);"),
+    MigrationDefinition(version: 2, name: "002_two", sourcePath: "002_two.up.sql",
+      sourceChecksum: sha256Text("CREATE TABLE two AS SELECT barrier();"), format: mfSqlV1,
+      legacyUp: "CREATE TABLE two AS SELECT barrier();", legacyDown: "DROP TABLE two;",
+      hasDown: true)]
 
 proc main(): int =
   let command = paramStr(1)
@@ -78,6 +116,32 @@ proc main(): int =
     lock.release()
     echo "{}"
     result = 0
+    db.close()
+  of "migrate-barrier-catalog":
+    let db = openDatabase(paramStr(2))
+    let outcome = runMigrations(db, barrierCatalog(), MigrationRequest(kind: mrMigrate))
+    echo $resultJson(outcome)
+    result = resultExitCode(outcome)
+    db.close()
+  of "rollback-barrier":
+    let db = openDatabase(paramStr(2))
+    let outcome = runMigrations(db, barrierCatalog(),
+      MigrationRequest(kind: mrRollback, steps: parseInt(paramStr(3))))
+    echo $resultJson(outcome)
+    result = resultExitCode(outcome)
+    db.close()
+  of "migrate-barrier":
+    barrierReady = paramStr(3)
+    barrierRelease = paramStr(4)
+    let db = openDatabase(paramStr(2))
+    if createFunction(db.borrowSqliteHandle(), "barrier", 0, 1, nil, barrierFunction,
+        nil, nil, nil) != 0:
+      stderr.writeLine("cannot register barrier")
+      result = 2
+    else:
+      let outcome = runMigrations(db, barrierCatalog(), MigrationRequest(kind: mrMigrate))
+      echo $resultJson(outcome)
+      result = resultExitCode(outcome)
     db.close()
   else:
     stderr.writeLine("unknown command: " & command)

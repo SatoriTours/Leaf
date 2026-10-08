@@ -171,15 +171,26 @@ suite "migration locking fix round 1":
             var status: cint
             discard posix.waitpid(Pid(childPid), status, 0)
 
-proc runFixture(binary: string, args: seq[string]): tuple[code: int, data: JsonNode] =
-  let process = startProcess(binary, args = args, options = {poStdErrToStdOut})
-  let output = process.outputStream.readAll()
+proc startFixture(binary: string, args: seq[string]): Process =
+  startProcess(binary, args = args, options = {poStdErrToStdOut})
+
+proc finishFixture(process: Process): tuple[code: int, data: JsonNode] =
   result.code = process.waitForExit()
+  let output = process.outputStream.readAll()
   process.close()
   result.data = newJNull()
   for line in output.splitLines():
     let trimmed = line.strip()
     if trimmed.startsWith("{"): result.data = parseJson(trimmed)
+
+proc runFixture(binary: string, args: seq[string]): tuple[code: int, data: JsonNode] =
+  finishFixture(startFixture(binary, args))
+
+let fixtureBuild = block:
+  let tools = base / "migration-tools"
+  writeProbeFiles(tools, @[("fixture.nim",
+    readFile(currentSourcePath().parentDir / "migration_process_fixture.nim"))])
+  buildProbe(tools, "fixture.nim", base / "migration-tools-cache", "fixture")
 
 proc fastV1(): MigrationDefinition =
   let up = SchemaOperation(kind: moCreateTable,
@@ -229,10 +240,7 @@ suite "database migration locks":
       check failure.code == "lock_path_error"
 
   test "real migration processes serialize, replan and recover":
-    let tools = base / "migration-tools"
-    writeProbeFiles(tools, @[("fixture.nim",
-      readFile(currentSourcePath().parentDir / "migration_process_fixture.nim"))])
-    let fixture = buildProbe(tools, "fixture.nim", base / "migration-tools-cache", "fixture")
+    let fixture = fixtureBuild
     check fixture.code == 0
     if fixture.code != 0:
       checkpoint(fixture.output)
@@ -348,3 +356,103 @@ suite "database migration locks":
           check aliased.data["errors"][0]["code"].getStr == "concurrent_migration"
         finally:
           stopChild(aliasHolder)
+
+when compileOption("threads"):
+  proc threadWorker(arg: tuple[db: pointer, flag: ptr int]) {.thread.} =
+    # Controlled negative test: the owner's ref stays alive through join, so
+    # requireUsable must reject before any SQL or callback runs.
+    {.cast(gcsafe).}:
+      let outcome = runMigrations(cast[Database](arg.db), newSeq[MigrationDefinition](),
+        MigrationRequest(kind: mrMigrate))
+      if outcome.errors.len == 1 and outcome.errors[0].code == "database_unusable":
+        arg.flag[] = 1
+
+suite "simultaneous migration runners":
+  test "overlapping batches wait, then replan after the active runner commits":
+    let fixture = fixtureBuild
+    check fixture.code == 0
+    if fixture.code == 0:
+      for rollbackMode in [false, true]:
+        let dbPath = base / (if rollbackMode: "sim-rollback.sqlite3" else: "sim-migrate.sqlite3")
+        let ready = base / "sim-ready"
+        let release = base / "sim-release"
+        for path in [dbPath, dbPath & "-wal", dbPath & "-shm",
+            dbPath & ".leaf-migrate.lock", ready, release]:
+          removeFile(path)
+        let first = startFixture(fixture.binary,
+          @["migrate-barrier", dbPath, ready, release])
+        var second: Process
+        var firstDone = false
+        var secondDone = false
+        try:
+          check waitForMarker(ready)
+          second = startFixture(fixture.binary,
+            (if rollbackMode: @["rollback-barrier", dbPath, "1"]
+             else: @["migrate-barrier-catalog", dbPath]))
+          sleep(250)
+          # The second batch waits; no step-2 DDL/history exists mid-batch.
+          check second.peekExitCode() == -1
+          let observer = openDatabase(dbPath)
+          check readMigrationHistory(observer).mapIt(it.version) == @[1'i64]
+          check observer.query(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'two'")[0][0].asInt == 0
+          observer.close()
+          writeFile(release, "go")
+          let firstOutcome = finishFixture(first)
+          firstDone = true
+          let secondOutcome = finishFixture(second)
+          secondDone = true
+          check firstOutcome.code == 0
+          check firstOutcome.data["executed"].len == 2
+          check secondOutcome.code == 0
+          if rollbackMode:
+            check secondOutcome.data["executed"].len == 1
+            check secondOutcome.data["executed"][0]["version"].getStr == "2"
+            check secondOutcome.data["executed"][0]["direction"].getStr == "down"
+          else:
+            check secondOutcome.data["executed"].len == 0
+            check secondOutcome.data["current_version"].getStr == "2"
+        finally:
+          if not firstDone: stopChild(first)
+          if second != nil and not secondDone: stopChild(second)
+
+  when defined(posix):
+    test "the lock deadline holds under a signal storm":
+      let fixture = fixtureBuild
+      check fixture.code == 0
+      if fixture.code == 0:
+        let dbPath = base / "storm.sqlite3"
+        let marker = base / "storm-marker"
+        removeFile(dbPath & ".leaf-migrate.lock")
+        removeFile(marker)
+        let holder = startFixture(fixture.binary, @["hold", dbPath, marker, "8000"])
+        var waiter: Process
+        var waiterDone = false
+        try:
+          check waitForMarker(marker)
+          waiter = startFixture(fixture.binary, @["migrate", dbPath])
+          let started = getMonoTime()
+          while waiter.peekExitCode() == -1 and
+              (getMonoTime() - started).inMilliseconds < 9000:
+            discard posix.kill(Pid(waiter.processID), SIGCHLD)
+            sleep(20)
+          let outcome = finishFixture(waiter)
+          waiterDone = true
+          check outcome.code == 1
+          check outcome.data["errors"][0]["code"].getStr == "concurrent_migration"
+          check (getMonoTime() - started).inMilliseconds < 9500
+        finally:
+          if waiter != nil and not waiterDone: stopChild(waiter)
+          stopChild(holder)
+
+  when compileOption("threads"):
+    test "a database owned by another thread is rejected":
+      let db = openDatabase(":memory:")
+      var flag = 0
+      var thread: Thread[tuple[db: pointer, flag: ptr int]]
+      createThread(thread, threadWorker, (cast[pointer](db), addr flag))
+      joinThread(thread)
+      check flag == 1
+      check not db.isMigrationRunnerActive
+      check db.query("SELECT count(*) FROM sqlite_master")[0][0].asInt == 0
+      db.close()
