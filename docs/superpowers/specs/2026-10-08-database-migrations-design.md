@@ -2,7 +2,7 @@
 
 日期：2026-10-08
 
-状态：对话方案已确认，本文待用户审阅；尚未开始产品代码实现。
+状态：2026-10-08 用户确认按本方案开发；实施计划待审阅，尚未开始产品代码实现。
 
 ## 1. 意图、已确认要求与边界
 
@@ -188,7 +188,7 @@ Nim 模块创建、删除、重命名必须在重新编译时改变目录清单�
 
 文件数据库使用数据库规范路径旁的持久锁文件 `<database>.leaf-migrate.lock`，通过 POSIX `flock` / Windows `LockFileEx` 持有整次修改命令的排他锁；文件是否存在不表示持锁，进程退出由 OS 自动释放锁。锁文件不在释放时删除，防止不同 inode 产生双锁。锁等待最多 5 秒，超时明确报告 `concurrent_migration`。锁覆盖所有新维护方向与新应用启动入口；每条步骤仍用 SQLite 写事务。符号链接路径按实际数据库文件（或创建前的规范父目录）统一定位锁。硬链接数据库多路径访问不支持，也不宣传为安全并发用法。
 
-`:memory:` 不创建磁盘锁文件，只防止同连接重入；连接仍须满足已有线程归属约束。新执行器不能劫持既有事务或 authorizer。旧版本程序没有此命令级锁，不承诺新旧执行器混跑的整批互斥；其 SQLite 写事务仍保护单条迁移。
+`:memory:` 不创建磁盘锁文件，只防止同连接重入；连接仍须满足已有线程归属约束。新执行器不能劫持既有事务或框架管理的 authorizer/progress handler。SQLite 没有读取已注册 callback 的 API，因此通过借用裸句柄直接注册外部 authorizer/progress handler 再调用迁移不属于受支持组合；不能假装能获取并恢复这种外部状态。旧版本程序没有此命令级锁，不承诺新旧执行器混跑的整批互斥；其 SQLite 写事务仍保护单条迁移。
 
 ## 9. 当前项目 CLI 的完整协议
 
@@ -269,9 +269,11 @@ leaf db status [--json]
 
 状态包括 up/down、pending-template、modified、missing、legacy-unverified-down；状态报告检测到损坏历史时返回失败状态而非假装数据库可安全迁移。
 
-`--json` 在 stdout 只输出一个对象（含 command、database、dry_run、planned、executed、skipped、current_version、pending_versions、errors），版本是十进制字符串，避免超过 JavaScript 安全整数。错误含稳定 code、message、version、file、direction；编译日志和人类诊断走 stderr。没有 JSON 选项的命令仍输出简洁人类文本。
+`--json` 在 stdout 只输出一个对象（含 command、database、dry_run、execution_confirmed、planned、executed、skipped、current_version、pending_versions、errors），版本是十进制字符串，避免超过 JavaScript 安全整数。历史尚未读取成功时 current_version/pending_versions 为 null，不把未知状态说成零；强制中断无法确认执行状态时 execution_confirmed=false、executed 为 null，不用空数组冒充没有提交。错误含稳定 code、message、version、file、direction；编译日志和人类诊断走 stderr。没有 JSON 选项的命令仍输出简洁人类文本。
 
 正常/无操作退出 0，参数/编译/历史/SQLite/锁失败退出 1，中断退出 130。停止时撤销当前事务并释放锁；已提交步骤在报告中可见，不能让 AI 因错误输出误以为全部未执行而重复创建。
+
+维护 child 使用 target 下的每次运行唯一取消 token，通过步骤检查及 SQLite progress handler 优雅中止 SQL；不依赖 Windows 控制台信号。父 CLI 中断后允许最多10秒退出并获取报告；若仍需强制终止，输出 `interrupted_unconfirmed` 并要求 status 核验，不虚构已提交列表或声称全部未执行。该检查仅存在于维护执行范围，普通 CRUD 不安装迁移进度回调。
 
 ## 12. 多分支开发协议
 
