@@ -159,3 +159,62 @@ suite "Native controlled editor state machine":
     check emojiEffects.len == 1
     check emojiEffects[0].selection.caret == 2
     check emojiEffects[0].selection.anchor == 2
+  test "composition end followed by a newer normal edit keeps the latest accepted":
+    var state = newEditorState(textValue(""))
+    state.observeEditor(textValue("a"), compositionUpdate,
+      Selection16(anchor: 1, caret: 1), 1)
+    state.acceptModel(textValue("A"), 1)
+    check state.conflict.get.text == "A"
+    state.observeEditor(textValue("a"), compositionEnd,
+      Selection16(anchor: 1, caret: 1), 2)
+    state.observeEditor(textValue("ab"), compositionNone,
+      Selection16(anchor: 2, caret: 2), 3)
+    # The older End candidate is settled first and must not setter.
+    state.acceptModel(textValue("A"), 2)
+    check state.settleEditor(2).len == 0
+    # The newer normal edit is the authoritative accepted value.
+    state.acceptModel(textValue("AB"), 3)
+    let effects = state.settleEditor(3)
+    check state.accepted.text == "AB"
+    check effects.len == 1
+    check effects[0].kind == setText
+    check effects[0].value.text == "AB"
+
+  test "outstanding reset token watermark never regresses":
+    var state = newEditorState(textValue("same"))
+    state.acceptModel(textValue("same"), 1, some(2'u64))
+    check state.pendingReset.get == 2
+    # Same, lower, zero and removed tokens never lower an outstanding request.
+    state.acceptModel(textValue("same"), 2, some(2'u64))
+    check state.pendingReset.get == 2
+    state.acceptModel(textValue("same"), 3, some(1'u64))
+    check state.pendingReset.get == 2
+    state.acceptModel(textValue("same"), 4, some(0'u64))
+    check state.pendingReset.get == 2
+    state.acceptModel(textValue("same"), 5, none(uint64))
+    check state.pendingReset.get == 2
+    check state.resetEffects().len == 3
+    # Completing a non-outstanding token does not consume it.
+    state.completeReset(1)
+    check state.consumedResetToken == 0
+    check state.resetEffects().len == 3
+    state.completeReset(2)
+    check state.consumedResetToken == 2
+    check state.resetEffects().len == 0
+    # A consumed token never repeats; a genuinely higher token resets again.
+    state.acceptModel(textValue("same"), 6, some(2'u64))
+    check state.resetEffects().len == 0
+    state.acceptModel(textValue("same"), 7, some(3'u64))
+    check state.resetEffects().len == 3
+    state.completeReset(3)
+    check state.consumedResetToken == 3
+
+  test "common prefix still clamps surrogate boundaries":
+    var state = newEditorState(textValue("\u{1F603}"))
+    state.observeEditor(textValue("\u{1F600}x"), compositionNone,
+      Selection16(anchor: 1, caret: 1), 1)
+    state.acceptModel(textValue("\u{1F603}"), 1)
+    let effects = state.settleEditor(1)
+    check effects.len == 1
+    check effects[0].selection.anchor == 0
+    check effects[0].selection.caret == 0

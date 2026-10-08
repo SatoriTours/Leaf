@@ -246,3 +246,42 @@ suite "Native reset token signal":
     check lazy.attributes["bogus"] == "1"
     expect UiError:
       discard normalizeProps(lazy)
+
+suite "Native reset token grammar and lazy materialization":
+  test "reset token grammar is strictly unsigned decimal":
+    proc rejectsToken(raw: string): bool =
+      try:
+        discard normalizeProps(ui(NodeKind.input,
+          attributes = style({"input_reset_token": raw})))
+        false
+      except UiError:
+        true
+    for raw in ["+1", "1_0", "1_", " 1", "1 ", "0x1", "-1", "1.0", "",
+                "18446744073709551616"]:
+      check rejectsToken(raw)
+    check not rejectsToken("0")
+    check not rejectsToken("1")
+    check not rejectsToken($high(uint64))
+    check normalizeProps(input("v", resetToken = high(uint64))).control.resetToken.get ==
+      high(uint64)
+
+  test "lazy row materialization rejects illegal reset tokens":
+    var items = @["a"]
+    proc render(ctx: BuildContext): Node =
+      column(@[virtualList("list", items, proc(index: int): Node =
+        ui(NodeKind.input, text = "v",
+          attributes = style({"input_reset_token": "+1"})))], key = "root")
+    let runtime = newRuntime(Application(title: "lazy", width: 320, height: 200,
+      render: render), validator = proc(snapshot: Snapshot) = validateProps(snapshot.root))
+    # The illegal attribute is not validated until the row is materialized.
+    expect UiError:
+      discard runtime.materialize("list", 0, 1)
+
+  test "lazy row materialization accepts a valid reset token":
+    var items = @["a"]
+    proc render(ctx: BuildContext): Node =
+      column(@[virtualList("list", items, proc(index: int): Node =
+        input("v", key = "row", resetToken = 7))], key = "root")
+    let runtime = newRuntime(Application(title: "lazy", width: 320, height: 200,
+      render: render), validator = proc(snapshot: Snapshot) = validateProps(snapshot.root))
+    check runtime.materialize("list", 0, 1).len == 1

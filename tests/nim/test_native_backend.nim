@@ -1451,3 +1451,65 @@ suite "Recording backend sessions":
     session.drainEvents()
     check count == 1
     check runtime.find("count").node.text == "1"
+
+  test "failed install never publishes accepted and a retry does":
+    var model = "a"
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        input(model, key = "field", onChange = proc(e: Event) = model = e.value),
+        button("go", key = "go", onClick = proc(e: Event) = model = "b")], key = "root")
+
+    let runtime = newRuntime(app(render))
+    let recording = newRecordingBackend(fullCapabilities())
+    var acceptedCalls = 0
+    recording.backend.accepted = proc(entities: Table[NodeHandle, MountedEntity],
+                                      revision: uint64) = inc acceptedCalls
+    recording.failApply = true
+    expect UiError:
+      discard attachBackend(runtime, recording.backend, makeHost())
+    check acceptedCalls == 0
+    check recording.disposeCalls == 1
+
+    let retry = newRecordingBackend(fullCapabilities())
+    var retryAccepted = 0
+    retry.backend.accepted = proc(entities: Table[NodeHandle, MountedEntity],
+                                  revision: uint64) = inc retryAccepted
+    let session = attachBackend(runtime, retry.backend, makeHost())
+    check retryAccepted == 1
+    dispose(session)
+
+  test "install Scope post-error never publishes accepted and retry confirms once":
+    var failExit = false
+    var depth = 0
+    proc scope(body: proc() {.closure.}) =
+      inc depth
+      try: body()
+      finally: dec depth
+      if failExit and depth == 0:
+        failExit = false
+        raise newException(UiError, "installation scope exit failed")
+    var items = @["a", "b"]
+    proc render(ctx: BuildContext): Node =
+      column(@[virtualList("items", items, proc(index: int): Node =
+        text(items[index], key = "row"))], key = "root")
+    let runtime = newRuntime(Application(title: "install", width: 640, height: 480,
+      render: render, executionScope: scope))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    var acceptedCalls = 0
+    recording.backend.accepted = proc(entities: Table[NodeHandle, MountedEntity],
+                                      revision: uint64) = inc acceptedCalls
+
+    failExit = true
+    expect UiError:
+      discard runtime.installPreparer(proc(candidate: Runtime) =
+        discard candidate.materialize("items", 0, 2))
+    check acceptedCalls == 0
+    check session.acceptedEntities == recording.entities
+
+    # Retrying the same install confirms and notifies accepted exactly once.
+    discard runtime.installPreparer(proc(candidate: Runtime) =
+      discard candidate.materialize("items", 0, 2))
+    check acceptedCalls == 1
+    check session.acceptedEntities == recording.entities
+    dispose(session)

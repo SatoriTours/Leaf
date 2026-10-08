@@ -48,17 +48,11 @@ proc toUnits(text: string): seq[uint16] =
 
 proc utf16Len(text: string): int = toUnits(text).len
 
-proc commonPrefix16(a, b: string): int =
-  let left = toUnits(a)
-  let right = toUnits(b)
-  var index = 0
-  while index < left.len and index < right.len and left[index] == right[index]:
-    inc index
-  index
-
 proc clampPos(pos, limit: int, units: seq[uint16]): int =
   ## Clamp a UTF-16 position to the new text boundary without splitting a
-  ## surrogate pair.
+  ## surrogate pair. Applied to every position, including ones inside the
+  ## common prefix, so a shared high surrogate can never leave the caret in
+  ## the middle of a pair.
   result = max(0, min(pos, limit))
   if result > 0 and result < units.len and
       units[result] >= 0xDC00'u16 and units[result] <= 0xDFFF'u16:
@@ -66,13 +60,12 @@ proc clampPos(pos, limit: int, units: seq[uint16]): int =
 
 proc clampSelection(selection: Selection16, fromText, toText: string): Selection16 =
   ## Positions inside the common prefix are preserved; the rest clamp to the
-  ## new text boundary.
-  let common = commonPrefix16(fromText, toText)
+  ## new text boundary. Every position still passes the UTF-16 boundary check.
+  discard fromText
   let units = toUnits(toText)
   let limit = units.len
-  proc adjust(pos: int): int =
-    if pos <= common: max(0, pos) else: clampPos(pos, limit, units)
-  Selection16(anchor: adjust(selection.anchor), caret: adjust(selection.caret))
+  Selection16(anchor: clampPos(selection.anchor, limit, units),
+    caret: clampPos(selection.caret, limit, units))
 
 proc newEditorState*(accepted: ControlValue): EditorState =
   ## Fresh editor state: native mirrors the accepted value, no composition,
@@ -104,10 +97,19 @@ proc acceptModel*(s: var EditorState, value: ControlValue, revision: uint64,
   ## calls this, so the previous conflict and reset token are preserved.
   s.accepted = value
   s.acceptedRevision = revision
-  if s.phase != compositionNone:
-    if value != s.native: s.conflict = some(value)
-    else: s.conflict = none(ControlValue)
-  if resetToken.isSome and resetToken.get > s.consumedResetToken:
+  # A successful accept outside composition makes the latest accepted value
+  # authoritative: any older composition conflict must not override it.
+  if s.phase == compositionNone:
+    s.conflict = none(ControlValue)
+  elif value != s.native:
+    s.conflict = some(value)
+  else:
+    s.conflict = none(ControlValue)
+  # The outstanding reset request is monotonic too: a lower, same, zero or
+  # removed token must never lower a token that was already accepted but not
+  # yet executed.
+  if resetToken.isSome and resetToken.get > s.consumedResetToken and
+      (s.pendingReset.isNone or resetToken.get > s.pendingReset.get):
     s.pendingReset = resetToken
 
 proc settleEditor*(s: var EditorState, sequence: uint64): seq[EditEffect] =
@@ -119,7 +121,7 @@ proc settleEditor*(s: var EditorState, sequence: uint64): seq[EditEffect] =
   s.lastSettled = sequence
   if s.phase in {compositionStart, compositionUpdate, compositionResult}:
     return
-  if s.conflict.isSome:
+  if s.phase == compositionEnd and s.conflict.isSome:
     let value = s.conflict.get
     s.conflict = none(ControlValue)
     if value.isCheck or s.native.isCheck:

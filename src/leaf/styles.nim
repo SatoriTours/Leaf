@@ -252,9 +252,13 @@ proc attributeAllowed(kind: NodeKind, name: string): bool =
   else: false
 
 proc parseResetToken(value: string): uint64 =
-  ## Reset tokens are unsigned decimal integers in 0..high(uint64). They are
-  ## deliberately not parsed through the float style path: negatives, floats,
-  ## non-digits and overflow are rejected.
+  ## Reset tokens are unsigned decimal integers in 0..high(uint64). The raw
+  ## attribute grammar is checked digit by digit: `parseBiggestUInt` alone
+  ## would also accept `+1`, `1_0` or `1_`, which are not valid decimal text.
+  ## They are deliberately not parsed through the float style path either.
+  if value.len == 0: fail("invalid input reset token: " & value)
+  for c in value:
+    if c notin {'0'..'9'}: fail("invalid input reset token: " & value)
   try:
     result = uint64(parseBiggestUInt(value))
   except ValueError:
