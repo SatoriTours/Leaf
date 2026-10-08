@@ -73,7 +73,9 @@ proc loadManifest(root: string): ScaffoldManifest =
   let path = guardedPath(root, ManifestPath)
   if not fileExists(path):
     fail("resource generation needs a scaffold application; create one in the current directory")
-  result = readCanonicalManifest(parseFile(path))
+  let document = parseFile(path)
+  result = readCanonicalManifest(document)
+  result.document = document
   checkManifestSources(root, result.resources, result.schema != 3,
     (if result.schema != 3: 1 else: 0))
   for file in [ScaffoldFile(path: PagesPath, content: pageRegistry(result.resources, result.modelSchema)),
@@ -133,7 +135,8 @@ proc resourcePlan(root, name: string, loaded: ScaffoldManifest,
   resources.add(resource)
   for file in [ScaffoldFile(path: PagesPath, content: pageRegistry(resources, loaded.modelSchema)),
       ScaffoldFile(path: RoutesPath, content: routeRegistry(resources)),
-      ScaffoldFile(path: ManifestPath, content: manifest(resources, loaded.modelSchema))]:
+      ScaffoldFile(path: ManifestPath,
+        content: appendedManifestSource(loaded.document, resource, loaded.modelSchema))]:
     var updated = file
     updated.update = true
     updated.previous = readFile(guardedPath(root, file.path))

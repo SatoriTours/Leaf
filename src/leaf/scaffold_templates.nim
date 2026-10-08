@@ -254,3 +254,23 @@ proc upgradedManifestSource*(value: JsonNode): string =
   for entry in upgraded["resources"]:
     entry["migration"] = %($entry["migration"].getInt)
   pretty(upgraded) & "\n"
+
+proc appendedManifestSource*(document: JsonNode, resource: ResourceSpec,
+    modelSchema: int): string =
+  ## Lossless append: deep-copy the existing manifest so allowed root and
+  ## per-resource metadata survives, and change only the required
+  ## representation (schema revision, model schema and decimal versions).
+  if document.kind != JObject: fail("invalid scaffold manifest")
+  var value = copy(document)
+  value["schema"] = %ScaffoldSchema
+  value["model_schema"] = %modelSchema
+  if modelSchema == 2:
+    value["model_api"] = %1
+    value["timestamps"] = %true
+  for entry in value["resources"]:
+    if entry["migration"].kind == JInt: entry["migration"] = %($entry["migration"].getInt)
+  var fields = newJArray()
+  for field in resource.fields: fields.add(%*{"name": field.name, "type": field.kind})
+  value["resources"].add(%*{"model": resource.model, "singular": resource.singular,
+    "fields": fields, "migration": $resource.migration})
+  pretty(value) & "\n"

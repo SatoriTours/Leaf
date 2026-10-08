@@ -156,6 +156,70 @@ else: doAssert false
     check leaf_cli.main(@["g", "scaffold", "Note", "title:string", "--project", minimal]) == 1
     check files(minimal) == minimalBefore
 
+  test "existing directories, .git and unrelated files survive generation":
+    let app = base / "preexisting"
+    createDir(app / ".git")
+    writeFile(app / ".git" / "config", "[core]\n")
+    createDir(app / "src" / "nested")
+    writeFile(app / "src" / "notes.txt", "unrelated\n")
+    writeFile(app / "keep.me", "keep\n")
+    require runCliIn(app, @["g", "scaffold"]) == 0
+    check readFile(app / ".git" / "config") == "[core]\n"
+    check readFile(app / "src" / "notes.txt") == "unrelated\n"
+    check readFile(app / "keep.me") == "keep\n"
+    check dirExists(app / "src" / "nested")
+
+  test "multiple conflicts are reported together before any write":
+    let root = base / "conflict-message"
+    createDir(root)
+    writeFile(root / "a.nim", "a")
+    writeFile(root / "b.nim", "b")
+    let plan = @[ScaffoldFile(path: "a.nim", content: "x"),
+      ScaffoldFile(path: "b.nim", content: "y")]
+    var message = ""
+    try: writePlan(root, plan, false)
+    except CatchableError as error: message = error.msg
+    check "a.nim" in message
+    check "b.nim" in message
+    check readFile(root / "a.nim") == "a"
+    check readFile(root / "b.nim") == "b"
+    # The same aggregation holds for an application scaffold over edited files.
+    let app = base / "two-conflicts"
+    createDir(app)
+    require runCliIn(app, @["g", "scaffold"]) == 0
+    writeFile(app / "config/routes.nim", "# edited routes\n")
+    writeFile(app / "db/catalog.nim", "# edited catalog\n")
+    let before = files(app)
+    check runCliIn(app, @["g", "scaffold"]) == 1
+    check files(app) == before
+
+  test "untouched minimal init upgrades in place and mutations are refused":
+    let app = base / "minimal-upgrade"
+    initProject(app)
+    let srcMain = readFile(app / "src/main.nim")
+    let srcApp = readFile(app / "src/app.nim")
+    require runCliIn(app, @["g", "scaffold"]) == 0
+    check readFile(app / "src/main.nim") == srcMain
+    check readFile(app / "src/app.nim") == srcApp
+    for target in ["leaf.json", "src/main.nim", "src/app.nim", "assets/message.txt"]:
+      let root = base / ("minimal-" & target.replace("/", "-"))
+      initProject(root)
+      writeFile(root / target, readFile(root / target) & "\n# edited\n")
+      let before = files(root)
+      check runCliIn(root, @["g", "scaffold"]) == 1
+      check files(root) == before
+
+  test "failed writes retain pre-existing empty directories":
+    let root = base / "retain-dirs"
+    createDir(root / "app/pages/notes")
+    let plan = @[
+      ScaffoldFile(path: "app/pages/notes/page.nim", content: "page"),
+      ScaffoldFile(path: "new/" & repeat('y', 300) & ".nim", content: "cannot")]
+    expect IOError: writePlan(root, plan, false)
+    check dirExists(root / "app/pages/notes")
+    check not fileExists(root / "app/pages/notes/page.nim")
+    check not dirExists(root / "new")
+
   test "damaged manifests route edits and unregistered files never get overwritten":
     let app = base / "damaged"
     require runCliIn(app, @["g", "scaffold"]) == 0

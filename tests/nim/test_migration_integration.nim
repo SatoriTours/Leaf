@@ -26,6 +26,13 @@ proc boundedChild(exe: string, args: seq[string], dir: string,
   finally:
     child.close()
 
+proc finishBounded(child: ManagedProcess, seconds = 900): int =
+  let deadline = getMonoTime() + initDuration(seconds = seconds)
+  while not child.poll():
+    if getMonoTime() > deadline: return 124
+    sleep(10)
+  child.code
+
 proc nimArgs(source, outPath, srcRoot, cache: string): seq[string] =
   @["c", "-r", "--hints:off", "--path:" & srcRoot, "--nimcache:" & cache,
     "--out:" & outPath, source]
@@ -88,15 +95,11 @@ suite "database initialization":
     writeFile(app / "tests/staged_check.nim",
       "import std/os\nimport ../db/catalog\nimport ../config/database\ndoAssert applicationMigrations().len == 2\n" &
       "doAssert not fileExists(\"target/staged.sqlite3\")\necho \"catalog ok\"\n")
-    let child = startProcess(compiler(), workingDir = app,
-      args = @["c", "-r", "--hints:off", "--path:" & source,
-        "--nimcache:" & app / "target/cache", "--out:" & binary, app / "tests/staged_check.nim"],
-      options = {poUsePath, poStdErrToStdOut})
-    let output = child.outputStream.readAll()
-    let code = child.waitForExit()
-    child.close()
-    check code == 0
-    check "catalog ok" in output
+    let staged = boundedChild(compiler(), nimArgs(app / "tests/staged_check.nim",
+      binary, source, app / "target/cache"), app)
+    checkpoint staged.output
+    check staged.code == 0
+    check "catalog ok" in staged.output
     check not fileExists(app / "target/staged.sqlite3")
 
 suite "legacy project integration":
@@ -142,16 +145,11 @@ echo "legacy ok"
     let source = currentSourcePath().parentDir.parentDir.parentDir / "src"
     let binary = app / "target/legacy-check"
     createDir(binary.parentDir)
-    let child = startProcess(compiler(), workingDir = app,
-      args = @["c", "-r", "--hints:off", "--path:" & source,
-        "--nimcache:" & app / "target/lc-cache", "--out:" & binary,
-        app / "tests/legacy_check.nim"], options = {poUsePath, poStdErrToStdOut})
-    let output = child.outputStream.readAll()
-    let code = child.waitForExit()
-    child.close()
-    checkpoint output
-    check code == 0
-    check "legacy ok" in output
+    let legacy = boundedChild(compiler(), nimArgs(app / "tests/legacy_check.nim",
+      binary, source, app / "target/lc-cache"), app)
+    checkpoint legacy.output
+    check legacy.code == 0
+    check "legacy ok" in legacy.output
 
 suite "concurrent resource generation":
   test "two processes share one generation lock and keep both resources":
@@ -170,16 +168,14 @@ echo "ok"
       let app = base / "concurrent"
       createDir(app)
       discard generateScaffold(ScaffoldOptions(mode: smApplication), app)
-      let first = startProcess(worker.binary, args = @[app, "Alpha"],
-        options = {poStdErrToStdOut})
-      let second = startProcess(worker.binary, args = @[app, "Beta"],
-        options = {poStdErrToStdOut})
+      let first = startManaged(worker.binary, @[app, "Alpha"], app)
+      let second = startManaged(worker.binary, @[app, "Beta"], app)
       try:
-        check first.waitForExit() == 0
-        check second.waitForExit() == 0
+        check finishBounded(first) == 0
+        check finishBounded(second) == 0
       finally:
-        stopChild(first)
-        stopChild(second)
+        first.close()
+        second.close()
       let manifest = parseFile(app / ".leaf/scaffold.json")
       var names: seq[string]
       for entry in manifest["resources"]: names.add(entry["model"].getStr)
@@ -304,6 +300,10 @@ import std/strutils
 import leaf/sqlite
 import ../config/database
 import ../db/catalog
+import ../app/models/audit as audit_model
+import ../app/services/audit_service
+import ../app/models/event as event_model
+import ../app/services/event_service
 
 let db = openApplicationDatabase(":memory:")
 let audits = db.query("SELECT sql FROM sqlite_master WHERE name='audits'")[0][0].asString
@@ -313,13 +313,29 @@ for row in db.query("PRAGMA table_info(audits)"): names.add row[1].asString
 doAssert "createdAt" in names, $names
 doAssert "created_at" notin names, $names
 doAssert "updated_at" notin names, $names
-discard db.execute("INSERT INTO audits (createdAt) VALUES (?)", [dbValue("2024-01-01")])
-doAssert db.query("SELECT createdAt FROM audits")[0][0].asString == "2024-01-01"
-var eventNames: seq[string]
-for row in db.query("PRAGMA table_info(events)"): eventNames.add row[1].asString
-doAssert "created_at" in eventNames, $eventNames
-discard db.execute("INSERT INTO events (created_at) VALUES (?)", [dbValue("2024-02-02")])
-doAssert db.query("SELECT created_at FROM events")[0][0].asString == "2024-02-02"
+# Real generated service CRUD and validation.
+let service = newAuditService(db)
+var rejected = false
+try: discard service.save(audit_model.Audit(createdAt: "   "))
+except audit_model.AuditValidationError: rejected = true
+doAssert rejected, "empty string must fail generated validation"
+var created = service.save(audit_model.Audit(createdAt: "  2024-01-01  "))
+doAssert created.id > 0, "AUTOINCREMENT id"
+doAssert created.createdAt == "2024-01-01", created.createdAt
+doAssert service.all().len == 1
+var found = service.find(created.id)
+found.createdAt = "2024-01-02"
+discard service.save(found)
+doAssert service.find(created.id).createdAt == "2024-01-02"
+service.delete(created.id)
+doAssert service.all().len == 0
+# The underscore spelling is an ordinary field on its own model and service.
+let events = newEventService(db)
+var event = events.save(event_model.Event(created_at: "2024-02-02"))
+doAssert event.created_at == "2024-02-02"
+doAssert events.find(event.id).created_at == "2024-02-02"
+events.delete(event.id)
+doAssert events.all().len == 0
 db.close()
 echo "schema1 ok"
 """)
@@ -510,6 +526,26 @@ echo "caller ok"
     check fileExists(app / "target/leaf-migration-generation.lock")
     check initializeDatabaseProject(readProject(app)) == @["initialized " & app]
 
+  test "resource generation preserves allowed manifest metadata":
+    let app = base / "f6-metadata"
+    createDir(app)
+    discard generateScaffold(ScaffoldOptions(mode: smApplication), app)
+    discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Note",
+      fields: @["title:string"]), app)
+    let path = app / ".leaf/scaffold.json"
+    var value = parseFile(path)
+    value["custom_metadata"] = %*{"keep": true}
+    value["resources"][0]["custom"] = %"kept"
+    writeFile(path, pretty(value) & "\n")
+    discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Metric",
+      fields: @["count:int"]), app)
+    let updated = parseFile(path)
+    check updated["schema"].getInt == 3
+    check updated["custom_metadata"]["keep"].getBool
+    check updated["resources"][0]["custom"].getStr == "kept"
+    check updated["resources"].len == 2
+    check updated["resources"][1]["migration"].kind == JString
+
   test "a schema 2 legacy caller keeps its sources and upgrades the manifest":
     const tasksUp = "CREATE TABLE tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, done INTEGER NOT NULL);\n"
     const notesUp = "CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL);\n"
@@ -581,3 +617,125 @@ db.close()
     checkpoint third.output
     check third.code == 0
     check "history 3" in third.output
+
+  test "collected files compile and import from a different staging root":
+    let app = base / "stage-source"
+    createDir(app)
+    discard generateScaffold(ScaffoldOptions(mode: smApplication), app)
+    discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Note",
+      fields: @["title:string"]), app)
+    let stage = base / "stage with 中文 $dir"
+    for item in collectFiles(readProject(app)):
+      let target = stage / item.relative
+      if dirExists(item.source):
+        createDir(target)
+      else:
+        createDir(target.parentDir)
+        writeFile(target, readFile(item.source))
+    check fileExists(stage / "config/database.nim")
+    check fileExists(stage / "db/catalog.nim")
+    createDir(stage / "tests")
+    writeFile(stage / "tests/stage_check.nim", """
+import std/[os, strutils]
+import leaf/sqlite
+import ../config/database
+import ../db/catalog
+
+delEnv("LEAF_DATABASE_PATH")
+doAssert databasePath().isAbsolute
+doAssert databasePath().endsWith("application.sqlite3")
+doAssert not fileExists(databasePath())
+let deep = getCurrentDir() / "target/deep/custom.sqlite3"
+putEnv("LEAF_DATABASE_PATH", deep)
+doAssert databasePath() == deep
+doAssert not dirExists(deep.parentDir)
+let db = openApplicationDatabase(":memory:")
+db.close()
+doAssert not dirExists(deep.parentDir)
+doAssert applicationMigrations().len == 2
+echo "staging ok"
+""")
+    let source = currentSourcePath().parentDir.parentDir.parentDir / "src"
+    let ran = boundedChild(compiler(), nimArgs(stage / "tests/stage_check.nim",
+      base / "stage-check", source, base / "stage-cache"), stage)
+    checkpoint ran.output
+    check ran.code == 0
+    check "staging ok" in ran.output
+
+  test "concurrent same-name resources keep one consistent catalog":
+    let tools = base / "tools-same"
+    writeProbeFiles(tools, @[("worker.nim", """
+import std/os
+import leaf/scaffold
+
+discard generateScaffold(ScaffoldOptions(mode: smResource, target: paramStr(2),
+  fields: @["title:string"]), paramStr(1))
+echo "ok"
+""")])
+    let worker = buildProbe(tools, "worker.nim", base / "tools-same-cache", "worker")
+    check worker.code == 0
+    if worker.code == 0:
+      let app = base / "race-same"
+      createDir(app)
+      discard generateScaffold(ScaffoldOptions(mode: smApplication), app)
+      let first = startManaged(worker.binary, @[app, "Note"], app)
+      let second = startManaged(worker.binary, @[app, "Note"], app)
+      var codes: seq[int]
+      try:
+        codes = @[finishBounded(first), finishBounded(second)]
+      finally:
+        first.close()
+        second.close()
+      checkpoint $codes
+      check codes.count(0) >= 1
+      let manifest = parseFile(app / ".leaf/scaffold.json")
+      var names: seq[string]
+      for entry in manifest["resources"]: names.add entry["model"].getStr
+      check names.count("Note") == 1
+      var migrations: seq[string]
+      for path in walkFiles(app / "db/migrations/*_create_notes.*"): migrations.add path
+      check migrations.len == 1
+      check fileExists(app / "app/models/note.nim")
+
+  test "resource generation racing an application scaffold stays consistent":
+    let tools = base / "tools-mixed"
+    writeProbeFiles(tools, @[("worker.nim", """
+import std/os
+import leaf/scaffold
+
+discard generateScaffold(ScaffoldOptions(mode: smResource, target: paramStr(2),
+  fields: @["title:string"]), paramStr(1))
+echo "ok"
+"""), ("appworker.nim", """
+import std/os
+import leaf/scaffold
+
+discard generateScaffold(ScaffoldOptions(mode: smApplication), paramStr(1))
+echo "ok"
+""")])
+    let worker = buildProbe(tools, "worker.nim", base / "tools-mixed-cache", "worker")
+    let appworker = buildProbe(tools, "appworker.nim", base / "tools-mixed-cache", "appworker")
+    check worker.code == 0
+    check appworker.code == 0
+    if worker.code == 0 and appworker.code == 0:
+      let app = base / "race-mixed"
+      createDir(app)
+      discard generateScaffold(ScaffoldOptions(mode: smApplication), app)
+      let resource = startManaged(worker.binary, @[app, "Note"], app)
+      let application = startManaged(appworker.binary, @[app], app)
+      var codes: seq[int]
+      try:
+        codes = @[finishBounded(resource), finishBounded(application)]
+      finally:
+        resource.close()
+        application.close()
+      checkpoint $codes
+      let manifest = parseFile(app / ".leaf/scaffold.json")
+      check manifest["schema"].getInt == 3
+      var versions: seq[string]
+      for entry in manifest["resources"]:
+        check entry["migration"].kind == JString
+        versions.add entry["migration"].getStr
+      check versions.len == versions.deduplicate().len
+      check fileExists(app / "db/catalog.nim")
+      check fileExists(app / "config/database.nim")

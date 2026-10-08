@@ -1,5 +1,5 @@
 ## Command and naming contracts shared by scaffold plans and templates.
-import std/[strutils, sets]
+import std/[json, strutils, sets]
 import ./[core, project]
 
 type
@@ -22,6 +22,7 @@ type
     modelApi*: int
     timestamps*: bool
     resources*: seq[ResourceSpec]
+    document*: JsonNode
   ScaffoldFile* = object
     path*, content*: string
     update*: bool

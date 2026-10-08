@@ -32,7 +32,14 @@ proc databaseConfigSource*(name: string): string =
 proc migrationsReadmeSource*(): string =
   "# Migrations\n\nEach `.nim` file declares one restricted `migration` and is\n" &
     "discovered by `db/catalog.nim`. Legacy `.up.sql`/`.down.sql` pairs remain\n" &
-    "readable and are never rewritten.\n"
+    "readable and are never rewritten.\n\n" &
+    "## Startup\n\nMigrations never run automatically when the configuration is imported.\n" &
+    "Open storage explicitly from the application entry point:\n\n" &
+    "```nim\nimport ./config/database\n\n" &
+    "let db = openApplicationDatabase()\n```\n\n" &
+    "`openApplicationDatabase` opens the configured path and applies pending\n" &
+    "migrations. Importing `config/database` alone opens no storage and creates\n" &
+    "no database file.\n"
 
 proc legacyDatabaseConfigSource*(name: string): string =
   ## The exact old generated startup that delegated to a per-file registry.
