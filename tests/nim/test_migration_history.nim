@@ -34,13 +34,14 @@ proc dropTableOp(table: string): SchemaOperation =
     tableSpec: TableSpec(name: table, hasId: true), tableDefinitionProvided: true)
 
 proc nimDefinition(version: int64, name: string): MigrationDefinition =
-  MigrationDefinition(version: version, name: name, sourcePath: name & ".nim",
+  MigrationDefinition(version: version, name: name,
+    sourcePath: "db/migrations/" & name & ".nim",
     sourceChecksum: "source-" & name, format: mfNimV1,
     upOps: @[createTableOp(name)], downOps: @[dropTableOp(name)], hasDown: true)
 
 proc nimRecord(definition: MigrationDefinition): MigrationRecord =
-  MigrationRecord(version: definition.version, name: definition.name, sql: "generated",
-    format: "nim-v1", sourceChecksum: definition.sourceChecksum,
+  MigrationRecord(version: definition.version, name: definition.name,
+    sql: forwardSql(definition), format: "nim-v1", sourceChecksum: definition.sourceChecksum,
     operationsChecksum: operationsFingerprint(definition),
     downChecksum: downFingerprint(definition))
 
@@ -169,7 +170,7 @@ suite "migration history reads and legacy compatibility":
       @[dbValue(record.version), dbValue(record.name), dbValue(record.sql),
         dbValue(record.format), dbValue(record.sourceChecksum),
         dbValue(record.operationsChecksum), dbValue(record.downChecksum)])
-    check inspectMigrationHistory(@[definition], readMigrationHistory(db))[0].state == "applied"
+    check inspectMigrationHistory(@[definition], readMigrationHistory(db))[0].state == "up"
 
     var changedSource = definition
     changedSource.sourceChecksum = "source-changed"
@@ -245,7 +246,7 @@ suite "migration history reads and legacy compatibility":
     let statuses = inspectMigrationHistory(catalog, readMigrationHistory(db))
     check statuses.len == 3
     check statuses[0].state == "legacy-unverified-down"
-    check statuses[1].state == "pending"
+    check statuses[1].state == "down"
     check statuses[2].state == "pending-template"
     check "pending_template" in statuses[2].issues.mapIt(it.code)
 
@@ -307,3 +308,93 @@ suite "read-only SQLite connections":
     closed.close()
     expect DatabaseError: discard databaseFile(closed)
     expect DatabaseError: discard isAutocommit(closed)
+
+suite "migration history fix round 1":
+  test "malformed shapes are refused before any upgrade":
+    let noPk = openDatabase(":memory:")
+    defer: noPk.close()
+    noPk.executeScript("CREATE TABLE leaf_schema_migrations (version INTEGER, name TEXT, sql TEXT);")
+    expect MigrationError: discard readMigrationHistory(noPk)
+    expect MigrationError: upgradeMigrationHistory(noPk, @[])
+    check tableColumns(noPk, "leaf_schema_migrations") == @["version", "name", "sql"]
+
+    let wrongVersionType = openDatabase(":memory:")
+    defer: wrongVersionType.close()
+    wrongVersionType.executeScript(
+      "CREATE TABLE leaf_schema_migrations (version TEXT PRIMARY KEY, name TEXT, sql TEXT);")
+    expect MigrationError: discard readMigrationHistory(wrongVersionType)
+
+    let wrongNameType = openDatabase(":memory:")
+    defer: wrongNameType.close()
+    wrongNameType.executeScript(
+      "CREATE TABLE leaf_schema_migrations (version INTEGER PRIMARY KEY, name INTEGER, sql TEXT);")
+    expect MigrationError: discard readMigrationHistory(wrongNameType)
+
+    let partial = openDatabase(":memory:")
+    defer: partial.close()
+    partial.executeScript("""CREATE TABLE leaf_schema_migrations (
+      version INTEGER PRIMARY KEY, name TEXT NOT NULL, sql TEXT NOT NULL,
+      source_sha256 TEXT);""")
+    expect MigrationError: discard readMigrationHistory(partial)
+    expect MigrationError: upgradeMigrationHistory(partial, @[])
+    check tableColumns(partial, "leaf_schema_migrations") ==
+      @["version", "name", "sql", "source_sha256"]
+
+    let extra = openDatabase(":memory:")
+    defer: extra.close()
+    extra.executeScript("""CREATE TABLE leaf_schema_migrations (
+      version INTEGER PRIMARY KEY, name TEXT NOT NULL, sql TEXT NOT NULL, extra TEXT);""")
+    expect MigrationError: discard readMigrationHistory(extra)
+
+  test "history table names resolve case-insensitively from main":
+    let db = openDatabase(":memory:")
+    defer: db.close()
+    db.executeScript("CREATE TABLE LEAF_SCHEMA_MIGRATIONS (version INTEGER PRIMARY KEY, name TEXT NOT NULL, sql TEXT NOT NULL);")
+    discard db.execute("INSERT INTO LEAF_SCHEMA_MIGRATIONS VALUES (?, ?, ?)",
+      @[dbValue(1'i64), dbValue("001_create_tasks"), dbValue(upSql)])
+    let history = readMigrationHistory(db)
+    check history.len == 1
+    check history[0].name == "001_create_tasks"
+    let catalog = @[sqlDefinition(1, "001_create_tasks", upSql, downSql)]
+    discard db.execute("BEGIN")
+    upgradeMigrationHistory(db, catalog)
+    discard db.execute("COMMIT")
+    check readMigrationHistory(db)[0].sourceChecksum == catalog[0].sourceChecksum
+    # A TEMP object shadows unqualified SQL but must not hide the main history.
+    db.executeScript("CREATE TEMP TABLE leaf_schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, sql TEXT NOT NULL);")
+    discard db.execute("INSERT INTO leaf_schema_migrations VALUES (?, ?, ?)",
+      @[dbValue(7'i64), dbValue("007_temp"), dbValue("SELECT 7;")])
+    let mainHistory = readMigrationHistory(db)
+    check mainHistory.len == 1
+    check mainHistory[0].name == "001_create_tasks"
+
+  test "status and issues keep the real source path and version":
+    let db = openDatabase(":memory:")
+    defer: db.close()
+    createExtendedHistory(db)
+    let definition = nimDefinition(1, "one")
+    let record = nimRecord(definition)
+    discard db.execute("INSERT INTO leaf_schema_migrations VALUES (?, ?, ?, ?, ?, ?, ?)",
+      @[dbValue(record.version), dbValue(record.name), dbValue(record.sql),
+        dbValue(record.format), dbValue(record.sourceChecksum),
+        dbValue(record.operationsChecksum), dbValue(record.downChecksum)])
+    let applied = inspectMigrationHistory(@[definition], readMigrationHistory(db))[0]
+    check applied.state == "up"
+    check applied.file == definition.sourcePath
+    var changed = definition
+    changed.sourceChecksum = "changed"
+    let modified = inspectMigrationHistory(@[changed], readMigrationHistory(db))[0]
+    check modified.state == "modified"
+    check modified.file == changed.sourcePath
+    check modified.issues[0].file == changed.sourcePath
+    check modified.issues[0].version == some(1'i64)
+    # A missing definition has no actual source path to fabricate.
+    var absent = record
+    absent.version = 9
+    absent.name = "009_absent"
+    let missingEntry = inspectMigrationHistory(@[definition], @[absent]).filterIt(
+      it.version == 9'i64)
+    check missingEntry.len == 1
+    check missingEntry[0].state == "missing"
+    check missingEntry[0].file == ""
+    check missingEntry[0].issues[0].file == ""

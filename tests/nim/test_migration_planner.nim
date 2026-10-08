@@ -1,4 +1,4 @@
-import std/[options, sequtils, unittest]
+import std/[options, sequtils, strutils, unittest]
 import leaf/migrations
 
 proc createTableOp(table: string): SchemaOperation =
@@ -19,8 +19,8 @@ proc nimDefinition(version: int64, name: string, pending = false): MigrationDefi
       upOps: @[createTableOp(name)], downOps: @[dropTableOp(name)], hasDown: true)
 
 proc nimRecord(definition: MigrationDefinition): MigrationRecord =
-  MigrationRecord(version: definition.version, name: definition.name, sql: "generated",
-    format: "nim-v1", sourceChecksum: definition.sourceChecksum,
+  MigrationRecord(version: definition.version, name: definition.name,
+    sql: forwardSql(definition), format: "nim-v1", sourceChecksum: definition.sourceChecksum,
     operationsChecksum: operationsFingerprint(definition),
     downChecksum: downFingerprint(definition))
 
@@ -122,7 +122,7 @@ suite "pure migration planner":
     let noDown = MigrationDefinition(version: 1, name: "one", sourcePath: "one.nim",
       sourceChecksum: "source-one", format: mfNimV1,
       upOps: @[createTableOp("one")], hasDown: false)
-    let noDownRecord = MigrationRecord(version: 1, name: "one", sql: "generated",
+    let noDownRecord = MigrationRecord(version: 1, name: "one", sql: forwardSql(noDown),
       format: "nim-v1", sourceChecksum: "source-one",
       operationsChecksum: operationsFingerprint(noDown), downChecksum: "")
     expect MigrationError:
@@ -173,3 +173,65 @@ suite "pure migration planner":
     let status = planMigrations(catalog, history, MigrationRequest(kind: mrStatus))
     check status.steps.len == 0
     check status.skipped.len == 0
+
+  test "forwardSql freezes deterministic forward SQL":
+    check forwardSql(one) == renderStatements(one.upOps).join(";\n") & ";"
+    check forwardSql(one) == "CREATE TABLE \"one\" (\"id\" INTEGER PRIMARY KEY);"
+    let descriptor = sqlDefinition(1, "001_create_tasks", "CREATE TABLE t (id INTEGER);", "")
+    check forwardSql(descriptor) == "CREATE TABLE t (id INTEGER);"
+
+  test "a known but mismatched history format is rejected":
+    var flipped = nimRecord(one)
+    flipped.format = "sql-v1"
+    check "history_format_modified" in recordIssues(@[one], flipped).mapIt(it.code)
+    expect MigrationError:
+      discard planMigrations(@[one], @[flipped], MigrationRequest(kind: mrUp, target: some(1'i64)))
+    var flippedSql = sqlRecord(sqlDefinition(1, "001_create_tasks", "UP", "DOWN"))
+    flippedSql.format = "nim-v1"
+    check "history_format_modified" in recordIssues(
+      @[sqlDefinition(1, "001_create_tasks", "UP", "DOWN")], flippedSql).mapIt(it.code)
+
+  test "stored Nim forward SQL is immutable":
+    var changed = nimRecord(one)
+    changed.sql = "DROP TABLE totally_different;"
+    check "history_sql_modified" in recordIssues(@[one], changed).mapIt(it.code)
+    expect MigrationError:
+      discard planMigrations(@[one], @[changed], MigrationRequest(kind: mrUp, target: some(1'i64)))
+
+  test "thrown planner errors carry version, file and direction":
+    var changed = nimRecord(three)
+    changed.sourceChecksum = "changed"
+    try:
+      discard planMigrations(catalog, @[nimRecord(one), changed], MigrationRequest(kind: mrMigrate))
+      check false
+    except MigrationError as error:
+      check error.issueCode == "history_source_modified"
+      check error.file == three.sourcePath
+      check error.migrationVersion == some(3'i64)
+    try:
+      discard planMigrations(@[one, nimDefinition(2, "two", pending = true)],
+        @[nimRecord(one)], MigrationRequest(kind: mrUp, target: some(2'i64)))
+      check false
+    except MigrationError as error:
+      check error.issueCode == "pending_migration"
+      check error.file == "two.nim"
+      check error.migrationVersion == some(2'i64)
+      check error.direction == some(mdUp)
+    try:
+      discard planMigrations(catalog, @[nimRecord(one)],
+        MigrationRequest(kind: mrRollback, steps: 0))
+      check false
+    except MigrationError as error:
+      check error.issueCode == "invalid_migration_steps"
+
+  test "request provenance distinguishes omission from a raw zero":
+    check MigrationRequest(kind: mrRollback).steps == 1
+    check default(MigrationRequest).steps == 1
+    type Nested = object
+      request: MigrationRequest
+    let nested = Nested()
+    check nested.request.steps == 1
+    var raw: MigrationRequest
+    check raw.steps == 0
+    expect MigrationError:
+      discard planMigrations(catalog, history, MigrationRequest(kind: mrRollback, steps: raw.steps))

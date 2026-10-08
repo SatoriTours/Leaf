@@ -1,11 +1,22 @@
 ## Pure migration planning: validates the catalog and the complete applied
 ## history, then selects directions. No database, file or lock access.
-import std/[algorithm, options, sets, tables]
+import std/[algorithm, options, sets, strutils, tables]
 import ../core
 import ./files
 import ./fingerprint
 import ./sqlite_adapter
 import ./types
+
+proc forwardSql*(definition: MigrationDefinition): string =
+  ## Frozen deterministic forward SQL used by history validation and by the
+  ## later runner when it records an applied migration: exact legacy bytes for
+  ## SQL migrations, otherwise the rendered Nim operations joined with ";\n"
+  ## and terminated by one ";". No SQL parsing or source reinterpretation.
+  if definition.format == mfSqlV1:
+    definition.legacyUp
+  else:
+    let statements = renderStatements(definition.upOps)
+    if statements.len == 0: "" else: statements.join(";\n") & ";"
 
 proc findDefinition*(catalog: openArray[MigrationDefinition], version: int64): int =
   for index, definition in catalog:
@@ -26,9 +37,17 @@ proc issueFor(definition: MigrationDefinition, code, message: string): Migration
   MigrationIssue(code: code, message: message, file: definition.sourcePath,
     version: some(definition.version))
 
-proc issueFor(record: MigrationRecord, code, message: string): MigrationIssue =
-  MigrationIssue(code: code, message: message, file: record.name,
-    version: some(record.version))
+proc bareIssue*(record: MigrationRecord, code, message: string): MigrationIssue =
+  ## No known definition: there is no actual source path to fabricate.
+  MigrationIssue(code: code, message: message, file: "", version: some(record.version))
+
+proc raiseIssue*(issue: MigrationIssue,
+    direction = none(MigrationDirection)) {.noreturn.} =
+  let error = migrationError(issue.code, issue.message)
+  error.migrationVersion = issue.version
+  error.file = issue.file
+  error.direction = direction
+  raise error
 
 proc catalogIssues*(catalog: openArray[MigrationDefinition]): seq[MigrationIssue] =
   var byVersion: Table[int64, int]
@@ -80,67 +99,74 @@ proc catalogIssues*(catalog: openArray[MigrationDefinition]): seq[MigrationIssue
 proc recordIssues*(catalog: openArray[MigrationDefinition],
     record: MigrationRecord): seq[MigrationIssue] =
   if record.version <= 0 or record.name.len == 0 or record.sql.len == 0:
-    return @[issueFor(record, "corrupt_history", "history row is missing version, name or sql")]
+    return @[bareIssue(record, "corrupt_history", "history row is missing version, name or sql")]
   if record.format notin ["sql-v1", "nim-v1"]:
-    return @[issueFor(record, "unknown_history_format",
+    return @[bareIssue(record, "unknown_history_format",
       "unknown history format: " & record.format)]
   let index = findDefinition(catalog, record.version)
   if index < 0:
-    return @[issueFor(record, "history_missing_file",
+    return @[bareIssue(record, "history_missing_file",
       "no migration file for applied version " & $record.version)]
   let definition = catalog[index]
+  let expectedFormat = if definition.format == mfNimV1: "nim-v1" else: "sql-v1"
+  if record.format != expectedFormat:
+    result.add issueFor(definition, "history_format_modified",
+      "applied migration format changed: " & record.format & " -> " & expectedFormat)
   if definition.pending:
-    result.add issueFor(record, "history_modified",
+    result.add issueFor(definition, "history_modified",
       "applied migration is now a pending template")
   if record.name != definition.name:
-    result.add issueFor(record, "history_name_modified", "applied migration name changed: " &
-      record.name & " -> " & definition.name)
+    result.add issueFor(definition, "history_name_modified",
+      "applied migration name changed: " & record.name & " -> " & definition.name)
+  if record.sql != forwardSql(definition):
+    result.add issueFor(definition, "history_sql_modified", "applied migration SQL changed")
   if definition.format == mfNimV1:
     if record.sourceChecksum.len == 0 or record.operationsChecksum.len == 0 or
         (definition.hasDown and record.downChecksum.len == 0):
-      result.add issueFor(record, "history_missing_fingerprint",
+      result.add issueFor(definition, "history_missing_fingerprint",
         "Nim history row is missing recorded fingerprints")
     else:
       if record.sourceChecksum != definition.sourceChecksum:
-        result.add issueFor(record, "history_source_modified", "applied migration source changed")
+        result.add issueFor(definition, "history_source_modified",
+          "applied migration source changed")
       if record.operationsChecksum != operationsFingerprint(definition):
-        result.add issueFor(record, "history_operations_modified",
+        result.add issueFor(definition, "history_operations_modified",
           "applied migration operations changed")
       if record.downChecksum != downFingerprint(definition):
-        result.add issueFor(record, "history_down_modified", "applied migration down changed")
+        result.add issueFor(definition, "history_down_modified",
+          "applied migration down changed")
   else:
-    if record.sql != definition.legacyUp:
-      result.add issueFor(record, "history_sql_modified", "applied SQL changed")
     if record.sourceChecksum.len > 0 and record.sourceChecksum != definition.sourceChecksum:
-      result.add issueFor(record, "history_source_modified", "applied SQL source changed")
+      result.add issueFor(definition, "history_source_modified", "applied SQL source changed")
     if record.operationsChecksum.len > 0 and
         record.operationsChecksum != operationsFingerprint(definition):
-      result.add issueFor(record, "history_operations_modified", "applied SQL operations changed")
+      result.add issueFor(definition, "history_operations_modified",
+        "applied SQL operations changed")
     if definition.hasDown:
       if record.downChecksum.len == 0:
-        result.add issueFor(record, "legacy_unverified_down",
+        result.add issueFor(definition, "legacy_unverified_down",
           "down migration was never historically verified")
       elif record.downChecksum != downFingerprint(definition):
-        result.add issueFor(record, "history_down_modified", "applied SQL down changed")
+        result.add issueFor(definition, "history_down_modified", "applied SQL down changed")
     elif record.downChecksum.len > 0:
-      result.add issueFor(record, "history_down_modified",
+      result.add issueFor(definition, "history_down_modified",
         "history has a down fingerprint but the migration has no down")
 
 proc checkSelectable(definition: MigrationDefinition, direction: MigrationDirection) =
   if definition.pending:
-    raise migrationError("pending_migration",
-      "migration " & $definition.version & " is a pending template")
+    raiseIssue(issueFor(definition, "pending_migration",
+      "migration " & $definition.version & " is a pending template"), some(direction))
   if direction == mdDown:
     if not definition.hasDown:
-      raise migrationError("missing_migration_down",
-        "migration " & $definition.version & " has no down migration")
+      raiseIssue(issueFor(definition, "missing_migration_down",
+        "migration " & $definition.version & " has no down migration"), some(direction))
     if definition.format == mfSqlV1:
       if definition.legacyDown.len == 0:
-        raise migrationError("missing_migration_down",
-          "migration " & $definition.version & " has no down SQL")
+        raiseIssue(issueFor(definition, "missing_migration_down",
+          "migration " & $definition.version & " has no down SQL"), some(direction))
     elif definition.downOps.len == 0:
-      raise migrationError("missing_migration_down",
-        "migration " & $definition.version & " has no down operations")
+      raiseIssue(issueFor(definition, "missing_migration_down",
+        "migration " & $definition.version & " has no down operations"), some(direction))
 
 proc stepFor(definition: MigrationDefinition, direction: MigrationDirection): MigrationStep =
   result.version = definition.version
@@ -160,16 +186,17 @@ proc planMigrations*(catalog: openArray[MigrationDefinition],
   ## later irreversible or pending step can never allow earlier writes.
   let catalogProblems = catalogIssues(catalog)
   if catalogProblems.len > 0:
-    raise migrationError(catalogProblems[0].code, catalogProblems[0].message)
+    raiseIssue(catalogProblems[0])
   var applied = initHashSet[int64]()
   for record in history:
     if record.version in applied:
-      raise migrationError("corrupt_history", "duplicate applied version " & $record.version)
+      raiseIssue(bareIssue(record, "corrupt_history",
+        "duplicate applied version " & $record.version))
     applied.incl record.version
     if request.kind != mrStatus:
       for issue in recordIssues(catalog, record):
         if issue.code != "legacy_unverified_down":
-          raise migrationError(issue.code, issue.message)
+          raiseIssue(issue)
   var pendingVersions: seq[int64]
   var appliedVersions: seq[int64]
   for definition in catalog:
@@ -185,23 +212,28 @@ proc planMigrations*(catalog: openArray[MigrationDefinition],
     else:
       let target = request.target.get()
       if target < 0:
-        raise migrationError("invalid_migration_target", "migration target must not be negative")
+        raiseIssue(MigrationIssue(code: "invalid_migration_target",
+          message: "migration target must not be negative", file: "", version: none(int64)))
       elif target == 0:
         if appliedVersions.len > 0:
           for index in countdown(appliedVersions.high, 0):
             selected.add (appliedVersions[index], mdDown)
       else:
-        if findDefinition(catalog, target) < 0:
-          raise migrationError("invalid_migration_target", "no migration with version " & $target)
+        let index = findDefinition(catalog, target)
+        if index < 0:
+          raiseIssue(MigrationIssue(code: "invalid_migration_target",
+            message: "no migration with version " & $target, file: "",
+            version: some(target)))
         if appliedVersions.len > 0:
-          for index in countdown(appliedVersions.high, 0):
-            if appliedVersions[index] > target:
-              selected.add (appliedVersions[index], mdDown)
+          for position in countdown(appliedVersions.high, 0):
+            if appliedVersions[position] > target:
+              selected.add (appliedVersions[position], mdDown)
         for version in pendingVersions:
           if version <= target: selected.add (version, mdUp)
   of mrRollback:
     if request.steps <= 0:
-      raise migrationError("invalid_migration_steps", "rollback steps must be positive")
+      raiseIssue(MigrationIssue(code: "invalid_migration_steps",
+        message: "rollback steps must be positive", file: "", version: none(int64)))
     var taken = 0
     if appliedVersions.len > 0:
       for index in countdown(appliedVersions.high, 0):
@@ -210,7 +242,8 @@ proc planMigrations*(catalog: openArray[MigrationDefinition],
         inc taken
   of mrForward:
     if request.steps <= 0:
-      raise migrationError("invalid_migration_steps", "forward steps must be positive")
+      raiseIssue(MigrationIssue(code: "invalid_migration_steps",
+        message: "forward steps must be positive", file: "", version: none(int64)))
     var taken = 0
     for version in pendingVersions:
       if taken >= request.steps: break
@@ -218,10 +251,14 @@ proc planMigrations*(catalog: openArray[MigrationDefinition],
       inc taken
   of mrUp, mrDown:
     if request.target.isNone:
-      raise migrationError("invalid_migration_target", "up/down requires a target version")
+      raiseIssue(MigrationIssue(code: "invalid_migration_target",
+        message: "up/down requires a target version", file: "", version: none(int64)))
     let target = request.target.get()
-    if target <= 0 or findDefinition(catalog, target) < 0:
-      raise migrationError("invalid_migration_target", "no migration with version " & $target)
+    let index = if target > 0: findDefinition(catalog, target) else: -1
+    if target <= 0 or index < 0:
+      raiseIssue(MigrationIssue(code: "invalid_migration_target",
+        message: "no migration with version " & $target, file: "",
+        version: (if target > 0: some(target) else: none(int64))))
     let isApplied = target in applied
     if request.kind == mrUp:
       if isApplied: result.skipped.add target

@@ -1,6 +1,6 @@
 ## Read-only migration history: legacy compatibility, inspection and a
 ## caller-transaction upgrade. Reads and inspect never write.
-import std/[algorithm, options, sets, strutils]
+import std/[algorithm, options, sequtils, sets, strutils]
 import ./fingerprint
 import ./planner
 import ./types
@@ -11,13 +11,57 @@ const
   LegacyColumns = ["version", "name", "sql"]
   MetadataColumns = ["format", "source_sha256", "operations_sha256", "down_sha256"]
 
-proc historyObject(db: Database): string =
-  let rows = db.query("SELECT type FROM sqlite_master WHERE name = ?", @[dbValue(HistoryTable)])
-  if rows.len == 0: "" else: rows[0][0].asString
+proc quoteName(name: string): string =
+  "\"" & name.replace("\"", "\"\"") & "\""
 
-proc historyColumns(db: Database): seq[string] =
-  for row in db.query("PRAGMA table_info(" & HistoryTable & ")"):
+proc historyObject(db: Database): tuple[kind, name: string] =
+  ## SQLite resolves identifiers ASCII-case-insensitively and prefers TEMP, so
+  ## look in `main` with NOCASE and use the real name everywhere else.
+  let rows = db.query(
+    "SELECT type, name FROM main.sqlite_master WHERE name = ? COLLATE NOCASE",
+    @[dbValue(HistoryTable)])
+  if rows.len == 0: ("", "")
+  elif rows.len > 1:
+    raise migrationError("corrupt_history", "multiple objects match " & HistoryTable)
+  else: (rows[0][0].asString, rows[0][1].asString)
+
+proc historyColumns(db: Database, name: string): seq[string] =
+  for row in db.query("PRAGMA main.table_info(" & quoteName(name) & ")"):
     result.add row[1].asString
+
+proc textAffinity(declared: string): bool =
+  let upper = declared.toUpperAscii()
+  "CHAR" in upper or "CLOB" in upper or "TEXT" in upper
+
+proc validateHistoryShape(db: Database, name: string): seq[string] =
+  ## Validate the declared schema even when the table is empty: an INTEGER
+  ## PRIMARY KEY version, text columns, and either the legacy three columns or
+  ## the complete four-column metadata set. Never repaired silently.
+  var versionPk = false
+  var versionInteger = false
+  var textColumns = true
+  for row in db.query("PRAGMA main.table_info(" & quoteName(name) & ")"):
+    let column = row[1].asString
+    let declared = row[2].asString
+    result.add column
+    if column == "version":
+      versionPk = row[5].asInt != 0
+      versionInteger = "INT" in declared.toUpperAscii()
+    elif column in ["name", "sql", "format", "source_sha256", "operations_sha256", "down_sha256"]:
+      if not textAffinity(declared): textColumns = false
+  for required in LegacyColumns:
+    if required notin result:
+      raise migrationError("corrupt_history", name & " is missing column " & required)
+  let metadataPresent = result.filterIt(it in MetadataColumns)
+  if metadataPresent.len != 0 and metadataPresent.len != MetadataColumns.len:
+    raise migrationError("corrupt_history", name & " has a partial metadata shape")
+  for column in result:
+    if column notin LegacyColumns and column notin MetadataColumns:
+      raise migrationError("corrupt_history", name & " has an unknown column " & column)
+  if not versionPk or not versionInteger:
+    raise migrationError("corrupt_history", name & " version must be an INTEGER PRIMARY KEY")
+  if not textColumns:
+    raise migrationError("corrupt_history", name & " has a non-text column")
 
 proc optionalText(value: SqlValue, column: string): string =
   case value.kind
@@ -28,14 +72,11 @@ proc optionalText(value: SqlValue, column: string): string =
 proc readMigrationHistory*(db: Database): seq[MigrationRecord] =
   ## A missing history table is empty history. A corrupt table, shape, type,
   ## null or duplicate is an explicit error, never coerced into safe history.
-  let kind = historyObject(db)
+  let (kind, name) = historyObject(db)
   if kind.len == 0: return @[]
   if kind != "table":
     raise migrationError("corrupt_history", HistoryTable & " is not a table: " & kind)
-  let columns = historyColumns(db)
-  for required in LegacyColumns:
-    if required notin columns:
-      raise migrationError("corrupt_history", HistoryTable & " is missing column " & required)
+  let columns = validateHistoryShape(db, name)
   var selected: seq[string] = @LegacyColumns
   for metadata in MetadataColumns:
     if metadata in columns: selected.add metadata
@@ -44,7 +85,7 @@ proc readMigrationHistory*(db: Database): seq[MigrationRecord] =
   let operationsIndex = selected.find("operations_sha256")
   let downIndex = selected.find("down_sha256")
   var seen = initHashSet[int64]()
-  for row in db.query("SELECT " & selected.join(", ") & " FROM " & HistoryTable &
+  for row in db.query("SELECT " & selected.join(", ") & " FROM main." & quoteName(name) &
       " ORDER BY version"):
     if row[0].kind != sqlInteger:
       raise migrationError("corrupt_history", "history version is not an integer")
@@ -82,7 +123,7 @@ proc statusRank(code: string): int =
 
 proc stateFor(issues: seq[MigrationIssue]): string =
   var best = 0
-  result = "applied"
+  result = "up"
   for issue in issues:
     let rank = statusRank(issue.code)
     if rank > best:
@@ -99,20 +140,23 @@ proc inspectMigrationHistory*(catalog: openArray[MigrationDefinition],
   ## Status/preview only: concrete issues, no repairs and no history writes.
   let catalogProblems = catalogIssues(catalog)
   if catalogProblems.len > 0:
-    raise migrationError(catalogProblems[0].code, catalogProblems[0].message)
+    raiseIssue(catalogProblems[0])
   var applied = initHashSet[int64]()
   for record in history:
     if record.version in applied:
-      raise migrationError("corrupt_history", "duplicate applied version " & $record.version)
+      raiseIssue(bareIssue(record, "corrupt_history",
+        "duplicate applied version " & $record.version))
     applied.incl record.version
     let issues = recordIssues(catalog, record)
+    let index = findDefinition(catalog, record.version)
     result.add MigrationStatus(version: record.version, name: record.name,
-      file: record.name, state: stateFor(issues), issues: issues)
+      file: (if index >= 0: catalog[index].sourcePath else: ""),
+      state: stateFor(issues), issues: issues)
   for definition in catalog:
     if definition.version notin applied:
       var status = MigrationStatus(version: definition.version, name: definition.name,
         file: definition.sourcePath,
-        state: if definition.pending: "pending-template" else: "pending")
+        state: if definition.pending: "pending-template" else: "down")
       if definition.pending:
         status.issues.add MigrationIssue(code: "pending_template",
           message: "migration is an unfinished pending template", file: definition.sourcePath,
@@ -124,28 +168,30 @@ proc upgradeMigrationHistory*(db: Database, catalog: openArray[MigrationDefiniti
   ## Adds the four metadata columns and captures the first legacy baseline.
   ## The caller owns the transaction: no COMMIT here, so it is rollbackable and
   ## idempotent, and applied rows keep their exact name/up SQL.
-  let kind = historyObject(db)
+  let (kind, name) = historyObject(db)
   if kind.len == 0: return
   if kind != "table":
     raise migrationError("corrupt_history", HistoryTable & " is not a table: " & kind)
+  discard validateHistoryShape(db, name)
   let problems = catalogIssues(catalog)
   if problems.len > 0:
-    raise migrationError(problems[0].code, problems[0].message)
+    raiseIssue(problems[0])
   let history = readMigrationHistory(db)
   for record in history:
     for issue in recordIssues(catalog, record):
       if issue.code != "legacy_unverified_down":
-        raise migrationError(issue.code, issue.message)
-  let columns = historyColumns(db)
+        raiseIssue(issue)
+  let columns = historyColumns(db, name)
+  let qualified = "main." & quoteName(name)
   if "format" notin columns:
-    db.executeScript("ALTER TABLE " & HistoryTable &
+    db.executeScript("ALTER TABLE " & qualified &
       " ADD COLUMN format TEXT NOT NULL DEFAULT 'sql-v1';")
   if "source_sha256" notin columns:
-    db.executeScript("ALTER TABLE " & HistoryTable & " ADD COLUMN source_sha256 TEXT;")
+    db.executeScript("ALTER TABLE " & qualified & " ADD COLUMN source_sha256 TEXT;")
   if "operations_sha256" notin columns:
-    db.executeScript("ALTER TABLE " & HistoryTable & " ADD COLUMN operations_sha256 TEXT;")
+    db.executeScript("ALTER TABLE " & qualified & " ADD COLUMN operations_sha256 TEXT;")
   if "down_sha256" notin columns:
-    db.executeScript("ALTER TABLE " & HistoryTable & " ADD COLUMN down_sha256 TEXT;")
+    db.executeScript("ALTER TABLE " & qualified & " ADD COLUMN down_sha256 TEXT;")
   for record in history:
     let index = findDefinition(catalog, record.version)
     if index < 0: continue
@@ -155,7 +201,7 @@ proc upgradeMigrationHistory*(db: Database, catalog: openArray[MigrationDefiniti
       # never recorded and cannot be claimed as historically validated.
       let down = if definition.hasDown: dbValue(downFingerprint(definition))
         else: SqlValue(kind: sqlNull)
-      discard db.execute("UPDATE " & HistoryTable &
+      discard db.execute("UPDATE " & qualified &
         " SET source_sha256 = ?, operations_sha256 = ?, down_sha256 = ? WHERE version = ?",
         @[dbValue(definition.sourceChecksum), dbValue(operationsFingerprint(definition)),
           down, dbValue(record.version)])
