@@ -3,6 +3,8 @@
 import std/[json, os, strutils]
 import ../[core, project, scaffold_files, scaffold_templates, scaffold_types]
 import ./files as migrationFiles
+import ./generator as migrationGenerator
+import ./locking
 
 const
   DatabaseConfigPath* = "config/database.nim"
@@ -98,32 +100,40 @@ proc migrationDelegateSource*(): string =
     "proc generatedMigrations*(): seq[MigrationDefinition] =\n" &
     "  catalog.applicationMigrations()\n"
 
-proc legacyManifest(root: string): tuple[legacy: bool, manifest: ScaffoldManifest] =
+proc legacyManifest(root: string): tuple[known, legacy: bool, manifest: ScaffoldManifest] =
   ## Classify scaffold provenance with the SAME strict canonical parser the
   ## scaffold itself uses; a manifest it would reject is never converted.
   let path = guardedPath(root, LegacyManifestPath)
-  if not fileExists(path): return (false, ScaffoldManifest())
+  if not fileExists(path): return (false, false, ScaffoldManifest())
+  result.known = true
   result.manifest = readCanonicalManifest(parseFile(path))
   result.legacy = result.manifest.schema in [1, 2]
 
-proc checkManifestSources*(root: string, resources: seq[ResourceSpec], legacy = false) =
-  ## Every expected reference must resolve to a real, correctly named migration
-  ## of the manifest version. Legacy references must additionally resolve to a
-  ## non-redirected `.up.sql` source. Unrelated manual migrations stay untouched.
+proc checkManifestSources*(root: string, resources: seq[ResourceSpec], legacy = false,
+    taskVersion: int64 = 0) =
+  ## Every expected reference (the implicit Task migration plus every registered
+  ## resource) must resolve to a real, correctly named migration of the expected
+  ## version. Legacy references must additionally resolve to non-redirected
+  ## `.up.sql` and `.down.sql` sources. Unrelated manual migrations stay allowed.
   let files = migrationFiles.scanMigrationFiles(root / MigrationsDir)
-  for resource in resources:
-    let expected = "create_" & resource.plural
+  var expected: seq[tuple[name: string, version: int64]]
+  expected.add (name: "create_tasks", version: taskVersion)
+  for resource in resources: expected.add (name: "create_" & resource.plural, version: resource.migration)
+  for entry in expected:
     var found = false
     for file in files:
-      if file.name == expected and file.version == resource.migration: found = true
+      if file.name == entry.name and (entry.version == 0 or file.version == entry.version):
+        found = true
     if not found:
-      fail("scaffold manifest resource " & resource.model & " does not match migration " &
-        expected & " at version " & $resource.migration)
+      fail("scaffold migration is missing or mismatched: " & entry.name &
+        (if entry.version > 0: " at version " & $entry.version else: ""))
     if legacy:
-      let padded = align($resource.migration, 3, '0') & "_" & expected
-      let source = guardedPath(root, MigrationsDir & "/" & padded & ".up.sql")
-      if not fileExists(source) or symlinkExists(source):
-        fail("legacy migration source is missing or redirected: " & padded & ".up.sql")
+      let padded = align($entry.version, 3, '0') & "_" & entry.name
+      for direction in ["up", "down"]:
+        let source = guardedPath(root, MigrationsDir & "/" & padded & "." & direction & ".sql")
+        if not fileExists(source) or symlinkExists(source):
+          fail("legacy migration source is missing or redirected: " & padded & "." &
+            direction & ".sql")
 
 proc registryPlan(root: string, convertManifest: bool): seq[ScaffoldFile] =
   ## Classify `app/generated/migrations.nim`: an exact old registry is converted
@@ -146,16 +156,19 @@ proc registryPlan(root: string, convertManifest: bool): seq[ScaffoldFile] =
   elif classification.legacy:
     fail("legacy scaffold registry is missing; restore " & RegistryPath &
       " before automatic conversion")
-  if recognized and classification.legacy:
-    # Validate the actual referenced sources before any write.
-    checkManifestSources(root, classification.manifest.resources, true)
-    if convertManifest:
-      # `databaseInitPlan` owns the manifest upgrade for plain initialization;
-      # resource generation merges its own updated manifest instead.
-      let manifestPath = guardedPath(root, LegacyManifestPath)
-      result.add(ScaffoldFile(path: LegacyManifestPath,
-        content: manifest(classification.manifest.resources, classification.manifest.modelSchema),
-        update: true, previous: readFile(manifestPath)))
+  if classification.known:
+    # Validate the actual referenced sources before any write, including the
+    # implicit Task migration, for every known scaffold (legacy, converted or
+    # freshly generated), not only when a registry conversion is pending.
+    checkManifestSources(root, classification.manifest.resources, classification.legacy,
+      (if classification.legacy: 1 else: 0))
+  if recognized and classification.legacy and convertManifest:
+    # `databaseInitPlan` owns the manifest upgrade for plain initialization;
+    # resource generation merges its own updated manifest instead.
+    let manifestPath = guardedPath(root, LegacyManifestPath)
+    result.add(ScaffoldFile(path: LegacyManifestPath,
+      content: upgradedManifestSource(parseFile(manifestPath)),
+      update: true, previous: readFile(manifestPath)))
 
 proc databaseInitPlan*(root, name: string, convertManifest = true): seq[ScaffoldFile] =
   ## Config/catalog/readme/include additions; empty when everything matches.
@@ -178,9 +191,24 @@ proc databaseInitPlan*(root, name: string, convertManifest = true): seq[Scaffold
 proc initializeDatabaseProject*(project: Project, dryRun = false): seq[string] =
   ## Install config/database.nim, db/catalog.nim and the migrations directory in
   ## an existing project. Never opens or migrates a database.
-  let plan = databaseInitPlan(project.root, project.name)
+  var plan = databaseInitPlan(project.root, project.name)
   if plan.len == 0: return @["initialized " & project.root]
+  # Ordinary static conflicts are rejected before the coordination lock.
   checkPlan(project.root, plan, false)
-  for file in plan:
-    result.add((if file.update: "update " else: "create ") & file.path)
-  if not dryRun: writePlan(project.root, plan, false)
+  if dryRun:
+    for file in plan: result.add((if file.update: "update " else: "create ") & file.path)
+    return
+  let lockPath = guardedPath(project.root, migrationGenerator.GenerationLockRelative)
+  createDir(lockPath.parentDir)
+  let lock = acquireFileLock(lockPath)
+  try:
+    # The lock spans the manifest re-read, planning and the whole write plan so
+    # concurrent resource generation cannot lose an update.
+    plan = databaseInitPlan(project.root, project.name)
+    if plan.len == 0: return @["initialized " & project.root]
+    checkPlan(project.root, plan, false)
+    for file in plan:
+      result.add((if file.update: "update " else: "create ") & file.path)
+    writePlan(project.root, plan, false)
+  finally:
+    lock.release()

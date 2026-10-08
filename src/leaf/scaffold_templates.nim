@@ -240,3 +240,17 @@ proc readCanonicalManifest*(value: JsonNode): ScaffoldManifest =
     if result.modelSchema == 2: checkModelFields(resource)
     checkResource(result.resources, resource)
     result.resources.add resource
+
+proc upgradedManifestSource*(value: JsonNode): string =
+  ## Representation-only upgrade of a legacy manifest: deep-copy the existing
+  ## document so unrelated root/resource metadata survives, and change only the
+  ## schema revision, model schema and migration version representation.
+  if value.kind != JObject or value["schema"].getInt == ScaffoldSchema:
+    fail("invalid scaffold manifest schema")
+  var upgraded = copy(value)
+  let modelSchema = upgraded["schema"].getInt
+  upgraded["schema"] = %ScaffoldSchema
+  upgraded["model_schema"] = %modelSchema
+  for entry in upgraded["resources"]:
+    entry["migration"] = %($entry["migration"].getInt)
+  pretty(upgraded) & "\n"

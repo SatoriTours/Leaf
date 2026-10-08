@@ -74,7 +74,8 @@ proc loadManifest(root: string): ScaffoldManifest =
   if not fileExists(path):
     fail("resource generation needs a scaffold application; create one in the current directory")
   result = readCanonicalManifest(parseFile(path))
-  checkManifestSources(root, result.resources, result.schema != 3)
+  checkManifestSources(root, result.resources, result.schema != 3,
+    (if result.schema != 3: 1 else: 0))
   for file in [ScaffoldFile(path: PagesPath, content: pageRegistry(result.resources, result.modelSchema)),
       ScaffoldFile(path: RoutesPath, content: routeRegistry(result.resources))]:
     let registered = guardedPath(root, file.path)

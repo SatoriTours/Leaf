@@ -1,6 +1,6 @@
 import ./cleanup_support
-import std/[algorithm, json, os, osproc, sequtils, strutils, streams, tables, tempfiles, unittest]
-import leaf/[project, package_files, build, scaffold, scaffold_types, sqlite, migrations]
+import std/[algorithm, json, monotimes, os, osproc, sequtils, strutils, streams, tables, tempfiles, times, unittest]
+import leaf/[project, package_files, build, process_io, scaffold, scaffold_types, sqlite, migrations]
 import leaf/migrations/initialization
 import ./migration_compile_support
 when defined(posix): import std/posix
@@ -8,6 +8,28 @@ when defined(posix): import std/posix
 let base = createTempDir("leaf-migration-integration-", "")
 removeDirectoryOnExit(base)
 let fixture = currentSourcePath().parentDir.parentDir / "fixtures" / "scaffold_v1"
+
+proc boundedChild(exe: string, args: seq[string], dir: string,
+    seconds = 900): tuple[code: int, output: string] =
+  ## Managed child: literal arguments (never a shell), a monotonic deadline and
+  ## a `finally` that drains, kills the process group and reaps it.
+  let child = startManaged(exe, args, dir)
+  try:
+    let deadline = getMonoTime() + initDuration(seconds = seconds)
+    while not child.poll():
+      if getMonoTime() > deadline:
+        result.code = 124
+        break
+      sleep(10)
+    if result.code != 124: result.code = child.code
+    result.output = child.output.diagnosticText()
+  finally:
+    child.close()
+
+proc nimArgs(source, outPath, srcRoot, cache: string): seq[string] =
+  @["c", "-r", "--hints:off", "--path:" & srcRoot, "--nimcache:" & cache,
+    "--out:" & outPath, source]
+
 
 proc stopChild(child: Process) =
   if child == nil: return
@@ -272,25 +294,40 @@ suite "scaffold hardening (fix round 1)":
     var migration = ""
     for path in walkFiles(legacy / "db/migrations/*_create_audits.nim"): migration = readFile(path)
     check "string createdAt" in migration
+    check fileExists(legacy / "app/services/audit_service.nim")
+    # An underscore spelling is an ordinary schema 1 field too.
+    discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Event",
+      fields: @["created_at:string"]), legacy)
+    let source = currentSourcePath().parentDir.parentDir.parentDir / "src"
+    writeFile(legacy / "tests/schema1_audit.nim", """
+import std/strutils
+import leaf/sqlite
+import ../config/database
+import ../db/catalog
 
-proc boundedChild(dir, command: string, seconds = 900): tuple[code: int, output: string] =
-  ## A bounded, always-cleaned-up child for the F2 compatibility evidence.
-  var wrapped = command
-  when defined(posix): wrapped = "timeout " & $seconds & " " & command
-  let child = startProcess(wrapped, workingDir = dir,
-    options = {poUsePath, poStdErrToStdOut, poEvalCommand})
-  try:
-    result.output = child.outputStream.readAll()
-    result.code = child.waitForExit()
-  finally:
-    if child.running:
-      child.terminate()
-      result.code = 124
-    child.close()
-
-proc nimCommand(source, outPath, srcRoot, cache: string): string =
-  compiler() & " c -r --hints:off --path:" & srcRoot & " --nimcache:" & cache &
-    " --out:" & outPath & " " & source
+let db = openApplicationDatabase(":memory:")
+let audits = db.query("SELECT sql FROM sqlite_master WHERE name='audits'")[0][0].asString
+doAssert "AUTOINCREMENT" in audits, audits
+var names: seq[string]
+for row in db.query("PRAGMA table_info(audits)"): names.add row[1].asString
+doAssert "createdAt" in names, $names
+doAssert "created_at" notin names, $names
+doAssert "updated_at" notin names, $names
+discard db.execute("INSERT INTO audits (createdAt) VALUES (?)", [dbValue("2024-01-01")])
+doAssert db.query("SELECT createdAt FROM audits")[0][0].asString == "2024-01-01"
+var eventNames: seq[string]
+for row in db.query("PRAGMA table_info(events)"): eventNames.add row[1].asString
+doAssert "created_at" in eventNames, $eventNames
+discard db.execute("INSERT INTO events (created_at) VALUES (?)", [dbValue("2024-02-02")])
+doAssert db.query("SELECT created_at FROM events")[0][0].asString == "2024-02-02"
+db.close()
+echo "schema1 ok"
+""")
+    let ran = boundedChild(compiler(), nimArgs(legacy / "tests/schema1_audit.nim",
+      legacy / "target/schema1-audit", source, legacy / "target/s1-cache"), legacy)
+    checkpoint ran.output
+    check ran.code == 0
+    check "schema1 ok" in ran.output
 
 suite "legacy registry compatibility (F2)":
   test "customized and missing legacy registries are refused with zero writes":
@@ -343,8 +380,8 @@ doAssert readMigrationHistory(db).len == 1
 db.close()
 echo "caller ok"
 """)
-    let run = boundedChild(app, nimCommand(app / "tests/f2_caller.nim",
-      app / "target/f2-caller", source, app / "target/f2-cache"))
+    let run = boundedChild(compiler(), nimArgs(app / "tests/f2_caller.nim",
+      app / "target/f2-caller", source, app / "target/f2-cache"), app)
     checkpoint run.output
     check run.code == 0
     check "caller ok" in run.output
@@ -409,6 +446,70 @@ echo "caller ok"
     check attempt(overflow).startsWith("controlled:")
     check snapshot(overflow) == overflowBefore
 
+  test "implicit task sources and converted manifests are validated":
+    proc snapshot(root: string): Table[string, string] =
+      for path in walkDirRec(root): result[relativePath(path, root)] = readFile(path)
+    proc attempt(root: string): string =
+      try:
+        discard initializeDatabaseProject(readProject(root))
+        result = "accepted"
+      except CatchableError as error: result = "controlled:" & error.msg
+      except Defect as error: result = "DEFECT:" & $error.name & ":" & error.msg
+    for kind in ["task_up_down", "task_down"]:
+      let root = base / ("f2b-" & kind)
+      copyDir(fixture, root)
+      removeFile(root / "db/migrations/001_create_tasks.up.sql")
+      if kind == "task_up_down": removeFile(root / "db/migrations/001_create_tasks.down.sql")
+      let before = snapshot(root)
+      let outcome = attempt(root)
+      checkpoint kind & " -> " & outcome
+      check outcome.startsWith("controlled:")
+      check snapshot(root) == before
+    # A converted (schema 3) scaffold validates registered resources too.
+    let forged = base / "f2b-forged-schema3"
+    copyDir(fixture, forged)
+    discard initializeDatabaseProject(readProject(forged))
+    let manifest = forged / ".leaf/scaffold.json"
+    var value = parseFile(manifest)
+    value["resources"] = %*[{"model": "Note", "singular": "note",
+      "fields": [{"name": "title", "type": "string"}], "migration": "1"}]
+    writeFile(manifest, pretty(value))
+    let forgedBefore = snapshot(forged)
+    let forgedOutcome = attempt(forged)
+    checkpoint "forged_schema3 -> " & forgedOutcome
+    check forgedOutcome.startsWith("controlled:")
+    check snapshot(forged) == forgedBefore
+
+  test "manifest conversion preserves unrelated metadata":
+    let app = base / "f2b-metadata"
+    copyDir(fixture, app)
+    let manifest = app / ".leaf/scaffold.json"
+    var value = parseFile(manifest)
+    value["custom_metadata"] = %*{"keep": true, "note": "user data"}
+    value["resources"] = %*[{"model": "Note", "singular": "note", "custom": "kept",
+      "fields": [{"name": "title", "type": "string"}], "migration": 2}]
+    writeFile(manifest, pretty(value))
+    writeFile(app / "db/migrations/002_create_notes.up.sql", "CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL);\n")
+    writeFile(app / "db/migrations/002_create_notes.down.sql", "DROP TABLE notes;\n")
+    writeFile(app / "app/generated/migrations.nim", "# Generated by leaf scaffold. Do not edit this file.\n" &
+      "import leaf/sqlite\n\nconst\n" &
+      "  migrationSql1 = staticRead(\"../../db/migrations/001_create_tasks.up.sql\")\n" &
+      "  migrationSql2 = staticRead(\"../../db/migrations/002_create_notes.up.sql\")\n\n" &
+      "proc generatedMigrations*(): seq[Migration] =\n  @[\n" &
+      "    Migration(version: 1, name: \"001_create_tasks\", sql: migrationSql1),\n" &
+      "    Migration(version: 2, name: \"002_create_notes\", sql: migrationSql2)\n" &
+      "  ]\n")
+    discard initializeDatabaseProject(readProject(app))
+    let upgraded = parseFile(manifest)
+    check upgraded["schema"].getInt == 3
+    check upgraded["model_schema"].getInt == 1
+    check upgraded["custom_metadata"]["keep"].getBool
+    check upgraded["custom_metadata"]["note"].getStr == "user data"
+    check upgraded["resources"][0]["custom"].getStr == "kept"
+    check upgraded["resources"][0]["migration"].kind == JString
+    check fileExists(app / "target/leaf-migration-generation.lock")
+    check initializeDatabaseProject(readProject(app)) == @["initialized " & app]
+
   test "a schema 2 legacy caller keeps its sources and upgrades the manifest":
     const tasksUp = "CREATE TABLE tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, done INTEGER NOT NULL);\n"
     const notesUp = "CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL);\n"
@@ -459,8 +560,8 @@ doAssert db.query("SELECT title FROM notes")[0][0].asString == "independent"
 echo "history ", readMigrationHistory(db).len
 db.close()
 """)
-    let first = boundedChild(app, nimCommand(app / "tests/f2_schema2_caller.nim",
-      app / "target/f2-s2", source, app / "target/s2-cache"))
+    let first = boundedChild(compiler(), nimArgs(app / "tests/f2_schema2_caller.nim",
+      app / "target/f2-s2", source, app / "target/s2-cache"), app)
     checkpoint first.output
     check first.code == 0
     check "history 2" in first.output
@@ -470,13 +571,13 @@ db.close()
       "    createTable tags:\n      string name, nullable = false\n")
     let delegate = readFile(app / "app/generated/migrations.nim")
     check "seq[MigrationDefinition]" in delegate
-    let second = boundedChild(app, nimCommand(app / "tests/f2_schema2_caller.nim",
-      app / "target/f2-s2b", source, app / "target/s2-cache-b"))
+    let second = boundedChild(compiler(), nimArgs(app / "tests/f2_schema2_caller.nim",
+      app / "target/f2-s2b", source, app / "target/s2-cache-b"), app)
     checkpoint second.output
     check second.code == 0
     check "history 3" in second.output
     check readFile(app / "app/generated/migrations.nim") == delegate
-    let third = boundedChild(app, app / "target/f2-s2b")
+    let third = boundedChild(app / "target/f2-s2b", @[], app)
     checkpoint third.output
     check third.code == 0
     check "history 3" in third.output

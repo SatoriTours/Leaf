@@ -1,5 +1,5 @@
 import ./cleanup_support
-import std/[unittest, os, json, strutils, tempfiles, tables, strtabs, algorithm]
+import std/[unittest, os, json, monotimes, strutils, tempfiles, tables, strtabs, algorithm, times]
 import leaf/[project, package_files, process_io, build, scaffold, scaffold_files, scaffold_types, sqlite]
 import leaf_cli
 
@@ -17,7 +17,11 @@ proc runChild(exe: string, args: seq[string], cwd: string): tuple[code: int, out
   env["LEAF_DATABASE_PATH"] = cwd / "target/testing.sqlite3"
   let child = startManaged(exe, args, cwd, env)
   defer: child.close()
-  while not child.poll(): sleep(10)
+  # A monotonic deadline keeps every compiler child bounded on every platform.
+  let deadline = getMonoTime() + initDuration(seconds = 900)
+  while not child.poll():
+    if getMonoTime() > deadline: return (124, child.output.diagnosticText())
+    sleep(10)
   (child.code, child.output.diagnosticText())
 
 proc runCliIn(root: string, args: seq[string]): int =
@@ -117,7 +121,7 @@ else: doAssert false
     for fields in [@["title:string", "title:int"], @["id:int"], @["createdAt:string"], @["updated_at:float"], @["type:string"],
         @["title:date"], @["foo_bar:string", "foobar:bool"], @["9name:string"],
         @["value:float:extra"], @[]]:
-      check runCliIn(app, @["g", "scaffold", "Note"] & fields & @["--project"]) == 1
+      check runCliIn(app, @["g", "scaffold", "Note"] & fields) == 1
       check files(app) == before
     for args in [@["g"], @["g", "unknown", app],
         @["g", "scaffold", "new", "title:string"],
@@ -374,6 +378,35 @@ echo "generated application ready"
         app / "tests" / test], app)
       checkpoint tested.output
       check tested.code == 0
+    writeFile(app / "tests/storage.nim", """
+import std/options
+import leaf/sqlite
+import leaf/migrations
+import ../config/database
+import ../db/catalog
+
+let db = openApplicationDatabase(":memory:")
+discard db.execute("INSERT INTO notes (title, archived, created_at, updated_at) VALUES (?, ?, 0, 0)", [dbValue("note"), dbValue(0)])
+var checked = false
+try:
+  discard db.execute("INSERT INTO notes (title, archived, created_at, updated_at) VALUES (?, ?, 0, 0)", [dbValue("bad"), dbValue(2)])
+except ConstraintError: checked = true
+doAssert checked, "generated storage must enforce the boolean CHECK"
+discard db.execute("INSERT INTO metrics (count, amount, created_at, updated_at) VALUES (?, ?, 0, 0)", [dbValue(42), dbValue(1.5)])
+let down = runMigrations(db, applicationMigrations(), MigrationRequest(kind: mrMigrate, target: some(0'i64)))
+doAssert down.errors.len == 0, $down.errors
+let tables = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != 'leaf_schema_migrations'")
+doAssert tables.len == 0, "user tables remained"
+doAssert readMigrationHistory(db).len == 0, "history remained"
+db.close()
+echo "storage ok"
+""")
+    let storage = runChild(compiler(), @["c", "-r", "--path:" & sourceRoot,
+      "--nimcache:" & app / "target/storage-cache", "--out:" & app / "target/storage".addFileExt(ExeExt),
+      app / "tests/storage.nim"], app)
+    checkpoint storage.output
+    check storage.code == 0
+    check "storage ok" in storage.output
     discard collectFiles(readProject(app))
 
   when defined(posix):
