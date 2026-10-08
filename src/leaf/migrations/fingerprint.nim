@@ -57,13 +57,17 @@ proc canonicalOperation(operation: SchemaOperation): string =
     result = $operation.kind & " " & canonicalIndex(operation.indexSpec)
 
 proc operationsFingerprint*(definition: MigrationDefinition): string =
-  ## Fingerprint of the canonical two-direction operation plan.
+  ## Fingerprint of the canonical two-direction plan. Legacy SQL migrations have
+  ## no operation lists, so their raw up/down bytes are the plan.
   var canonical = "leaf-migration-operations-v1\n"
   canonical.add "format=" & $definition.format & "\n"
   canonical.add "version=" & $definition.version & "\n"
   canonical.add "name=" & encode(definition.name) & "\n"
   canonical.add "pending=" & $definition.pending & "\n"
   canonical.add "hasDown=" & $definition.hasDown & "\n"
+  if definition.format == mfSqlV1:
+    canonical.add "legacyUp=" & encode(definition.legacyUp) & "\n"
+    canonical.add "legacyDown=" & encode(definition.legacyDown) & "\n"
   canonical.add "up=" & $definition.upOps.len & "\n"
   for operation in definition.upOps: canonical.add canonicalOperation(operation) & "\n"
   canonical.add "down=" & $definition.downOps.len & "\n"
@@ -74,6 +78,8 @@ proc downFingerprint*(definition: MigrationDefinition): string =
   ## Reverse-plan fingerprint. A pending template has no reverse plan yet.
   if not definition.hasDown: return ""
   var canonical = "leaf-migration-down-v1\n"
+  if definition.format == mfSqlV1:
+    canonical.add "legacyDown=" & encode(definition.legacyDown) & "\n"
   canonical.add "down=" & $definition.downOps.len & "\n"
   for operation in definition.downOps: canonical.add canonicalOperation(operation) & "\n"
   sha256Text(canonical)

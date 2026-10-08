@@ -38,6 +38,9 @@ proc renderColumn(column: ColumnSpec): string =
     result.add " CHECK (" & quoteIdentifier(column.name) & " IN (0, 1))"
 
 proc renderCreateTable(spec: TableSpec): string =
+  if not spec.hasId and spec.columns.len == 0:
+    raise migrationError("invalid_table", "table " & spec.name &
+      " must have an automatic id or at least one column")
   var definitions: seq[string]
   if spec.hasId:
     var id = quoteIdentifier("id") & " INTEGER PRIMARY KEY"

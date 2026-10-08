@@ -101,6 +101,25 @@ suite "declarative migration DSL":
       some(SqlValue(kind: sqlNull))
     check operationsFingerprint(absent) != operationsFingerprint(explicitNull)
 
+  test "SQL-format fingerprints cover raw legacy up and down bytes":
+    let original = MigrationDefinition(version: 1'i64, name: "001_legacy",
+      format: mfSqlV1, hasDown: true,
+      legacyUp: "CREATE TABLE x (id INTEGER)", legacyDown: "DROP TABLE x")
+    check operationsFingerprint(original).len == 64
+    check downFingerprint(original).len == 64
+    var changedDown = original
+    changedDown.legacyDown = "DELETE FROM x"
+    check downFingerprint(changedDown) != downFingerprint(original)
+    check operationsFingerprint(changedDown) != operationsFingerprint(original)
+    var changedUp = original
+    changedUp.legacyUp = "CREATE TABLE y (id INTEGER)"
+    check operationsFingerprint(changedUp) != operationsFingerprint(original)
+    check downFingerprint(changedUp) == downFingerprint(original)
+    var upOnly = original
+    upOnly.hasDown = false
+    upOnly.legacyDown = ""
+    check downFingerprint(upOnly) == ""
+
   test "invertOperations reverses order and swaps directions":
     let operations = @[
       SchemaOperation(kind: moCreateTable,
@@ -192,6 +211,16 @@ suite "declarative migration DSL":
       check error.issueCode == "unsupported_sqlite"
       check "renameColumn" in error.msg
       check "3.25" in error.msg
+
+  test "adapter rejects structurally impossible tables":
+    expect MigrationError:
+      discard renderStatements(@[SchemaOperation(kind: moCreateTable,
+        tableSpec: TableSpec(name: "samples", hasId: false),
+        tableDefinitionProvided: true)])
+    check renderStatements(@[SchemaOperation(kind: moCreateTable,
+      tableSpec: TableSpec(name: "samples", hasId: true),
+      tableDefinitionProvided: true)]) ==
+      @["CREATE TABLE \"samples\" (\"id\" INTEGER PRIMARY KEY)"]
 
   test "every first version operation compiles":
     let probe = compileProbe(@[
@@ -392,6 +421,73 @@ db.close()
     check probe.code == 0
     check "ok" in probe.output
 
+  test "Unicode database names compile and execute":
+    let probe = compileProbe(@[
+      ("db/migrations/030_unicode_names.nim", """
+import leaf/migrations
+
+migration unicode_names:
+  change:
+    createTable 用户:
+      string 名称, nullable = false
+    addIndex 用户, [名称]
+"""),
+      ("main.nim", """
+import leaf/sqlite
+include "db/migrations/030_unicode_names.nim"
+doAssert migrationDefinition.upOps[0].tableSpec.name == "用户"
+doAssert migrationDefinition.upOps[0].tableSpec.columns[0].name == "名称"
+doAssert migrationDefinition.upOps[1].indexSpec.name == "index_用户_on_名称"
+let db = openDatabase(":memory:")
+for statement in renderStatements(migrationDefinition.upOps):
+  db.executeScript(statement)
+doAssert db.query("SELECT count(*) FROM \"用户\"").len == 1
+for statement in renderStatements(migrationDefinition.downOps):
+  db.executeScript(statement)
+doAssert db.query("SELECT name FROM sqlite_master WHERE name = '用户'").len == 0
+echo "ok"
+db.close()
+""")], "main.nim", run = true)
+    check probe.code == 0
+    check "ok" in probe.output
+
+  test "explicitly typed signed and finite float literals are accepted":
+    let probe = compileProbe(@[
+      ("db/migrations/031_typed_literals.nim", """
+import leaf/migrations
+
+migration typed_literals:
+  change:
+    createTable samples:
+      integer low_value, default = -9223372036854775808'i64
+      integer high_value, default = 9223372036854775807'i64
+      integer typed, default = 7'i64
+      integer spaced, default = - 7
+      float f32, default = 1.5'f32
+      float f64, default = 2.5'f64
+      float huge, default = 1.0e300'f64
+      datetime at, default = 3.0'f32
+"""),
+      ("main.nim", """
+import std/strutils
+include "db/migrations/031_typed_literals.nim"
+let columns = migrationDefinition.upOps[0].tableSpec.columns
+doAssert columns[0].defaultValue.get().integer == low(int64)
+doAssert columns[1].defaultValue.get().integer == high(int64)
+doAssert columns[2].defaultValue.get().integer == 7
+doAssert columns[3].defaultValue.get().integer == -7
+doAssert columns[4].defaultValue.get().number == 1.5
+doAssert columns[5].defaultValue.get().number == 2.5
+doAssert columns[6].defaultValue.get().number == 1.0e300
+doAssert columns[7].defaultValue.get().number == 3.0
+let sql = renderStatements(migrationDefinition.upOps)[0]
+doAssert "DEFAULT -9223372036854775808" in sql
+doAssert "DEFAULT 9223372036854775807" in sql
+echo "ok"
+""")], "main.nim", run = true)
+    check probe.code == 0
+    check "ok" in probe.output
+
   test "invalid declarations fail with located DSL errors":
     let cases = @[
       (file: "001_bad_string_name.nim", source: """
@@ -536,7 +632,57 @@ migration other_name:
   change:
     createTable tasks:
       string title
-""", expected: "does not match file name")]
+""", expected: "does not match file name"),
+      (file: "018_negative_text_default.nim", source: """
+import leaf/migrations
+
+migration negative_text_default:
+  change:
+    createTable samples:
+      string label, default = -"abc"
+""", expected: "invalid default for column: label"),
+      (file: "019_section_arguments.nim", source: """
+import leaf/migrations
+
+migration section_arguments:
+  change ignored:
+    createTable samples:
+      string label
+""", expected: "take only an indented block"),
+      (file: "027_section_arguments_up.nim", source: """
+import leaf/migrations
+
+migration section_arguments_up:
+  up ignored:
+    createTable tasks:
+      string title
+  down:
+    dropTable tasks:
+      string title
+""", expected: "take only an indented block"),
+      (file: "028_empty_id_less_table.nim", source: """
+import leaf/migrations
+
+migration empty_id_less_table:
+  change:
+    createTable samples, id = false
+""", expected: "must declare at least one column when id = false"),
+      (file: "029_out_of_range_int.nim", source: """
+import leaf/migrations
+
+migration out_of_range_int:
+  change:
+    createTable samples:
+      integer count, default = 9223372036854775808
+""", expected: "number out of range"),
+      (file: "032_infinite_float.nim", source: """
+import leaf/migrations
+
+migration infinite_float:
+  change:
+    createTable samples:
+      float amount, default = 1e400
+""", expected: "invalid default for column: amount")]
     for item in cases:
       let probe = compileProbe(@[
         ("db/migrations/" & item.file, item.source),

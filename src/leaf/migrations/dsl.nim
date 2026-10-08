@@ -16,13 +16,10 @@ proc tokenName(node: NimNode, what: string): string =
   ## Preserve the raw spelling of a bare identifier (including backticks).
   case node.kind
   of nnkIdent:
+    # The parser already guarantees a legal Nim identifier token; Unicode names
+    # are legal database names and keep their spelling.
     result = node.strVal
     if result.len == 0: dslError(node, what & " must be a bare identifier")
-    if result[0] notin {'A'..'Z', 'a'..'z', '_'}:
-      dslError(node, what & " must be a bare identifier: " & result)
-    for index in 1 ..< result.len:
-      if result[index] notin {'A'..'Z', 'a'..'z', '0'..'9', '_'}:
-        dslError(node, what & " must be a bare identifier: " & result)
   of nnkAccQuoted:
     if node.len == 0: dslError(node, what & " must be a bare identifier")
     for index, part in node:
@@ -68,6 +65,10 @@ proc columnKind(node: NimNode): ColumnKind =
     else: discard
   dslError(node, "column type must be string, text, integer, float, boolean or datetime")
 
+const
+  SignedIntLiterals = {nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit}
+  FloatLiterals = {nnkFloatLit, nnkFloat32Lit, nnkFloat64Lit, nnkFloat128Lit}
+
 proc defaultLiteral(node: NimNode, kind: ColumnKind, columnName: string,
     nullable: bool): Option[SqlValue] =
   let label = "invalid default for column: " & columnName
@@ -75,38 +76,40 @@ proc defaultLiteral(node: NimNode, kind: ColumnKind, columnName: string,
     if not nullable:
       dslError(node, "column " & columnName & " cannot default to nil unless nullable = true")
     return some(SqlValue(kind: sqlNull))
+  # A unary minus is only meaningful for numeric literals; text/boolean defaults
+  # must not silently drop it.
+  var signedNegative = false
   var literal = node
-  var negative = false
   if literal.kind == nnkPrefix and literal.len == 2 and literal[0].kind == nnkIdent and
       literal[0].strVal == "-":
-    negative = true
+    signedNegative = true
     literal = literal[1]
   case kind
   of ckText:
-    if literal.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
-      let text = literal.strVal
+    if node.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+      let text = node.strVal
       if '\0' in text:
         dslError(node, label & " (text default cannot contain NUL)")
       return some(SqlValue(kind: sqlText, text: text))
     dslError(node, label)
   of ckInteger:
-    if literal.kind == nnkIntLit:
+    if literal.kind in SignedIntLiterals:
       return some(SqlValue(kind: sqlInteger,
-        integer: (if negative: -literal.intVal else: literal.intVal)))
+        integer: (if signedNegative: -literal.intVal else: literal.intVal)))
     dslError(node, label)
   of ckReal, ckDateTime:
-    if literal.kind == nnkFloatLit:
-      let number = if negative: -literal.floatVal else: literal.floatVal
+    if literal.kind in FloatLiterals:
+      let number = if signedNegative: -literal.floatVal else: literal.floatVal
       if classify(number) in {fcNan, fcInf, fcNegInf}: dslError(node, label)
       return some(SqlValue(kind: sqlFloat, number: number))
-    if literal.kind == nnkIntLit:
-      let number = float(if negative: -literal.intVal else: literal.intVal)
+    if literal.kind in SignedIntLiterals:
+      let number = float(if signedNegative: -literal.intVal else: literal.intVal)
       return some(SqlValue(kind: sqlFloat, number: number))
     dslError(node, label)
   of ckBoolean:
-    if not negative and literal.kind == nnkIdent and literal.strVal in ["true", "false"]:
+    if not signedNegative and node.kind == nnkIdent and node.strVal in ["true", "false"]:
       return some(SqlValue(kind: sqlInteger,
-        integer: (if literal.strVal == "true": 1 else: 0)))
+        integer: (if node.strVal == "true": 1 else: 0)))
     dslError(node, label)
 
 type OperationArguments = object
@@ -216,6 +219,8 @@ proc parseTable(node: NimNode, operation: string,
     columns = parseTableBody(arguments.body, hasId)
   elif requireBody:
     dslError(node, operation & " in change requires the original table structure")
+  if not hasId and columns.len == 0:
+    dslError(node, "table " & name & " must declare at least one column when id = false")
   result = (spec: TableSpec(name: name, columns: columns, hasId: hasId,
     autoIncrement: autoIncrement), bodyProvided: arguments.body != nil)
 
@@ -466,12 +471,10 @@ macro migration*(name, body: untyped): untyped =
   var changeBlock, upBlock, downBlock: NimNode
   for statement in body:
     if statement.kind == nnkCommentStmt: continue
-    if statement.kind notin {nnkCall, nnkCommand} or statement.len < 2 or
-        statement[0].kind != nnkIdent:
-      dslError(statement, "migration body must contain a change or up/down block")
+    if statement.kind notin {nnkCall, nnkCommand} or statement.len != 2 or
+        statement[0].kind != nnkIdent or statement[^1].kind != nnkStmtList:
+      dslError(statement, "change, up and down take only an indented block")
     let section = statement[0].strVal
-    if statement[^1].kind != nnkStmtList:
-      dslError(statement, section & " requires an indented block")
     case section
     of "change":
       if changeBlock != nil: dslError(statement, "duplicate change block")
