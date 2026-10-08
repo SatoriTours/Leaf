@@ -26,14 +26,35 @@ proc boundedChild(exe: string, args: seq[string], dir: string,
   finally:
     child.close()
 
+proc stamp(path: string): string =
+  ## Exact seconds and nanoseconds; no float rounding.
+  let value = getLastModificationTime(path)
+  $value.toUnix & "." & $value.nanosecond
+
 proc snapshotTree(root: string): Table[string, string] =
-  ## Bytes plus high-resolution mtime for every file and directory.
+  ## Bytes plus exact mtime for the root, every file and every directory.
+  result["."] = "dir:" & stamp(root)
   for path in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
     let rel = relativePath(path, root)
     if dirExists(path):
-      result[rel & "/"] = "dir:" & $getLastModificationTime(path).toUnixFloat
+      result[rel & "/"] = "dir:" & stamp(path)
     else:
-      result[rel] = "file:" & $getLastModificationTime(path).toUnixFloat & ":" & readFile(path)
+      result[rel] = "file:" & stamp(path) & ":" & readFile(path)
+
+proc waitReady(children: seq[ManagedProcess], marker: proc(): bool {.closure.},
+    seconds: int): void =
+  ## Real monotonic readiness wait: raises on an unexpected early exit or on a
+  ## genuine deadline instead of continuing past a failed check.
+  let deadline = getMonoTime() + initDuration(seconds = seconds)
+  while true:
+    for child in children:
+      discard child.poll()
+      if child.code != -1:
+        raise newException(IOError, "child exited before readiness: " & $child.code)
+    if marker(): return
+    if getMonoTime() > deadline:
+      raise newException(IOError, "readiness deadline expired")
+    sleep(10)
 
 proc finishBounded(child: ManagedProcess, seconds = 900): int =
   let deadline = getMonoTime() + initDuration(seconds = seconds)
@@ -724,19 +745,48 @@ echo "staging ok"
       check child.code != -1
       when defined(posix):
         check posix.kill(Pid(pid), 0) != 0
-      # A failed second spawn still closes and reaps the first child.
+      # A never-ready live child raises on the deadline instead of looping.
+      let neverReady = startManaged(blocker.binary, @[], tools)
+      let waitStarted = getMonoTime()
+      var timedOut = false
+      try:
+        waitReady(@[neverReady], proc(): bool = false, 1)
+      except CatchableError:
+        timedOut = true
+      finally:
+        neverReady.close()
+      check timedOut
+      check (getMonoTime() - waitStarted) < initDuration(seconds = 10)
+      check neverReady.code != -1
+      # A child that exits before readiness is a real error, not a silent wait.
+      let early = startManaged(exit7.binary, @[], tools)
+      var earlyFailed = false
+      try:
+        waitReady(@[early], proc(): bool = false, 30)
+      except CatchableError:
+        earlyFailed = true
+      finally:
+        early.close()
+      check earlyFailed
+      # A failed second spawn still closes and reaps a genuinely active child.
       var children: seq[ManagedProcess]
       var raised = false
       try:
-        children.add startManaged(exit7.binary, @[], tools)
+        children.add startManaged(blocker.binary, @[], tools)
+        discard children[0].poll()
+        check children[0].code == -1
+        let pid = children[0].pid
         children.add startManaged(tools / "missing-binary-xyz", @[], tools)
+        check false
       except CatchableError:
         raised = true
       finally:
         for child in children: child.close()
       check raised
       check children.len == 1
-      check children[0].code >= 0
+      check children[0].code != -1
+      when defined(posix):
+        check posix.kill(Pid(children[0].pid), 0) != 0
 
   test "generator races share one lock and keep an exact consistent catalog":
     let tools = base / "tools-race"
@@ -776,11 +826,10 @@ except CatchableError as error:
             @["resource", root, "", root / "target/first"], root)
           children.add startManaged(worker.binary,
             @[secondKind, root, migrationName, root / "target/second"], root)
-          let deadline = getMonoTime() + initDuration(seconds = 30)
-          while not (fileExists(root / "target/first") and fileExists(root / "target/second")):
-            check getMonoTime() < deadline
-            sleep(10)
+          waitReady(children, proc(): bool =
+            fileExists(root / "target/first") and fileExists(root / "target/second"), 30)
           sleep(600)
+          for child in children: discard child.poll()
           let blocked = children[0].code == -1 and children[1].code == -1
           check blocked
           lock.release()

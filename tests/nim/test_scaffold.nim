@@ -24,6 +24,19 @@ proc runChild(exe: string, args: seq[string], cwd: string): tuple[code: int, out
     sleep(10)
   (child.code, child.output.diagnosticText())
 
+proc stamp(path: string): string =
+  let value = getLastModificationTime(path)
+  $value.toUnix & "." & $value.nanosecond
+
+proc snapshotTree(root: string): Table[string, string] =
+  result["."] = "dir:" & stamp(root)
+  for path in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
+    let rel = relativePath(path, root)
+    if dirExists(path):
+      result[rel & "/"] = "dir:" & stamp(path)
+    else:
+      result[rel] = "file:" & stamp(path) & ":" & readFile(path)
+
 proc runCliIn(root: string, args: seq[string]): int =
   createDir(root)
   let previous = getCurrentDir()
@@ -174,18 +187,13 @@ else: doAssert false
     createDir(app)
     writeFile(app / "README.md", "user readme\n")
     writeFile(app / "main.nim", "# user entry\n")
-    var before: Table[string, string]
-    for path in walkDirRec(app):
-      before[relativePath(path, app)] = readFile(path)
+    let before = snapshotTree(app)
     var message = ""
     try: discard generateScaffold(ScaffoldOptions(mode: smApplication), app)
     except CatchableError as error: message = error.msg
     check "README.md" in message
     check "main.nim" in message
-    var after: Table[string, string]
-    for path in walkDirRec(app):
-      after[relativePath(path, app)] = readFile(path)
-    check after == before
+    check snapshotTree(app) == before
     check readFile(app / "README.md") == "user readme\n"
     check not dirExists(app / "target")
     check not fileExists(app / "target/leaf-migration-generation.lock")
