@@ -108,6 +108,38 @@ proc openDatabase*(path: string): Database =
     result.close()
     raise
 
+proc openDatabaseReadOnly*(path: string): Database =
+  ## READONLY | FULLMUTEX. A missing database fails; nothing is created, and
+  ## committed-but-uncheckpointed WAL data is still visible (no `immutable`).
+  if path.len == 0 or '\0' in path: raise newException(DatabaseError, "invalid database path")
+  result = Database()
+  when compileOption("threads"): result.ownerThread = getThreadId()
+  let code = native.openConnection(path.cstring, addr result.connection, 0x10001, nil)
+  if code != 0:
+    let message = if result.connection == nil: "cannot allocate SQLite connection"
+      else: $native.errorMessage(result.connection)
+    result.close()
+    raise newException(DatabaseError, "SQLite: " & message)
+  try:
+    result.check(native.busyTimeout(result.connection, 5000))
+  except CatchableError:
+    result.close()
+    raise
+
+proc databaseFile*(db: Database): string =
+  db.requireUsable()
+  let name = native.databaseFilename(db.connection, "main".cstring)
+  if name == nil: "" else: $name
+
+proc isAutocommit*(db: Database): bool =
+  db.requireUsable()
+  native.getAutocommit(db.connection) != 0
+
+proc sqliteRuntimeVersion*(): tuple[major, minor, patch: int] =
+  let version = int(native.libraryVersionNumber())
+  (major: version div 1_000_000, minor: (version div 1_000) mod 1_000,
+    patch: version mod 1_000)
+
 proc prepare(db: Database, sql: string, values: openArray[SqlValue]): ptr native.SqliteStatement =
   db.requireUsable()
   if '\0' in sql: raise newException(DatabaseError, "SQL cannot contain NUL")

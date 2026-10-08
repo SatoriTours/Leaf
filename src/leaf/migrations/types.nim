@@ -52,7 +52,7 @@ type
   MigrationRequest* = object
     kind*: MigrationRequestKind
     target*: Option[int64]
-    steps*: int
+    steps*: int = 1
   MigrationRecord* = object
     version*: int64
     name*, sql*, format*, sourceChecksum*, operationsChecksum*, downChecksum*: string

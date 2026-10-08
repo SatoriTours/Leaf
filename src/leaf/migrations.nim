@@ -9,7 +9,9 @@ import ./migrations/sqlite_adapter
 import ./migrations/fingerprint
 import ./migrations/catalog
 import ./migrations/generator
+import ./migrations/history
 import ./migrations/locking
+import ./migrations/planner
 import ./migrations/dsl
 from ./sqlite import SqlValue, SqlKind, DatabaseError, ConstraintError
 
@@ -21,6 +23,8 @@ export sqlite_adapter
 export fingerprint
 export catalog
 export generator
+export history
 export locking
+export planner
 export dsl
 export SqlValue, SqlKind, DatabaseError, ConstraintError

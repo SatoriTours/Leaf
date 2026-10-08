@@ -36,4 +36,7 @@ proc changedRows*(db: ptr SqliteConnection): cint {.importc: "sqlite3_changes".}
 proc insertId*(db: ptr SqliteConnection): int64 {.importc: "sqlite3_last_insert_rowid".}
 proc executeScript*(db: ptr SqliteConnection, sql: cstring, callback, context, error: pointer): cint {.importc: "sqlite3_exec".}
 proc setAuthorizer*(db: ptr SqliteConnection, callback: Authorizer, context: pointer): cint {.importc: "sqlite3_set_authorizer".}
+proc databaseFilename*(db: ptr SqliteConnection, name: cstring): cstring {.importc: "sqlite3_db_filename".}
+proc getAutocommit*(db: ptr SqliteConnection): cint {.importc: "sqlite3_get_autocommit".}
+proc libraryVersionNumber*(): cint {.importc: "sqlite3_libversion_number".}
 {.pop.}
