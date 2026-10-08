@@ -1,4 +1,4 @@
-import std/[unittest, tables, options, math]
+import std/[unittest, tables, options, math, unicode]
 import leaf/[core, widgets, styles, backend, backend_session, native_layout]
 import leaf/backends/headless
 import leaf/backends/win32/capabilities
@@ -156,16 +156,28 @@ suite "Bounded DIP linear layout":
     check boxes[1].rect.width == 42
     check boxes[1].rect.height == 12
 
-  test "zero sized content stays finite":
+  test "zero sized content keeps identity and finite geometry":
     var entities: Table[NodeHandle, MountedEntity]
     entities[NodeHandle(1)] = ent(1, 0, row, 0, LayoutProps(gap: some(4.0)))
     entities[NodeHandle(2)] = ent(2, 1, text, 0, LayoutProps(width: fixedDim(10)))
     let boxes = layoutTree(entities, DipSize(width: 0, height: 0), zeroMeasure)
+    # The zero-size result must still contain both entities in identity order.
+    check boxes.len == 2
+    check boxes[0].handle == NodeHandle(1)
+    check boxes[1].handle == NodeHandle(2)
+    check boxes[0].rect == DipRect(x: 0, y: 0, width: 0, height: 0)
+    check boxes[0].clip.width == 0
+    check boxes[0].clip.height == 0
+    check boxes[1].rect.width == 10
     for box in boxes:
       check box.rect.width >= 0
       check box.rect.height >= 0
+      check box.clip.width >= 0
+      check box.clip.height >= 0
       check classify(box.rect.x) notin {fcNan, fcInf, fcNegInf}
       check classify(box.rect.y) notin {fcNan, fcInf, fcNegInf}
+      check classify(box.rect.width) notin {fcNan, fcInf, fcNegInf}
+      check classify(box.rect.height) notin {fcNan, fcInf, fcNegInf}
 
   test "10000 large fixed children accumulate without overflow":
     var entities: Table[NodeHandle, MountedEntity]
@@ -182,8 +194,8 @@ suite "Bounded DIP linear layout":
     check boxes[10_000].clip.width == 1000
     check boxes[10_000].clip.height == 100
 
-  test "measure is called once per leaf and results drive layout":
-    var calls = 0
+  test "measure is cached per distinct effective constraint":
+    var keys: seq[(uint64, float64, float64)]
     var entities: Table[NodeHandle, MountedEntity]
     entities[NodeHandle(1)] = ent(1, 0, row, 0, LayoutProps(gap: some(2.0)))
     entities[NodeHandle(2)] = ent(2, 1, text, 0, LayoutProps(width: autoDim()))
@@ -191,10 +203,15 @@ suite "Bounded DIP linear layout":
     entities[NodeHandle(4)] = ent(4, 1, column, 2, LayoutProps(width: autoDim()))
     entities[NodeHandle(5)] = ent(5, 4, text, 0, LayoutProps(height: autoDim()))
     let measure = proc(entity: MountedEntity, available: DipSize): DipSize =
-      inc calls
+      keys.add((uint64(entity.handle), available.width, available.height))
       DipSize(width: 5, height: 3)
     let boxes = layoutTree(entities, DipSize(width: 100, height: 50), measure)
-    check calls == 3
+    # The same effective constraint is measured once within one layout call.
+    var seen: seq[(uint64, float64, float64)]
+    for key in keys:
+      check key notin seen
+      seen.add(key)
+    check keys.len >= 3
     check boxes[1].rect.width == 5
     check boxes[2].rect.width == 5
     check boxes[3].rect.width == 5
@@ -321,3 +338,154 @@ suite "Win32 capability boundary":
       strict).len == 0
     check checkCapabilities(mount(checkbox("c", true, key = "c")), caps,
       strict).len == 0
+suite "MeasureProc local constraint and finite geometry":
+  proc entityOf(handle, parent: uint64, index: int, node: Node): MountedEntity =
+    MountedEntity(handle: NodeHandle(handle), parent: NodeHandle(parent),
+      nodeId: "n" & $handle, kind: node.kind, index: index,
+      props: normalizeProps(node))
+
+  proc widthHeightMeasure(widths: ref seq[float64],
+                          narrowLimit = 20.0): MeasureProc =
+    result = proc(entity: MountedEntity, available: DipSize): DipSize =
+      widths[].add(available.width)
+      let label = entity.props.accessibility.label.get("")
+      let natural = float64(runeLen(label)) * 10.0
+      let height = if available.width <= narrowLimit: 30.0 else: 10.0
+      DipSize(width: min(natural, available.width), height: height)
+
+  test "fixed width column measures its text under the local width":
+    var widths = new(seq[float64])
+    var entities: Table[NodeHandle, MountedEntity]
+    entities[NodeHandle(1)] = ent(1, 0, row, 0)
+    entities[NodeHandle(2)] = entityOf(2, 1, 0,
+      ui(NodeKind.column, styles = style({"width": "20"})))
+    entities[NodeHandle(3)] = entityOf(3, 2, 0,
+      ui(NodeKind.text, text = "你好😀世界"))
+    let boxes = layoutTree(entities, DipSize(width: 100, height: 100),
+      widthHeightMeasure(widths))
+    check boxes.len == 3
+    check boxes[1].rect.width == 20
+    check boxes[1].rect.height == 30
+    check boxes[2].rect.height == 30
+    check 20.0 in widths[]
+    check 100.0 notin widths[]
+
+  test "nested padding narrows the measured constraint":
+    var widths = new(seq[float64])
+    var entities: Table[NodeHandle, MountedEntity]
+    entities[NodeHandle(1)] = ent(1, 0, row, 0)
+    entities[NodeHandle(2)] = entityOf(2, 1, 0,
+      ui(NodeKind.column, styles = style({"width": "20", "padding": "5"})))
+    entities[NodeHandle(3)] = entityOf(3, 2, 0,
+      ui(NodeKind.text, text = "你好😀世界"))
+    let boxes = layoutTree(entities, DipSize(width: 100, height: 100),
+      widthHeightMeasure(widths))
+    check 10.0 in widths[]
+    check 20.0 notin widths[]
+    # 30 content + 2 * 5 padding.
+    check boxes[1].rect.height == 40
+
+  test "fill allocated width re-measures the leaf height":
+    var entities: Table[NodeHandle, MountedEntity]
+    entities[NodeHandle(1)] = ent(1, 0, row, 0)
+    entities[NodeHandle(2)] = ent(2, 1, text, 0, LayoutProps(width: fixedDim(80)))
+    entities[NodeHandle(3)] = entityOf(3, 1, 1,
+      ui(NodeKind.text, text = "你好😀世界", styles = style({"width": "full"})))
+    let narrow = layoutTree(entities, DipSize(width: 100, height: 100),
+      widthHeightMeasure(new(seq[float64])))
+    check narrow[2].rect.width == 20
+    check narrow[2].rect.height == 30
+    let wide = layoutTree(entities, DipSize(width: 200, height: 100),
+      widthHeightMeasure(new(seq[float64])))
+    check wide[2].rect.width == 120
+    check wide[2].rect.height == 10
+
+  test "fixed height is not overridden by measurement":
+    var entities: Table[NodeHandle, MountedEntity]
+    entities[NodeHandle(1)] = ent(1, 0, row, 0)
+    entities[NodeHandle(2)] = entityOf(2, 1, 0,
+      ui(NodeKind.text, text = "x", styles = style({"width": "full", "height": "50"})))
+    let boxes = layoutTree(entities, DipSize(width: 100, height: 100),
+      widthHeightMeasure(new(seq[float64])))
+    check boxes[1].rect.height == 50
+
+  test "stretch never shrinks a larger intrinsic cross":
+    var entities: Table[NodeHandle, MountedEntity]
+    entities[NodeHandle(1)] = ent(1, 0, row, 0, LayoutProps(align: some(alignStretch)))
+    entities[NodeHandle(2)] = entityOf(2, 1, 0,
+      ui(NodeKind.text, text = "你好😀世界", styles = style({"width": "full"})))
+    let measure = proc(entity: MountedEntity, available: DipSize): DipSize =
+      DipSize(width: available.width, height: 30.0)
+    let boxes = layoutTree(entities, DipSize(width: 100, height: 10), measure)
+    check boxes[1].rect.height == 30
+
+  test "explicit zero grow is distinct from default fill":
+    var zero: Table[NodeHandle, MountedEntity]
+    zero[NodeHandle(1)] = ent(1, 0, row, 0)
+    zero[NodeHandle(2)] = entityOf(2, 1, 0,
+      ui(NodeKind.text, text = "x", styles = style({"width": "full", "flex_grow": "0"})))
+    check layoutTree(zero, DipSize(width: 100, height: 20), zeroMeasure)[1].rect.width == 0
+
+    var default: Table[NodeHandle, MountedEntity]
+    default[NodeHandle(1)] = ent(1, 0, row, 0)
+    default[NodeHandle(2)] = entityOf(2, 1, 0,
+      ui(NodeKind.text, text = "x", styles = style({"width": "full"})))
+    check layoutTree(default, DipSize(width: 100, height: 20), zeroMeasure)[1].rect.width == 100
+
+    var fixed: Table[NodeHandle, MountedEntity]
+    fixed[NodeHandle(1)] = ent(1, 0, row, 0)
+    fixed[NodeHandle(2)] = entityOf(2, 1, 0,
+      ui(NodeKind.text, text = "x", styles = style({"width": "10", "flex_grow": "0"})))
+    check layoutTree(fixed, DipSize(width: 100, height: 20), zeroMeasure)[1].rect.width == 10
+
+    var growFixed: Table[NodeHandle, MountedEntity]
+    growFixed[NodeHandle(1)] = ent(1, 0, row, 0)
+    growFixed[NodeHandle(2)] = entityOf(2, 1, 0,
+      ui(NodeKind.text, text = "x", styles = style({"width": "10", "flex_grow": "2"})))
+    check layoutTree(growFixed, DipSize(width: 100, height: 20), zeroMeasure)[1].rect.width == 100
+
+    var justify: Table[NodeHandle, MountedEntity]
+    justify[NodeHandle(1)] = ent(1, 0, row, 0, LayoutProps(justify: some(justifyEnd)))
+    justify[NodeHandle(2)] = entityOf(2, 1, 0,
+      ui(NodeKind.text, text = "x", styles = style({"width": "10", "flex_grow": "0"})))
+    check layoutTree(justify, DipSize(width: 100, height: 20), zeroMeasure)[1].rect.x == 90
+
+  test "huge finite weighted fill stays finite":
+    var huge: Table[NodeHandle, MountedEntity]
+    huge[NodeHandle(1)] = ent(1, 0, row, 0)
+    huge[NodeHandle(2)] = ent(2, 1, text, 0,
+      LayoutProps(width: fillDim(), flexGrow: some(2.0)))
+    let boxes = layoutTree(huge, DipSize(width: 1e308, height: 20), zeroMeasure)
+    check boxes.len == 2
+    for box in boxes:
+      check classify(box.rect.width) notin {fcNan, fcInf, fcNegInf}
+      check classify(box.rect.x) notin {fcNan, fcInf, fcNegInf}
+    check boxes[1].rect.width == 1e308
+
+  test "derived placement that cannot be represented raises UiError":
+    var entities: Table[NodeHandle, MountedEntity]
+    entities[NodeHandle(1)] = ent(1, 0, column, 0, LayoutProps(align: some(alignEnd)))
+    entities[NodeHandle(2)] = ent(2, 1, column, 0, LayoutProps(
+      width: fixedDim(1.7e308), padding: some(1e308), align: some(alignEnd)))
+    entities[NodeHandle(3)] = ent(3, 2, column, 0, LayoutProps(
+      width: fixedDim(1.7e308), align: some(alignEnd)))
+    entities[NodeHandle(4)] = ent(4, 3, text, 0)
+    expect UiError:
+      discard layoutTree(entities, DipSize(width: 100, height: 20), zeroMeasure)
+
+  test "nested fill and explicit positive grow matrix":
+    var entities: Table[NodeHandle, MountedEntity]
+    entities[NodeHandle(1)] = ent(1, 0, row, 0, LayoutProps(gap: some(10.0)))
+    entities[NodeHandle(2)] = ent(2, 1, text, 0, LayoutProps(width: fixedDim(20)))
+    entities[NodeHandle(3)] = ent(3, 1, column, 1,
+      LayoutProps(width: fillDim(), height: fillDim(), flexGrow: some(1.0),
+        gap: some(4.0)))
+    entities[NodeHandle(4)] = ent(4, 3, text, 0, LayoutProps(height: fixedDim(5)))
+    entities[NodeHandle(5)] = ent(5, 3, text, 1,
+      LayoutProps(height: fillDim(), flexGrow: some(3.0)))
+    let boxes = layoutTree(entities, DipSize(width: 120, height: 60), zeroMeasure)
+    # 120 - 20(fixed) - 10(gap) = 90 remainder, single weight 1 -> column width 90.
+    check boxes[2].rect.width == 90
+    # Column content height 60: 5 fixed + 4 gap leaves 51 for the grow-3 fill.
+    check boxes[3].rect.height == 5
+    check boxes[4].rect.height == 51
