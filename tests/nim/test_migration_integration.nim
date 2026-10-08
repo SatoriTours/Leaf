@@ -26,6 +26,15 @@ proc boundedChild(exe: string, args: seq[string], dir: string,
   finally:
     child.close()
 
+proc snapshotTree(root: string): Table[string, string] =
+  ## Bytes plus high-resolution mtime for every file and directory.
+  for path in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
+    let rel = relativePath(path, root)
+    if dirExists(path):
+      result[rel & "/"] = "dir:" & $getLastModificationTime(path).toUnixFloat
+    else:
+      result[rel] = "file:" & $getLastModificationTime(path).toUnixFloat & ":" & readFile(path)
+
 proc finishBounded(child: ManagedProcess, seconds = 900): int =
   let deadline = getMonoTime() + initDuration(seconds = seconds)
   while not child.poll():
@@ -168,14 +177,14 @@ echo "ok"
       let app = base / "concurrent"
       createDir(app)
       discard generateScaffold(ScaffoldOptions(mode: smApplication), app)
-      let first = startManaged(worker.binary, @[app, "Alpha"], app)
-      let second = startManaged(worker.binary, @[app, "Beta"], app)
+      var children: seq[ManagedProcess]
       try:
-        check finishBounded(first) == 0
-        check finishBounded(second) == 0
+        children.add startManaged(worker.binary, @[app, "Alpha"], app)
+        children.add startManaged(worker.binary, @[app, "Beta"], app)
+        check finishBounded(children[0]) == 0
+        check finishBounded(children[1]) == 0
       finally:
-        first.close()
-        second.close()
+        for child in children: child.close()
       let manifest = parseFile(app / ".leaf/scaffold.json")
       var names: seq[string]
       for entry in manifest["resources"]: names.add(entry["model"].getStr)
@@ -662,80 +671,149 @@ echo "staging ok"
     check ran.code == 0
     check "staging ok" in ran.output
 
-  test "concurrent same-name resources keep one consistent catalog":
-    let tools = base / "tools-same"
+  test "initializer dry run and exact no-op change no bytes or mtimes":
+    let app = base / "f7-init-idempotent"
+    createDir(app)
+    discard generateScaffold(ScaffoldOptions(mode: smApplication), app)
+    let before = snapshotTree(app)
+    discard initializeDatabaseProject(readProject(app), dryRun = true)
+    check snapshotTree(app) == before
+    check initializeDatabaseProject(readProject(app)) == @["initialized " & app]
+    check snapshotTree(app) == before
+    let legacy = base / "f7-init-dryrun"
+    copyDir(fixture, legacy)
+    let legacyBefore = snapshotTree(legacy)
+    discard initializeDatabaseProject(readProject(legacy), dryRun = true)
+    check snapshotTree(legacy) == legacyBefore
+    check not fileExists(legacy / "target/leaf-migration-generation.lock")
+
+  test "scaffold dry runs change no bytes or mtimes":
+    let fresh = base / "f7-app-dryrun"
+    createDir(fresh)
+    let freshBefore = snapshotTree(fresh)
+    discard generateScaffold(ScaffoldOptions(mode: smApplication, dryRun: true), fresh)
+    check snapshotTree(fresh) == freshBefore
+    check not dirExists(fresh / "target")
+    let app = base / "f7-resource-dryrun"
+    createDir(app)
+    discard generateScaffold(ScaffoldOptions(mode: smApplication), app)
+    let before = snapshotTree(app)
+    discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Note",
+      fields: @["title:string"], dryRun: true), app)
+    check snapshotTree(app) == before
+
+  test "managed children report known exits, honour deadlines and always reap":
+    let tools = base / "tools-managed"
+    writeProbeFiles(tools, @[
+      ("exit7.nim", "import std/os\nquit(7)\n"),
+      ("blocker.nim", "import std/os\nsleep(60_000)\n")])
+    let exit7 = buildProbe(tools, "exit7.nim", base / "tools-managed-cache", "exit7")
+    let blocker = buildProbe(tools, "blocker.nim", base / "tools-managed-cache", "blocker")
+    check exit7.code == 0
+    check blocker.code == 0
+    if exit7.code == 0 and blocker.code == 0:
+      check boundedChild(exit7.binary, @[], tools).code == 7
+      let started = getMonoTime()
+      check boundedChild(blocker.binary, @[], tools, seconds = 1).code == 124
+      check (getMonoTime() - started) < initDuration(seconds = 10)
+      # The deadline path reaps the child instead of leaking it.
+      let child = startManaged(blocker.binary, @[], tools)
+      check finishBounded(child, 1) == 124
+      let pid = child.pid
+      child.close()
+      check child.code != -1
+      when defined(posix):
+        check posix.kill(Pid(pid), 0) != 0
+      # A failed second spawn still closes and reaps the first child.
+      var children: seq[ManagedProcess]
+      var raised = false
+      try:
+        children.add startManaged(exit7.binary, @[], tools)
+        children.add startManaged(tools / "missing-binary-xyz", @[], tools)
+      except CatchableError:
+        raised = true
+      finally:
+        for child in children: child.close()
+      check raised
+      check children.len == 1
+      check children[0].code >= 0
+
+  test "generator races share one lock and keep an exact consistent catalog":
+    let tools = base / "tools-race"
     writeProbeFiles(tools, @[("worker.nim", """
 import std/os
 import leaf/scaffold
+import leaf/migrations
 
-discard generateScaffold(ScaffoldOptions(mode: smResource, target: paramStr(2),
-  fields: @["title:string"]), paramStr(1))
-echo "ok"
+let kind = paramStr(1)
+let root = paramStr(2)
+writeFile(paramStr(4), "ready")
+try:
+  if kind == "resource":
+    discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Note",
+      fields: @["title:string"]), root)
+  else:
+    discard generateMigration(root, paramStr(3))
+  echo "ok"
+except CatchableError as error:
+  stderr.writeLine(error.msg)
+  quit(1)
 """)])
-    let worker = buildProbe(tools, "worker.nim", base / "tools-same-cache", "worker")
+    let worker = buildProbe(tools, "worker.nim", base / "tools-race-cache", "worker")
     check worker.code == 0
     if worker.code == 0:
-      let app = base / "race-same"
-      createDir(app)
-      discard generateScaffold(ScaffoldOptions(mode: smApplication), app)
-      let first = startManaged(worker.binary, @[app, "Note"], app)
-      let second = startManaged(worker.binary, @[app, "Note"], app)
-      var codes: seq[int]
-      try:
-        codes = @[finishBounded(first), finishBounded(second)]
-      finally:
-        first.close()
-        second.close()
-      checkpoint $codes
-      check codes.count(0) >= 1
-      let manifest = parseFile(app / ".leaf/scaffold.json")
-      var names: seq[string]
-      for entry in manifest["resources"]: names.add entry["model"].getStr
-      check names.count("Note") == 1
-      var migrations: seq[string]
-      for path in walkFiles(app / "db/migrations/*_create_notes.*"): migrations.add path
-      check migrations.len == 1
-      check fileExists(app / "app/models/note.nim")
-
-  test "resource generation racing an application scaffold stays consistent":
-    let tools = base / "tools-mixed"
-    writeProbeFiles(tools, @[("worker.nim", """
-import std/os
-import leaf/scaffold
-
-discard generateScaffold(ScaffoldOptions(mode: smResource, target: paramStr(2),
-  fields: @["title:string"]), paramStr(1))
-echo "ok"
-"""), ("appworker.nim", """
-import std/os
-import leaf/scaffold
-
-discard generateScaffold(ScaffoldOptions(mode: smApplication), paramStr(1))
-echo "ok"
-""")])
-    let worker = buildProbe(tools, "worker.nim", base / "tools-mixed-cache", "worker")
-    let appworker = buildProbe(tools, "appworker.nim", base / "tools-mixed-cache", "appworker")
-    check worker.code == 0
-    check appworker.code == 0
-    if worker.code == 0 and appworker.code == 0:
-      let app = base / "race-mixed"
-      createDir(app)
-      discard generateScaffold(ScaffoldOptions(mode: smApplication), app)
-      let resource = startManaged(worker.binary, @[app, "Note"], app)
-      let application = startManaged(appworker.binary, @[app], app)
-      var codes: seq[int]
-      try:
-        codes = @[finishBounded(resource), finishBounded(application)]
-      finally:
-        resource.close()
-        application.close()
-      checkpoint $codes
-      let manifest = parseFile(app / ".leaf/scaffold.json")
-      check manifest["schema"].getInt == 3
-      var versions: seq[string]
-      for entry in manifest["resources"]:
-        check entry["migration"].kind == JString
-        versions.add entry["migration"].getStr
-      check versions.len == versions.deduplicate().len
-      check fileExists(app / "db/catalog.nim")
-      check fileExists(app / "config/database.nim")
+      for scenario in ["same-resource", "migration-collision", "migration-distinct"]:
+        let root = base / (scenario & " 中文 $literal")
+        createDir(root)
+        discard generateScaffold(ScaffoldOptions(mode: smApplication), root)
+        let lock = acquireFileLock(root / GenerationLockRelative)
+        var released = false
+        var children: seq[ManagedProcess]
+        try:
+          let secondKind = if scenario == "same-resource": "resource" else: "migration"
+          let migrationName = if scenario == "migration-distinct": "create_tags" else: "create_notes"
+          children.add startManaged(worker.binary,
+            @["resource", root, "", root / "target/first"], root)
+          children.add startManaged(worker.binary,
+            @[secondKind, root, migrationName, root / "target/second"], root)
+          let deadline = getMonoTime() + initDuration(seconds = 30)
+          while not (fileExists(root / "target/first") and fileExists(root / "target/second")):
+            check getMonoTime() < deadline
+            sleep(10)
+          sleep(600)
+          let blocked = children[0].code == -1 and children[1].code == -1
+          check blocked
+          lock.release()
+          released = true
+          var codes: seq[int]
+          for child in children: codes.add finishBounded(child, 60)
+          checkpoint scenario & " " & $codes
+          let value = parseFile(root / ".leaf/scaffold.json")
+          var catalog: seq[string]
+          var notesCount = 0
+          var noteVersion = 0'i64
+          for file in scanMigrationFiles(root / "db/migrations"):
+            catalog.add file.name
+            if file.name == "create_notes":
+              inc notesCount
+              noteVersion = file.version
+          check notesCount == 1
+          if scenario == "migration-distinct":
+            check codes == @[0, 0]
+            check catalog.len == 3
+            check value["resources"].len == 1
+          else:
+            check (codes == @[0, 1] or codes == @[1, 0])
+            check catalog.len == 2
+            let expected = if scenario == "same-resource": 1 else: (if codes[0] == 0: 1 else: 0)
+            check value["resources"].len == expected
+          if value["resources"].len == 1:
+            check value["resources"][0]["migration"].getStr == $noteVersion
+            check fileExists(root / "app/models/note.nim")
+          else:
+            check not fileExists(root / "app/models/note.nim")
+        finally:
+          if not released:
+            try: lock.release()
+            except CatchableError: discard
+          for child in children: child.close()
