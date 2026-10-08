@@ -1,13 +1,14 @@
 import ./cleanup_support
 import std/[os, osproc, strutils, unittest, tempfiles, times, strtabs]
-import leaf/process_io
+import leaf/[process_io, project]
 import leaf_cli
 when defined(posix): import std/posix
 when defined(windows): import std/winlean
 
 let args = commandLineParams()
 if args.len == 2 and args[0] == "--cli-build":
-  leaf_cli.exitCli(leaf_cli.main(@["build", args[1]]))
+  setCurrentDir(args[1])
+  leaf_cli.exitCli(leaf_cli.main(@["build"]))
 if args.len == 2 and args[0] == "--child":
   when defined(posix): discard posix.signal(SIGTERM, SIG_IGN)
   writeFile(args[1], $getCurrentProcessId())
@@ -64,14 +65,14 @@ suite "Owned subprocess trees":
       check not alive(child)
   when defined(posix):
     test "Ctrl+C during a real CLI build cleans compiler and resistant descendants":
-      let source = root / "app.nim"
-      writeFile(source, "discard")
+      let project = root / "cli-project"
+      initProject(project)
       let marker = root / "compiler-child"
       var env = newStringTable(modeCaseSensitive)
       for key, value in envPairs(): env[key] = value
       env["NIM"] = getAppFilename()
       env["LEAF_TEST_COMPILER_MARKER"] = marker
-      let p = startManaged(getAppFilename(), @["--cli-build", source], root, env)
+      let p = startManaged(getAppFilename(), @["--cli-build", project], root, env)
       defer: p.close()
       let deadline = epochTime() + 10
       while not fileExists(marker):

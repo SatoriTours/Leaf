@@ -22,6 +22,14 @@ proc compiler*(): string =
   if result.len == 0 or not fileExists(result):
     fail("Nim compiler not found; install Nim 2.2.6+ or set NIM")
 
+proc compilerBase(sources, cache, binary: string, isolatedConfig: bool): seq[string] =
+  ## Compiler/library/ORM switches shared by application and headless builds.
+  result = @["c", "-d:release", "--mm:orc", "--path:" & sources.replace("$", "$$"),
+    "--nimcache:" & cache.replace("$", "$$"),
+    "--out:" & binary.replace("$", "$$")]
+  if isolatedConfig: result.add(@["--skipParentCfg:on", "--skipUserCfg:on"])
+  for argument in ormCompilerArgs(sources): result.add(argument.replace("$", "$$"))
+
 proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedConfig = false): BuildJob =
   let directory = if cacheDirectory.len == 0: project.root / "target" / "nim" else: absolutePath(cacheDirectory)
   createDir(directory)
@@ -42,11 +50,7 @@ proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedCon
     binary = compilerPath(binary)
     entry = compilerPath(entry)
   # Nim expands dollar variables in path switches independently of the shell.
-  var args = @["c", "-d:release", "--mm:orc", "--path:" & sources.replace("$", "$$"),
-    "--nimcache:" & cache.replace("$", "$$"),
-    "--out:" & binary.replace("$", "$$")]
-  if isolatedConfig: args.add(@["--skipParentCfg:on", "--skipUserCfg:on"])
-  for argument in ormCompilerArgs(sources): args.add(argument.replace("$", "$$"))
+  var args = compilerBase(sources, cache, binary, isolatedConfig)
   when defined(windows):
     let bundledGcc = sdkGcc()
     var gcc=bundledGcc
@@ -70,6 +74,34 @@ proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedCon
     let objectPath = compileWindowsManifest(sources, cache, gcc)
     args.add("--passL:" & quoteShell(compilerPath(objectPath)).replace("$", "$$"))
   args.add(entry)
+  result.process = startManaged(executable, args, project.root)
+
+proc startHeadlessBuild*(project: Project, entry, output, cacheDirectory: string): BuildJob =
+  ## Compile a maintenance program without the GPUI bridge, staging or graphical
+  ## manifest, so database work runs on machines without Rust or GUI tooling.
+  let directory = if cacheDirectory.len == 0: project.root / "target" / "leaf-db"
+    else: absolutePath(cacheDirectory)
+  createDir(directory)
+  result = BuildJob(binary: absolutePath(output))
+  var executable = compiler()
+  var sources = libraryPath()
+  var cache = directory / "cache"
+  var binary = result.binary
+  var target = entry
+  when defined(windows):
+    createDir(cache)
+    executable = compilerPath(executable)
+    sources = compilerPath(sources)
+    cache = compilerPath(cache)
+    binary = compilerPath(binary)
+    target = compilerPath(target)
+  var args = compilerBase(sources, cache, binary, false)
+  when defined(windows):
+    let bundledGcc = sdkGcc()
+    if bundledGcc.len > 0:
+      let path = compilerPath(bundledGcc).replace("$", "$$")
+      args.add(@["--cc:gcc", "--gcc.exe:" & path, "--gcc.linkerexe:" & path])
+  args.add(target)
   result.process = startManaged(executable, args, project.root)
 
 proc pollBuild*(job: BuildJob): bool = job.process.poll()

@@ -1,7 +1,41 @@
 ## Developer CLI: native Nim applications are compiled before execution.
+## Commands always operate on the current directory's nearest Leaf project;
+## the old PROJECT position argument and `--project` selector are gone.
 import std/[os, json, strutils, strtabs]
-import leaf/[core, project, project_context, build, doctor, developer_options, diagnostics, watch, process_io, pack, scaffold, sdk]
+import leaf/[cli_options, core, project, project_context, build, doctor,
+  developer_options, diagnostics, watch, process_io, pack, scaffold, sdk, db_cli,
+  migrations]
 export build
+
+const HelpText = """Leaf Nim developer tools
+  leaf init DIRECTORY              Create a native Nim application
+  leaf g scaffold [--dry-run]       Create a full page-group application in the cwd
+  leaf g scaffold MODEL FIELD:TYPE... [--dry-run]
+                                   Add a resource with CRUD pages, routes and migrations
+  leaf g migration NAME [--dry-run] Create a Nim migration in the current project
+  leaf generate ...                Alias for leaf g ...
+  leaf build [--output EXE]        Compile the current project
+  leaf pack --target TARGET [--binary EXE] [--output DIR]
+  leaf doctor [--json]             Show the local build environment
+  leaf --version                   Show SDK version and channel
+  leaf --check [DIAGNOSTICS]       Compile and validate the current application
+  leaf --headless [EVENTS] [DIAGNOSTICS] [--stats]
+                                   Compile and run ordered events
+  leaf                             Compile and open a GPUI + GPUI Kit desktop window
+  leaf --watch [DIAGNOSTICS]       Rebuild and replace ready desktop windows
+  leaf db init [--dry-run]         Install database configuration and catalog
+  leaf db migrate [--to VERSION] [--dry-run] [--json]
+  leaf db rollback [--steps N] [--dry-run] [--json]
+  leaf db forward [--steps N] [--dry-run] [--json]
+  leaf db up VERSION [--dry-run] [--json]
+  leaf db down VERSION [--dry-run] [--json]
+  leaf db status [--json]
+  DIAGNOSTICS: --trace, --log-file FILE, --dump-tree FILE
+
+Commands operate on the nearest project containing leaf.json; run them from the
+project directory or one of its subdirectories. Applications are native
+executables. Release TARGET: linux, macos, windows or all.
+"""
 
 proc execute(exe: string, args: seq[string], workingDir: string): int =
   var env = newStringTable(modeCaseSensitive)
@@ -16,89 +50,73 @@ proc execute(exe: string, args: seq[string], workingDir: string): int =
     sleep(10)
   process.code
 
+proc launch(project: Project, runArgs: seq[string]): int =
+  let options = parseDeveloperOptions(runArgs, project.root)
+  let binary = build(project)
+  result = execute(binary, options.launchArgs(), project.root)
+
 proc main*(args: seq[string]): int =
   try:
-    if args.len == 0 or args[0] in ["--help", "-h"]:
-      stdout.writeLine("""Leaf Nim developer tools
-  leaf init DIRECTORY              Create a native Nim application
-  leaf g scaffold [--dry-run]       Create a full page-group application in the cwd
-  leaf g scaffold MODEL FIELD:TYPE... [--dry-run]
-                                   Add a resource with CRUD pages, routes and migrations
-  leaf generate scaffold ...       Alias for leaf g scaffold
-  leaf build PROJECT [--output EXE] Compile a release application
-  leaf pack PROJECT --target TARGET [--binary EXE] [--output DIR]
-  leaf doctor [--json]              Show the local build environment
-  leaf --version                   Show SDK version and channel
-  leaf --check PROJECT             Compile and validate the application
-  leaf --headless [EVENTS] PROJECT  Compile and run ordered events
-  leaf PROJECT                     Compile and open a GPUI + GPUI Kit desktop window
-  leaf --watch [DIAGNOSTICS] PROJECT Rebuild and replace ready desktop windows
-  DIAGNOSTICS: --trace, --log-file FILE, --dump-tree FILE
-
-Applications are native executables. GPUI + GPUI Kit provides native windows.
-Release TARGET: linux, macos, windows or all. Foreign targets need native binaries.
-""")
+    let command = parseCli(args)
+    case command.kind
+    of ccHelp:
+      stdout.write(HelpText)
       return 0
-    case args[0]
-    of "--version", "-v":
-      if args.len != 1: fail("usage: leaf --version")
+    of ccVersion:
       stdout.writeLine(sdkVersion())
-    of "--verify-sdk":
-      if args.len notin [3, 4]: fail("usage: leaf --verify-sdk CHANNEL TARGET [VERSION]")
-      verifySdk(args[1], args[2], if args.len == 4: args[3] else: "")
-    of "g", "generate":
-      if args.len < 2 or args[1] != "scaffold":
-        fail("usage: leaf g scaffold [MODEL FIELD:TYPE...] [--dry-run]")
-      let options = parseScaffoldOptions(args[2..^1])
-      let root = if options.mode == smApplication: getCurrentDir()
-        else: requireCurrentProject().root
-      for action in generateScaffold(options, root):
+      return 0
+    of ccVerifySdk:
+      verifySdk(command.sdkArgs[0], command.sdkArgs[1],
+        if command.sdkArgs.len == 3: command.sdkArgs[2] else: "")
+      return 0
+    of ccInit:
+      initProject(command.initDirectory)
+      return 0
+    of ccScaffoldApp:
+      for action in generateScaffold(command.scaffold, getCurrentDir()):
         stdout.writeLine(action)
-    of "init":
-      if args.len != 2: fail("usage: leaf init DIRECTORY")
-      initProject(args[1])
-    of "pack":
-      if args.len < 4: fail("usage: leaf pack PROJECT --target TARGET [--binary EXE] [--output DIR]")
-      var target, binary: string
-      var output = "dist"
-      var seen: seq[string]
-      var i = 2
-      while i < args.len:
-        let flag = args[i]
-        if flag notin ["--target", "--binary", "--output"] or flag in seen:
-          fail("unknown or duplicated pack option: " & flag)
-        if i + 1 >= args.len or args[i + 1].len == 0 or args[i + 1].startsWith("--"):
-          fail("missing value for " & flag)
-        seen.add(flag)
-        case flag
-        of "--target": target = args[i + 1]
-        of "--binary": binary = absolutePath(args[i + 1])
-        else: output = args[i + 1]
-        i += 2
-      if target notin ["linux", "macos", "windows", "all"]: fail("--target must be linux, macos, windows or all")
-      if target == "all" and binary.len > 0: fail("--binary requires a single target")
-      for artifact in pack.pack(readProject(args[1]), target, output, binary): stdout.writeLine(artifact)
-    of "doctor":
-      if args.len > 2 or (args.len == 2 and args[1] != "--json"):
-        fail("usage: leaf doctor [--json]")
+      return 0
+    of ccScaffoldResource:
+      for action in generateScaffold(command.scaffold, requireCurrentProject().root):
+        stdout.writeLine(action)
+      return 0
+    of ccMigrationGenerate:
+      for action in generateMigration(requireCurrentProject().root,
+          command.migrationName, command.dryRun):
+        stdout.writeLine(action)
+      return 0
+    of ccBuild:
+      stdout.writeLine(build(requireCurrentProject(), command.output))
+      return 0
+    of ccPack:
+      let project = requireCurrentProject()
+      let binary = if command.binary.len > 0: absolutePath(command.binary) else: ""
+      let output = if command.output.len > 0: command.output else: "dist"
+      for artifact in pack.pack(project, command.target, output, binary):
+        stdout.writeLine(artifact)
+      return 0
+    of ccDoctor:
       stdout.writeLine(doctorReport().pretty())
-    of "build":
-      if args.len notin [2, 4] or (args.len == 4 and args[2] != "--output"):
-        fail("usage: leaf build PROJECT [--output EXE]")
-      let output = if args.len == 4: args[3] else: ""
-      stdout.writeLine(build(readProject(args[1]), output))
-    else:
-      if args[^1].startsWith("--"): fail("missing project path")
-      let project = readProject(args[^1])
-      let rawArgs: seq[string] = if args.len == 1: @[] else: args[0..^2]
-      let options = parseDeveloperOptions(rawArgs, project.root)
-      if options.watching:
-        if options.remaining.len > 0: fail("--watch cannot be combined with headless or event commands")
-        let d = options.diagnostics()
-        defer: d.close()
-        return runWatch(project, d)
-      let binary = build(project)
-      result = execute(binary, options.launchArgs(), project.root)
+      return 0
+    of ccDatabase:
+      let project = requireCurrentProject()
+      if command.databaseInit: return executeDatabaseInit(project, command.dryRun)
+      return executeDatabaseCommand(project, command.request, command.dryRun,
+        command.jsonOutput)
+    of ccDeveloper:
+      let project = requireCurrentProject()
+      let options = parseDeveloperOptions(command.runArgs, project.root)
+      let diagnostics = options.diagnostics()
+      defer: diagnostics.close()
+      return runWatch(project, diagnostics)
+    of ccRun:
+      if command.runArgs.len == 0:
+        let found = findCurrentProject()
+        if found.isNone:
+          stdout.write(HelpText)
+          return 0
+        return launch(found.get(), command.runArgs)
+      return launch(requireCurrentProject(), command.runArgs)
   except ProcessInterruptedError:
     result = 130
   except CatchableError as error:
