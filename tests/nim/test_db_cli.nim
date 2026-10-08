@@ -3,8 +3,8 @@
 ## JSON object on stdout with diagnostics on stderr, and never create a database
 ## from a preview or status command.
 import ./cleanup_support
-import std/[json, os, strtabs, strutils, tempfiles, unittest]
-import leaf/[project, scaffold]
+import std/[json, monotimes, os, strtabs, strutils, tempfiles, times, unittest]
+import leaf/[migrations, project, scaffold, sqlite]
 import ./migration_compile_support
 
 let base = createTempDir("leaf-db-cli-", "")
@@ -72,7 +72,9 @@ suite "Headless database CLI":
     let subdir = app / "config"
     check runCliIn(subdir, @["db", "rollback", "--steps", "1", "--json"], env).code == 0
     let down = parseJson(runCliIn(subdir, @["db", "status", "--json"], env).stdoutText.strip())
-    check down["current_version"].kind == JNull
+    # A known empty database is version 0, not an unknown state.
+    check down["current_version"].getStr == "0"
+    check down["pending_versions"].len == 1
     check down["statuses"].len == 1
     check down["statuses"][0]["state"].getStr == "down"
     check runCliIn(app, @["db", "forward", "--steps", "1", "--json"], env).code == 0
@@ -110,6 +112,56 @@ suite "Headless database CLI":
     check failedJson["errors"][0]["code"].getStr == "compile_failed"
     check failed.stderrText.len > 0
 
+  test "a real SQL interruption keeps the committed step and reports 130":
+    let app = base / "sql-interrupt"
+    createDir(app)
+    check runCliIn(app, @["g", "scaffold"]).code == 0
+    # A slow legacy migration runs after the fast task migration commits.
+    writeFile(app / "db" / "migrations" / "99999999999999999_slow.up.sql",
+      "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 30000)\n" &
+      "SELECT count(*) FROM c a, c b;\n")
+    writeFile(app / "db" / "migrations" / "99999999999999999_slow.down.sql", "SELECT 1;\n")
+    let database = app / "var" / "sql-interrupt.sqlite3"
+    var env = newStringTable(modeCaseSensitive)
+    for key, value in envPairs(): env[key] = value
+    env["LEAF_DATABASE_PATH"] = database
+    var signalled = false
+    let interrupted = runCli(cli.binary, app, @["db", "migrate", "--json"], env,
+      seconds = 120, ready = proc(): bool =
+        if signalled: return false
+        if not fileExists(database): return false
+        # Let the child enter the slow migration before cancelling it.
+        sleep(300)
+        signalled = true
+        true)
+    checkpoint "code=" & $interrupted.code & " stdout=" & interrupted.stdoutText &
+      " stderr=" & interrupted.stderrText
+    check interrupted.code == 130
+    let value = parseJson(interrupted.stdoutText.strip())
+    if value["execution_confirmed"].getBool:
+      var cancelled = 0
+      for issue in value["errors"]:
+        if issue["code"].getStr in ["migration_cancelled", "migration_interrupted"]:
+          inc cancelled
+      check cancelled >= 1
+      # The fast task migration was committed before the slow one was cancelled.
+      check fileExists(database)
+      let db = openDatabaseReadOnly(database)
+      let history = readMigrationHistory(db)
+      db.close()
+      check history.len == 1
+    else:
+      check value["executed"].kind == JNull
+      check value["current_version"].kind == JNull
+      var unconfirmed = 0
+      for issue in value["errors"]:
+        if issue["code"].getStr == "interrupted_unconfirmed": inc unconfirmed
+      check unconfirmed == 1
+    var leftover = 0
+    for path in walkFiles(app / "target" / "leaf-db" / "cancel-*.token"): inc leftover
+    for path in walkFiles(app / "target" / "leaf-db" / "report-*.json"): inc leftover
+    check leftover == 0
+
   test "an interrupted migration reports 130 without inventing committed steps":
     let app = base / "interrupt"
     createDir(app)
@@ -124,6 +176,8 @@ suite "Headless database CLI":
     for key, value in envPairs(): env[key] = value
     env["LEAF_DATABASE_PATH"] = database
     let interrupted = runCliIn(app, @["db", "migrate", "--json"], env, interruptAfterMs = 1500)
+    checkpoint "code=" & $interrupted.code & " stdout=" & interrupted.stdoutText &
+      " stderr=" & interrupted.stderrText
     check interrupted.code == 130
     let value = parseJson(interrupted.stdoutText.strip())
     if value["execution_confirmed"].getBool:
@@ -135,3 +189,115 @@ suite "Headless database CLI":
     var leftover = 0
     for path in walkFiles(app / "target" / "leaf-db" / "cancel-*.token"): inc leftover
     check leftover == 0
+
+  test "strict JSON failures and precise preflight fields":
+    # Parser and project failures still produce one JSON object on stdout.
+    let outside = base / "outside-project"
+    createDir(outside)
+    let parserError = runCliIn(outside, @["db", "migrate", "42", "--json"])
+    check parserError.code == 1
+    check parseJson(parserError.stdoutText.strip())["errors"][0]["code"].getStr == "invalid_arguments"
+    let projectError = runCliIn(outside, @["db", "status", "--json"])
+    check projectError.code == 1
+    check parseJson(projectError.stdoutText.strip())["errors"][0]["code"].getStr == "invalid_arguments"
+    let app = base / "preflight"
+    createDir(app)
+    check runCliIn(app, @["g", "scaffold"]).code == 0
+    let database = app / "var" / "preflight.sqlite3"
+    var env = newStringTable(modeCaseSensitive)
+    for key, value in envPairs(): env[key] = value
+    env["LEAF_DATABASE_PATH"] = database
+    # An absent database reports known-empty history.
+    let empty = parseJson(runCliIn(app, @["db", "status", "--json"], env).stdoutText.strip())
+    check empty["current_version"].getStr == "0"
+    check empty["pending_versions"].len == 1
+    check not fileExists(database)
+    check not dirExists(database.parentDir)
+    # An unknown target keeps its code, version, file, direction and dry-run flag.
+    let unknown = runCliIn(app, @["db", "up", "424242", "--json"], env)
+    check unknown.code == 1
+    let unknownJson = parseJson(unknown.stdoutText.strip())
+    check unknownJson["errors"][0]["code"].getStr == "invalid_migration_target"
+    check unknownJson["errors"][0]["version"].getStr == "424242"
+    check unknownJson["errors"][0]["direction"].kind == JNull
+    check not fileExists(database)
+    # A pending preview keeps the template disclosure fields.
+    writeFile(app / "db" / "migrations" / "5555_pending.nim",
+      "import leaf/migrations\n\nmigration pending:\n  change:\n    pending()\n")
+    let pending = runCliIn(app, @["db", "migrate", "--dry-run", "--json"], env)
+    check pending.code == 1
+    let pendingJson = parseJson(pending.stdoutText.strip())
+    check pendingJson["errors"][0]["code"].getStr == "pending_migration"
+    check pendingJson["errors"][0]["file"].getStr.endsWith("5555_pending.nim")
+    check pendingJson["errors"][0]["version"].getStr == "5555"
+    check pendingJson["dry_run"].getBool
+    removeFile(app / "db" / "migrations" / "5555_pending.nim")
+    # A modified applied source is a fatal status, not a cancellation.
+    check runCliIn(app, @["db", "migrate", "--json"], env).code == 0
+    var taskMigration = ""
+    for path in walkFiles(app / "db" / "migrations" / "*_create_tasks.nim"): taskMigration = path
+    writeFile(taskMigration, readFile(taskMigration) & "\n# edited\n")
+    let modified = runCliIn(app, @["db", "status", "--json"], env)
+    check modified.code == 1
+    let modifiedJson = parseJson(modified.stdoutText.strip())
+    check modifiedJson["errors"].len > 0
+    check modifiedJson["current_version"].kind == JString
+
+  test "legacy three-column history stays a warning and upgrades":
+    let app = base / "legacy-warning"
+    copyDir(currentSourcePath().parentDir.parentDir / "fixtures" / "scaffold_v1", app)
+    check runCliIn(app, @["db", "init"]).code == 0
+    let database = app / "target" / "legacy.sqlite3"
+    createDir(database.parentDir)
+    let oldUp = readFile(app / "db" / "migrations" / "001_create_tasks.up.sql")
+    block:
+      let db = openDatabase(database)
+      db.migrate(@[Migration(version: 1, name: "001_create_tasks", sql: oldUp)])
+      db.close()
+    var env = newStringTable(modeCaseSensitive)
+    for key, value in envPairs(): env[key] = value
+    env["LEAF_DATABASE_PATH"] = database
+    let status = runCliIn(app, @["db", "status", "--json"], env)
+    check status.code == 0
+    let statusJson = parseJson(status.stdoutText.strip())
+    check statusJson["current_version"].getStr == "1"
+    var warnings = 0
+    for item in statusJson["statuses"][0]["issues"]:
+      if item["code"].getStr == "legacy_unverified_down": inc warnings
+    check warnings == 1
+    check readFile(app / "db" / "migrations" / "001_create_tasks.up.sql") == oldUp
+    check runCliIn(app, @["db", "migrate", "--json"], env).code == 0
+    check readFile(app / "db" / "migrations" / "001_create_tasks.up.sql") == oldUp
+
+  test "the CLI helper is bounded when a child fills the pipe and sleeps":
+    let tools = base / "tools-pipe"
+    createDir(tools)
+    writeProbeFiles(tools, @[("pipe.nim",
+      "import std/[os, strutils]\nstdout.write(repeat('x', 4096))\nstdout.flushFile()\nsleep(60_000)\n")])
+    let fixture = buildProbe(tools, "pipe.nim", base / "pipe-cache", "pipe")
+    check fixture.code == 0
+    if fixture.code == 0:
+      let started = getMonoTime()
+      let ran = runCli(fixture.binary, tools, @[], seconds = 1)
+      check ran.code == 124
+      check (getMonoTime() - started) < initDuration(seconds = 10)
+      check ran.stdoutText.len == 4096
+
+  test "the headless nimcache reflects added and removed migrations":
+    let app = base / "cache"
+    createDir(app)
+    check runCliIn(app, @["g", "scaffold"]).code == 0
+    let database = app / "var" / "cache.sqlite3"
+    var env = newStringTable(modeCaseSensitive)
+    for key, value in envPairs(): env[key] = value
+    env["LEAF_DATABASE_PATH"] = database
+    proc countMigrations(): int =
+      let value = parseJson(runCliIn(app, @["db", "status", "--json"], env).stdoutText.strip())
+      value["statuses"].len
+    check countMigrations() == 1
+    writeFile(app / "db" / "migrations" / "777_create_notes.nim",
+      "import leaf/migrations\n\nmigration create_notes:\n  change:\n    createTable notes:\n      string title, nullable = false\n")
+    check countMigrations() == 2
+    removeFile(app / "db" / "migrations" / "777_create_notes.nim")
+    check countMigrations() == 1
+    check not fileExists(database)

@@ -94,3 +94,18 @@ suite "CLI option parsing":
       "--change", "title", "value", "--stats"]
     let repeated = parseCli(@["--headless", "--change", "a", "1", "--change", "b", "2"])
     check repeated.runArgs == @["--headless", "--change", "a", "1", "--change", "b", "2"]
+
+  test "strict option matrix rejects duplicates and positions before IO":
+    for args in [@["db", "migrate", "42"], @["db", "migrate", "--dry-run", "--dry-run"],
+        @["db", "migrate", "--json", "--json"], @["db", "up", "42", "--steps", "2"],
+        @["db", "down", "1", "--steps", "1"], @["db", "rollback", "--to", "3"],
+        @["db", "forward", "3"], @["db", "migrate", "--to", "1", "--to", "2"],
+        @["db", "rollback", "--steps", "1", "--steps", "2"],
+        @["db", "migrate", "--steps", "1"], @["db", "status", "--dry-run"],
+        @["--watch", "--stats"], @["--stats"], @["db", "up", ""],
+        @["db", "migrate", "--to", ""], @["db", "rollback", "--steps", ""],
+        @["db", "up", "1", "--to", "2"]]:
+      expect UiError: discard parseCli(args)
+    check parseCli(@["db", "migrate", "--to", "0"]).request.target == some(0'i64)
+    check parseCli(@["--headless", "--stats"]).kind == ccRun
+    check parseCli(@["--watch", "--trace"]).kind == ccDeveloper

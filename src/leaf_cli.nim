@@ -120,7 +120,12 @@ proc main*(args: seq[string]): int =
   except ProcessInterruptedError:
     result = 130
   except CatchableError as error:
-    stderr.writeLine("leaf: " & error.msg)
+    # A requested database JSON report must stay machine readable even when the
+    # parser, project resolution or the compiler is what failed.
+    if wantsDatabaseJson(args):
+      stdout.writeLine(errorJson(databaseCommandName(args), "invalid_arguments", error.msg))
+    else:
+      stderr.writeLine("leaf: " & error.msg)
     result = 1
 
 proc exitCli*(code: int) {.noreturn.} =

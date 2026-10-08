@@ -12,6 +12,7 @@ const
   MaintenanceEntry* = "target/leaf-db/maintenance.nim"
   MaintenanceBinary* = "target/leaf-db/maintenance"
   CancelTokenEnv* = "LEAF_MIGRATION_CANCEL_TOKEN"
+  ReportEnv* = "LEAF_MIGRATION_REPORT"
   GracefulCancelSeconds* = 10
 
 proc maintenanceSource*(): string =
@@ -54,8 +55,29 @@ proc cancellationRequested(): bool =
   token.len > 0 and fileExists(token)
 
 proc emit(result: MigrationResult, jsonOutput: bool) =
-  if jsonOutput: stdout.writeLine(resultJson(result).pretty())
-  else: stdout.writeLine(resultText(result))
+  ## With a parent-provided report path the child hands over one complete object
+  ## atomically, so a forced stop can never leave a partial JSON on stdout.
+  let text = if jsonOutput: resultJson(result).pretty() else: resultText(result)
+  let report = getEnv(ReportEnv)
+  if report.len > 0:
+    let temporary = report & ".tmp"
+    writeFile(temporary, text & "\n")
+    if fileExists(report): removeFile(report)
+    moveFile(temporary, report)
+  else:
+    stdout.writeLine(text)
+
+proc errorJson*(command, code, message: string): string =
+  ## One stable object for parser/project/compiler failures under `--json`.
+  var result = MigrationResult(command: command, executionConfirmed: true)
+  result.errors.add MigrationIssue(code: code, message: message)
+  resultJson(result).pretty()
+
+proc databaseCommandName*(args: seq[string]): string =
+  if args.len > 1 and args[0] == "db": args[1] else: "db"
+
+proc wantsDatabaseJson*(args: seq[string]): bool =
+  args.len >= 2 and args[0] == "db" and "--json" in args
 
 proc failure(command, database, code, message: string, jsonOutput: bool): int =
   var result = MigrationResult(command: command, database: database)
@@ -89,33 +111,68 @@ proc runMaintenance*(databasePath: string, catalog: seq[MigrationDefinition],
   var result = MigrationResult(command: name, database: databasePath)
   try:
     history = readMigrationHistory(db)
-    var issues = catalogIssues(catalog)
-    for record in history: issues.add recordIssues(catalog, record)
-    result.statuses = inspectMigrationHistory(catalog, history)
-    if issues.len > 0:
-      for issue in issues: result.errors.add issue
-      db.close()
-      emit(result, jsonOutput)
-      return resultExitCode(result)
-    let plan = planMigrations(catalog, history, request)
-    result.planned = plan.steps
-    result.skipped = plan.skipped
-    result.currentVersion = (if history.len > 0: some(history[^1].version) else: none(int64))
-    var applied = initHashSet[int64]()
-    for record in history: applied.incl record.version
-    result.pendingVersions = catalog.filterIt(it.version notin applied).mapIt(it.version)
-    result.dryRun = command.dryRun or request.kind == mrStatus
-    # A preview is a confirmed report about a read-only connection.
-    result.executionConfirmed = true
-    if result.dryRun:
-      db.close()
-      emit(result, jsonOutput)
-      return resultExitCode(result)
   except CatchableError as error:
+    result.executionConfirmed = true
+    result.errors.add MigrationIssue(code: "history_unreadable", message: error.msg)
     db.close()
-    result.errors.add MigrationIssue(code: "preflight_failed", message: error.msg)
     emit(result, jsonOutput)
     return 1
+  var applied = initHashSet[int64]()
+  for record in history: applied.incl record.version
+  # Known history: an empty database is version 0, not an unknown state.
+  result.currentVersion = (if history.len > 0: some(history[^1].version) else: some(0'i64))
+  result.pendingVersions = catalog.filterIt(it.version notin applied).mapIt(it.version)
+  result.statuses = inspectMigrationHistory(catalog, history)
+  var issues = catalogIssues(catalog)
+  for record in history: issues.add recordIssues(catalog, record)
+  # The accepted runner treats these as disclosures, not fatal history damage.
+  var fatal: seq[MigrationIssue]
+  for issue in issues:
+    if issue.code notin ["pending_template", "legacy_unverified_down"]: fatal.add issue
+  if fatal.len > 0:
+    result.executionConfirmed = true
+    for issue in fatal: result.errors.add issue
+    db.close()
+    emit(result, jsonOutput)
+    return 1
+  var plan: MigrationPlan
+  try:
+    plan = planMigrations(catalog, history, request)
+  except MigrationError as error:
+    result.executionConfirmed = true
+    result.dryRun = command.dryRun
+    result.errors.add MigrationIssue(code: error.issueCode, message: error.msg,
+      version: error.migrationVersion, file: error.file, direction: error.direction)
+    db.close()
+    emit(result, jsonOutput)
+    return 1
+  # Capability preflight on the read-only handle: an unsupported selected
+  # direction must fail before any writable open creates a database or parent.
+  try:
+    let runtime = sqliteRuntimeVersion()
+    for step in plan.steps:
+      let index = findDefinition(catalog, step.version)
+      if index < 0: continue
+      let definition = catalog[index]
+      if definition.format == mfSqlV1: continue
+      let operations = if step.direction == mdUp: definition.upOps else: definition.downOps
+      checkCapabilities(operations, runtime)
+  except MigrationError as error:
+    result.executionConfirmed = true
+    result.dryRun = command.dryRun
+    result.errors.add MigrationIssue(code: error.issueCode, message: error.msg,
+      version: error.migrationVersion, file: error.file, direction: error.direction)
+    db.close()
+    emit(result, jsonOutput)
+    return 1
+  result.planned = plan.steps
+  result.skipped = plan.skipped
+  result.dryRun = command.dryRun or request.kind == mrStatus
+  result.executionConfirmed = true
+  if result.dryRun:
+    db.close()
+    emit(result, jsonOutput)
+    return resultExitCode(result)
   db.close()
   # A writable run re-reads, revalidates and replans under the accepted lock.
   try:
@@ -142,13 +199,19 @@ proc executeDatabaseInit*(project: Project, dryRun: bool): int =
     stdout.writeLine("see db/migrations/README.md for the startup example")
   0
 
+proc interruptedReport(command: string, message: string): MigrationResult =
+  ## A forced stop never claims which steps committed.
+  result.command = command
+  result.executionConfirmed = false
+  result.errors.add MigrationIssue(code: "interrupted_unconfirmed", message: message)
+
 proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
     dryRun, jsonOutput: bool): int =
   ## Compile and supervise the maintenance program for one database command.
+  let name = commandName(request.kind)
   if not fileExists(project.root / "config" / "database.nim") or
       not fileExists(project.root / "db" / "catalog.nim"):
-    return failure(commandName(request.kind), "",
-      "configuration_missing",
+    return failure(name, "", "configuration_missing",
       "run leaf db init first: config/database.nim and db/catalog.nim are required", jsonOutput)
   let directory = project.root / MaintenanceRelative
   createDir(directory)
@@ -161,30 +224,41 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
   beginInterruptHandling()
   defer: endInterruptHandling()
   let job = startHeadlessBuild(project, entry, binary, directory)
-  while not job.pollBuild():
-    if wasInterrupted(): break
-    sleep(10)
-  if wasInterrupted() and job.code == -1:
+  var compileInterrupted = false
+  var compileFailed = false
+  try:
+    while not job.pollBuild():
+      if wasInterrupted(): break
+      sleep(10)
+    compileInterrupted = wasInterrupted() and job.code == -1
+    compileFailed = job.code != 0 and not compileInterrupted
+    if compileInterrupted:
+      stderr.writeLine(job.output)
+      emit(interruptedReport(name, "interrupted while compiling the maintenance program"),
+        jsonOutput)
+      return 130
+    if compileFailed:
+      stderr.writeLine(job.output)
+    elif wasInterrupted():
+      emit(interruptedReport(name, "interrupted before the maintenance program started"),
+        jsonOutput)
+      return 130
+  finally:
     job.close()
-    var cancelled = MigrationResult(command: commandName(request.kind),
-      executionConfirmed: false)
-    cancelled.errors.add MigrationIssue(code: "migration_interrupted",
-      message: "interrupted before the maintenance program completed")
-    emit(cancelled, jsonOutput)
-    return 130
-  if job.code != 0:
-    stderr.writeLine(job.output)
-    job.close()
-    return failure(commandName(request.kind), "",
-      "compile_failed", "maintenance program failed to compile", jsonOutput)
-  job.close()
-  # A unique token path under target: absent until cancellation.
-  let token = directory / ("cancel-" & $getCurrentProcessId() & "-" &
-    $getMonoTime().ticks & ".token")
+  if compileFailed:
+    return failure(name, "", "compile_failed",
+      "maintenance program failed to compile", jsonOutput)
+  # Unique per-run token and report paths under target: the token stays absent
+  # until cancellation and both are removed only after the child is reaped.
+  let unique = $getCurrentProcessId() & "-" & $getMonoTime().ticks
+  let token = directory / ("cancel-" & unique & ".token")
+  let report = directory / ("report-" & unique & ".json")
   if fileExists(token): removeFile(token)
+  if fileExists(report): removeFile(report)
   var env = newStringTable(modeCaseSensitive)
   for key, value in envPairs(): env[key] = value
   env[CancelTokenEnv] = token
+  env[ReportEnv] = report
   let process = startManaged(binary, childArgs(request, dryRun, jsonOutput),
     project.root, env, parentStreams = true)
   var requested = false
@@ -201,11 +275,20 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
         break
       sleep(10)
   finally:
-    if fileExists(token): removeFile(token)
+    # Reap the owned child first, then revoke the cooperative token.
     process.close()
+    if fileExists(token): removeFile(token)
   if forced:
-    var result = MigrationResult(command: commandName(request.kind),
-      database: "", executionConfirmed: false)
-    emit(result, jsonOutput)
+    emit(interruptedReport(name,
+      "the maintenance program did not stop within " & $GracefulCancelSeconds &
+      "s; run status to verify the committed state"), jsonOutput)
+    if fileExists(report): removeFile(report)
     return 130
-  process.code
+  if fileExists(report):
+    stdout.write(readFile(report))
+    removeFile(report)
+    return process.code
+  # The child exited without a report: never invent a confirmed result.
+  emit(interruptedReport(name,
+    "the maintenance program exited without a report; run status to verify"), jsonOutput)
+  return (if process.code == 130: 130 else: 1)

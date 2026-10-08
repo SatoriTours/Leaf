@@ -43,6 +43,7 @@ proc parseRunArgs(args: seq[string], forWatch = false): seq[string] =
   ## to look like an option is preserved in order instead of being parsed.
   var events = 0
   var headless = false
+  var stats = false
   var seen: seq[string]
   var i = 0
   while i < args.len:
@@ -54,7 +55,13 @@ proc parseRunArgs(args: seq[string], forWatch = false): seq[string] =
       seen.add(flag)
       headless = true
       result.add(flag)
-    of "--stats", "--trace":
+    of "--stats":
+      if forWatch: fail("--stats requires --headless or --check")
+      if flag in seen: fail("duplicated option: " & flag)
+      seen.add(flag)
+      stats = true
+      result.add(flag)
+    of "--trace":
       if flag in seen: fail("duplicated option: " & flag)
       seen.add(flag)
       result.add(flag)
@@ -82,6 +89,8 @@ proc parseRunArgs(args: seq[string], forWatch = false): seq[string] =
     inc i
   if events > 0 and not headless:
     fail("event commands require --headless or --check")
+  if stats and not headless:
+    fail("--stats requires --headless or --check")
 
 proc parsePack(args: seq[string]): CliCommand =
   result.kind = ccPack
@@ -134,20 +143,28 @@ proc parseDatabase(args: seq[string]): CliCommand =
   var target: Option[int64]
   var steps = 1
   var positional = ""
-  var seenTo, seenSteps = false
+  var seenTo, seenSteps, seenDry, seenJson = false
   var i = 0
   while i < rest.len:
     let flag = rest[i]
     case flag
-    of "--dry-run": result.dryRun = true
-    of "--json": result.jsonOutput = true
+    of "--dry-run":
+      if seenDry: fail("duplicated option: --dry-run")
+      seenDry = true
+      result.dryRun = true
+    of "--json":
+      if seenJson: fail("duplicated option: --json")
+      seenJson = true
+      result.jsonOutput = true
     of "--to":
+      if action != "migrate": fail("--to is only valid for leaf db migrate")
       if seenTo: fail("duplicated option: --to")
       if i + 1 >= rest.len: fail("missing value for --to")
       seenTo = true
       target = some(parseDecimal(rest[i + 1], "--to"))
       inc i
     of "--steps":
+      if action notin ["rollback", "forward"]: fail("--steps is only valid for rollback and forward")
       if seenSteps: fail("duplicated option: --steps")
       if i + 1 >= rest.len: fail("missing value for --steps")
       seenSteps = true
@@ -160,10 +177,10 @@ proc parseDatabase(args: seq[string]): CliCommand =
     inc i
   case action
   of "migrate":
-    if seenSteps: fail("--steps is only valid for rollback and forward")
+    if positional.len > 0: fail("leaf db migrate does not take a positional argument")
     result.request = MigrationRequest(kind: mrMigrate, target: target)
   of "rollback", "forward":
-    if target.isSome or positional.len > 0: fail("leaf db " & action & " takes only --steps")
+    if positional.len > 0: fail("leaf db " & action & " takes only --steps")
     result.request = MigrationRequest(kind: (if action == "rollback": mrRollback else: mrForward),
       steps: steps)
   of "up", "down":
