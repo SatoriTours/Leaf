@@ -6,14 +6,14 @@
 ## overflow clipping. It is deliberately not a CSS/Flexbox engine: no shrink,
 ## no min/max, no wrap, no scroll, no around/evenly.
 ##
-## Measurement contract: `MeasureProc` receives the entity's *finite local*
-## constraint, not an ancestor's size. A declared fixed axis constrains the
-## subtree locally (padding is deducted from the local content); a width
-## sensitive leaf is measured again under its final allocated width so auto
-## heights and ancestor auto intrinsics follow the real width. Fixed heights
-## are never overridden by measurement. Results are cached per
-## (handle, effective local width, effective local height) within one layout
-## call; a different constraint is measured again.
+## Measurement contract: `MeasureProc` receives the entity's *effective finite
+## local* constraint, not an ancestor's raw size. A declared fixed axis
+## constrains the entity itself (padding is deducted from the local content)
+## for both leaves and containers; the cache is keyed by the effective
+## constraint. Main-axis allocation and width resolution are shared by the
+## intrinsic measurement and the arrange pass, so a width-sensitive leaf is
+## measured under its final allocated width and auto heights (including auto
+## ancestors) follow that result. Fixed heights are never overridden.
 import std/[tables, sets, algorithm, math, options]
 import ./[core, styles, backend]
 
@@ -34,6 +34,12 @@ type
   MeasureProc* = proc(entity: MountedEntity, available: DipSize): DipSize {.closure.}
 
   ConstraintKey = tuple[handle: NodeHandle, width, height: float64]
+
+  ContainerPlan = object
+    widths: seq[float64]
+    heights: seq[float64]
+    mainTotal: float64
+    crossMax: float64
 
   LayoutContext = object
     children: Table[NodeHandle, seq[MountedEntity]]
@@ -65,8 +71,8 @@ proc crossDim(entity: MountedEntity, horizontal: bool): Option[Dimension] =
   if horizontal: entity.props.layout.height else: entity.props.layout.width
 
 proc localConstraint(entity: MountedEntity, available: DipSize): DipSize =
-  ## A declared fixed axis is the entity's finite local constraint; other axes
-  ## inherit the parent's finite constraint.
+  ## A declared fixed axis is the entity's *effective* finite local constraint
+  ## (leaf or container); other axes inherit the parent's finite constraint.
   result = available
   let width = entity.props.layout.width
   if width.isSome and width.get.kind == dkFixed: result.width = width.get.value
@@ -126,36 +132,116 @@ proc intersect(a, b: DipRect): DipRect =
     height: nonNegative(bottom - top))
 
 proc contentIntrinsic(ctx: var LayoutContext, entity: MountedEntity,
+                      available: DipSize): DipSize
+proc allocateMain(ctx: var LayoutContext, entity: MountedEntity,
+                  contentSize: DipSize): ContainerPlan
+
+proc allocateMain(ctx: var LayoutContext, entity: MountedEntity,
+                  contentSize: DipSize): ContainerPlan =
+  ## Shared width / main-axis allocation. Both the intrinsic measurement and
+  ## the arrange pass use it, so cross sizes always follow the final allocated
+  ## main constraint. Widths are resolved before a column measures heights.
+  let horizontal = entity.kind == NodeKind.row
+  let props = entity.props.layout
+  let gap = props.gap.get(0.0)
+  let align = props.align.get(alignStart)
+  let children = ctx.children.getOrDefault(entity.handle)
+  let count = children.len
+  if count == 0: return
+  result.widths = newSeq[float64](count)
+  result.heights = newSeq[float64](count)
+  var bases = newSeq[float64](count)
+  var weights = newSeq[float64](count)
+  var totalBase = 0.0
+  var totalWeight = 0.0
+
+  for index, child in children:
+    var weight = 0.0
+    if child.props.layout.flexGrow.isSome:
+      # An explicit grow value (including 0) always wins; only an absent
+      # attribute falls back to the fill default weight of 1.
+      weight = child.props.layout.flexGrow.get
+    elif isFillMain(child, horizontal):
+      weight = 1.0
+    weights[index] = weight
+    if horizontal:
+      # Main axis is width: base from the intrinsic under the content width.
+      let childIntrinsic = contentIntrinsic(ctx, child, contentSize)
+      bases[index] = mainBase(child, childIntrinsic, true)
+    else:
+      # Cross axis is width: resolve it (with stretch) before measuring height.
+      let preliminary = contentIntrinsic(ctx, child, contentSize)
+      var childWidth = resolveChildWidth(child, preliminary, contentSize.width)
+      if align == alignStretch and not isFixedCross(child, false):
+        childWidth = max(childWidth, contentSize.width)
+      result.widths[index] = nonNegative(childWidth)
+      let childIntrinsic = contentIntrinsic(ctx, child,
+        DipSize(width: result.widths[index], height: contentSize.height))
+      bases[index] = mainBase(child, childIntrinsic, false)
+    totalBase = finite(totalBase + bases[index])
+    totalWeight = finite(totalWeight + weight)
+
+  let mainAvailable = mainOf(contentSize, horizontal)
+  let gaps = if count > 1: finite(float64(count - 1) * gap) else: 0.0
+  # Negative remainder is not shrunk; the overflow is clipped.
+  let remainder = nonNegative(mainAvailable - totalBase - gaps)
+  var mainTotal = 0.0
+  for index, child in children:
+    var childMain = bases[index]
+    if totalWeight > 0.0:
+      # Normalize before multiplying so an intermediate product cannot overflow.
+      childMain = finite(childMain + remainder * (weights[index] / totalWeight))
+    let main = nonNegative(childMain)
+    if horizontal: result.widths[index] = main else: result.heights[index] = main
+    mainTotal = finite(mainTotal + main)
+    if index > 0: mainTotal = finite(mainTotal + gap)
+
+  var crossMax = 0.0
+  for index, child in children:
+    if horizontal:
+      # Height follows the final allocated width.
+      let finalIntrinsic = contentIntrinsic(ctx, child,
+        DipSize(width: result.widths[index], height: contentSize.height))
+      var childHeight: float64
+      if align == alignStretch and not isFixedCross(child, true):
+        # Stretch expands auto/fill but never shrinks intrinsic content.
+        childHeight = nonNegative(max(crossPreferred(child, finalIntrinsic, true),
+          contentSize.height))
+      else:
+        childHeight = nonNegative(resolveCross(child, finalIntrinsic,
+          contentSize.height, true))
+      result.heights[index] = childHeight
+      crossMax = finite(max(crossMax, childHeight))
+    else:
+      crossMax = finite(max(crossMax, result.widths[index]))
+  result.mainTotal = mainTotal
+  result.crossMax = crossMax
+
+proc contentIntrinsic(ctx: var LayoutContext, entity: MountedEntity,
                       available: DipSize): DipSize =
-  ## Recursive preferred (intrinsic) size under a finite local constraint.
-  ## Leaf sizes come from `measure` once per distinct constraint; container
-  ## sizes derive from children, gap and padding. `fill` contributes a 0 main
-  ## base, so intrinsic measurement never recurses to infinity.
-  let key: ConstraintKey = (entity.handle, available.width, available.height)
+  ## Recursive preferred (intrinsic) size under the effective local constraint.
+  ## Leaf sizes come from `measure` once per effective constraint; container
+  ## sizes derive from the shared allocation. `fill` contributes a 0 main base,
+  ## so intrinsic measurement never recurses to infinity.
+  let effective = localConstraint(entity, available)
+  let key: ConstraintKey = (entity.handle, effective.width, effective.height)
   if ctx.cache.hasKey(key): return ctx.cache[key]
   if entity.handle in ctx.visiting: fail("layout cycle detected")
   ctx.visiting.incl(entity.handle)
   if entity.kind in {NodeKind.column, NodeKind.row}:
     let horizontal = entity.kind == NodeKind.row
-    let props = entity.props.layout
-    let pad = props.padding.get(0.0)
-    let gap = props.gap.get(0.0)
-    let local = localConstraint(entity, available)
-    let childAvailable = DipSize(width: nonNegative(local.width - 2.0 * pad),
-      height: nonNegative(local.height - 2.0 * pad))
-    var mainTotal = 0.0
-    var crossMax = 0.0
-    let children = ctx.children.getOrDefault(entity.handle)
-    for index, child in children:
-      let childIntrinsic = contentIntrinsic(ctx, child, childAvailable)
-      mainTotal = finite(mainTotal + mainBase(child, childIntrinsic, horizontal))
-      if index > 0: mainTotal = finite(mainTotal + gap)
-      crossMax = finite(max(crossMax, crossPreferred(child, childIntrinsic, horizontal)))
-    let width = if horizontal: finite(mainTotal + 2.0 * pad) else: finite(crossMax + 2.0 * pad)
-    let height = if horizontal: finite(crossMax + 2.0 * pad) else: finite(mainTotal + 2.0 * pad)
-    result = DipSize(width: nonNegative(width), height: nonNegative(height))
+    let pad = entity.props.layout.padding.get(0.0)
+    let contentSize = DipSize(width: nonNegative(effective.width - 2.0 * pad),
+      height: nonNegative(effective.height - 2.0 * pad))
+    let plan = allocateMain(ctx, entity, contentSize)
+    let mainExtent = finite(plan.mainTotal + 2.0 * pad)
+    let crossExtent = finite(plan.crossMax + 2.0 * pad)
+    if horizontal:
+      result = DipSize(width: nonNegative(mainExtent), height: nonNegative(crossExtent))
+    else:
+      result = DipSize(width: nonNegative(crossExtent), height: nonNegative(mainExtent))
   else:
-    let measured = ctx.measure(entity, available)
+    let measured = ctx.measure(entity, effective)
     result = DipSize(width: nonNegative(measured.width),
       height: nonNegative(measured.height))
   ctx.visiting.excl(entity.handle)
@@ -169,6 +255,7 @@ proc arrange(ctx: var LayoutContext, entity: MountedEntity, rect, clip: DipRect,
   let props = entity.props.layout
   let pad = props.padding.get(0.0)
   let gap = props.gap.get(0.0)
+  let align = props.align.get(alignStart)
   let contentRect = DipRect(
     x: finite(rect.x + pad),
     y: finite(rect.y + pad),
@@ -179,43 +266,10 @@ proc arrange(ctx: var LayoutContext, entity: MountedEntity, rect, clip: DipRect,
   let count = children.len
   if count == 0: return
   let contentSize = DipSize(width: contentRect.width, height: contentRect.height)
-
-  # Main-axis bases. A row measures width bases under the container content
-  # width; a column resolves each child's width first and measures the height
-  # base under that width.
-  var bases = newSeq[float64](count)
-  var weights = newSeq[float64](count)
-  var widths = newSeq[float64](count)
-  var totalBase = 0.0
-  var totalWeight = 0.0
-  for index, child in children:
-    var childWidth: float64
-    if horizontal:
-      childWidth = contentSize.width
-    else:
-      let preliminary = contentIntrinsic(ctx, child, contentSize)
-      childWidth = resolveChildWidth(child, preliminary, contentSize.width)
-    widths[index] = childWidth
-    let childIntrinsic = contentIntrinsic(ctx, child,
-      DipSize(width: childWidth, height: contentSize.height))
-    bases[index] = mainBase(child, childIntrinsic, horizontal)
-    var weight = 0.0
-    if child.props.layout.flexGrow.isSome:
-      # An explicit grow value (including 0) always wins; only an absent
-      # attribute falls back to the fill default weight of 1.
-      weight = child.props.layout.flexGrow.get
-    elif isFillMain(child, horizontal):
-      weight = 1.0
-    weights[index] = weight
-    totalBase = finite(totalBase + bases[index])
-    totalWeight = finite(totalWeight + weight)
+  let plan = allocateMain(ctx, entity, contentSize)
 
   let mainAvailable = mainOf(contentSize, horizontal)
-  let gaps = if count > 1: finite(float64(count - 1) * gap) else: 0.0
-  # Negative remainder is not shrunk; the overflow is clipped.
-  let remainder = nonNegative(mainAvailable - totalBase - gaps)
-  let leftover = if totalWeight > 0.0: 0.0 else: remainder
-
+  let leftover = nonNegative(mainAvailable - plan.mainTotal)
   var offset = 0.0
   var gapAdd = 0.0
   case props.justify.get(justifyStart)
@@ -228,28 +282,10 @@ proc arrange(ctx: var LayoutContext, entity: MountedEntity, rect, clip: DipRect,
 
   var cursor = finite((if horizontal: contentRect.x else: contentRect.y) + offset)
   let crossAvailable = crossOf(contentSize, horizontal)
-  let align = props.align.get(alignStart)
   for index, child in children:
-    var childMain = bases[index]
-    if totalWeight > 0.0:
-      # Normalize before multiplying so an intermediate product cannot overflow.
-      childMain = finite(childMain + remainder * (weights[index] / totalWeight))
-    var childWidth, childHeight: float64
-    if horizontal:
-      childWidth = nonNegative(childMain)
-      # Re-measure width-sensitive content under the final allocated width.
-      let finalIntrinsic = contentIntrinsic(ctx, child,
-        DipSize(width: childWidth, height: contentSize.height))
-      if align == alignStretch and not isFixedCross(child, horizontal):
-        # Stretch expands auto/fill but never shrinks intrinsic content.
-        childHeight = nonNegative(max(crossPreferred(child, finalIntrinsic, true),
-          crossAvailable))
-      else:
-        childHeight = nonNegative(resolveCross(child, finalIntrinsic,
-          crossAvailable, true))
-    else:
-      childWidth = nonNegative(widths[index])
-      childHeight = nonNegative(childMain)
+    let childWidth = plan.widths[index]
+    let childHeight = plan.heights[index]
+    let childMain = if horizontal: childWidth else: childHeight
     var childRect: DipRect
     if horizontal:
       childRect.x = cursor

@@ -489,3 +489,99 @@ suite "MeasureProc local constraint and finite geometry":
     # Column content height 60: 5 fixed + 4 gap leaves 51 for the grow-3 fill.
     check boxes[3].rect.height == 5
     check boxes[4].rect.height == 51
+
+  test "auto height ancestor follows the final allocated width":
+    var widths = new(seq[float64])
+    var labels = new(seq[string])
+    var entities: Table[NodeHandle, MountedEntity]
+    entities[NodeHandle(1)] = ent(1, 0, column, 0)
+    entities[NodeHandle(2)] = ent(2, 1, row, 0, LayoutProps(width: fillDim()))
+    entities[NodeHandle(3)] = ent(3, 2, text, 0, LayoutProps(width: fixedDim(80)))
+    entities[NodeHandle(4)] = entityOf(4, 2, 1,
+      ui(NodeKind.text, text = "你好😀世界", styles = style({"width": "full"})))
+    entities[NodeHandle(5)] = ent(5, 1, text, 1, LayoutProps(height: fixedDim(5)))
+    let measure = proc(entity: MountedEntity, available: DipSize): DipSize =
+      if entity.handle == NodeHandle(4):
+        labels[].add(entity.props.accessibility.label.get(""))
+        widths[].add(available.width)
+        DipSize(width: min(50.0, available.width),
+          height: (if available.width <= 20.0: 30.0 else: 10.0))
+      else:
+        DipSize()
+    let boxes = layoutTree(entities, DipSize(width: 100, height: 100), measure)
+    check boxes.len == 5
+    check labels[].len > 0
+    for label in labels[]: check label == "你好😀世界"
+    # root column, auto-height row, fixed80 text, fill text, trailing sibling
+    check boxes[1].handle == NodeHandle(2)
+    check boxes[1].rect.width == 100
+    check boxes[1].rect.height == 30
+    check boxes[3].rect.width == 20
+    check boxes[3].rect.height == 30
+    check boxes[3].clip.height == 30
+    # The trailing sibling sits below the real row height, not the stale 10.
+    check boxes[4].handle == NodeHandle(5)
+    check boxes[4].rect.y == 30
+    check 20.0 in widths[]
+
+  test "fixed leaf constraint is normalized before measuring and caching":
+    var constraints: seq[(uint64, float64, float64)]
+    var entities: Table[NodeHandle, MountedEntity]
+    entities[NodeHandle(1)] = ent(1, 0, row, 0)
+    entities[NodeHandle(2)] = entityOf(2, 1, 0,
+      ui(NodeKind.text, text = "x", styles = style({"width": "20", "height": "50"})))
+    let measure = proc(entity: MountedEntity, available: DipSize): DipSize =
+      constraints.add((uint64(entity.handle), available.width, available.height))
+      DipSize(width: 5, height: 3)
+    let boxes = layoutTree(entities, DipSize(width: 100, height: 100), measure)
+    check boxes[1].rect.width == 20
+    check boxes[1].rect.height == 50
+    # The leaf is measured once, under its effective local constraint.
+    check constraints.len == 1
+    check constraints[0] == (2'u64, 20.0, 50.0)
+
+  test "a new layout call does not reuse the previous cache":
+    var calls = 0
+    var entities: Table[NodeHandle, MountedEntity]
+    entities[NodeHandle(1)] = ent(1, 0, row, 0)
+    entities[NodeHandle(2)] = entityOf(2, 1, 0,
+      ui(NodeKind.text, text = "x", styles = style({"width": "20", "height": "50"})))
+    let measure = proc(entity: MountedEntity, available: DipSize): DipSize =
+      inc calls
+      DipSize(width: 5, height: 3)
+    discard layoutTree(entities, DipSize(width: 100, height: 100), measure)
+    check calls == 1
+    discard layoutTree(entities, DipSize(width: 200, height: 100), measure)
+    check calls == 2
+
+  test "column stretch expands auto and fill but never shrinks intrinsic":
+    let small = proc(entity: MountedEntity, available: DipSize): DipSize =
+      DipSize(width: 5, height: 3)
+    var auto: Table[NodeHandle, MountedEntity]
+    auto[NodeHandle(1)] = ent(1, 0, column, 0, LayoutProps(align: some(alignStretch)))
+    auto[NodeHandle(2)] = ent(2, 1, text, 0)
+    check layoutTree(auto, DipSize(width: 100, height: 100), small)[1].rect.width == 100
+
+    var fill: Table[NodeHandle, MountedEntity]
+    fill[NodeHandle(1)] = ent(1, 0, column, 0, LayoutProps(align: some(alignStretch)))
+    fill[NodeHandle(2)] = ent(2, 1, text, 0, LayoutProps(width: fillDim()))
+    check layoutTree(fill, DipSize(width: 100, height: 100), small)[1].rect.width == 100
+
+    var fixed: Table[NodeHandle, MountedEntity]
+    fixed[NodeHandle(1)] = ent(1, 0, column, 0, LayoutProps(align: some(alignStretch)))
+    fixed[NodeHandle(2)] = ent(2, 1, text, 0, LayoutProps(width: fixedDim(20)))
+    check layoutTree(fixed, DipSize(width: 100, height: 100), small)[1].rect.width == 20
+
+    var large: Table[NodeHandle, MountedEntity]
+    large[NodeHandle(1)] = ent(1, 0, column, 0, LayoutProps(align: some(alignStretch)))
+    large[NodeHandle(2)] = ent(2, 1, text, 0)
+    let largeMeasure = proc(entity: MountedEntity, available: DipSize): DipSize =
+      DipSize(width: 150, height: 3)
+    check layoutTree(large, DipSize(width: 100, height: 100),
+      largeMeasure)[1].rect.width == 150
+
+    # Row stretch control remains intact.
+    var rowAuto: Table[NodeHandle, MountedEntity]
+    rowAuto[NodeHandle(1)] = ent(1, 0, row, 0, LayoutProps(align: some(alignStretch)))
+    rowAuto[NodeHandle(2)] = ent(2, 1, text, 0)
+    check layoutTree(rowAuto, DipSize(width: 100, height: 100), small)[1].rect.height == 100
