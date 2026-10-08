@@ -272,3 +272,73 @@ suite "scaffold hardening (fix round 1)":
     var migration = ""
     for path in walkFiles(legacy / "db/migrations/*_create_audits.nim"): migration = readFile(path)
     check "string createdAt" in migration
+
+suite "legacy registry compatibility (F2)":
+  test "customized and missing legacy registries are refused with zero writes":
+    let custom = base / "f2-custom-init"
+    copyDir(fixture, custom)
+    let reg = custom / "app/generated/migrations.nim"
+    let customBytes = readFile(reg) & "\n# custom\n"
+    writeFile(reg, customBytes)
+    expect CatchableError: discard initializeDatabaseProject(readProject(custom))
+    check readFile(reg) == customBytes
+    let customRes = base / "f2-custom-res"
+    copyDir(fixture, customRes)
+    let reg2 = customRes / "app/generated/migrations.nim"
+    writeFile(reg2, readFile(reg2) & "\n# custom\n")
+    expect CatchableError:
+      discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Note",
+        fields: @["title:string"]), customRes)
+    check "# custom" in readFile(reg2)
+    let missing = base / "f2-missing"
+    copyDir(fixture, missing)
+    removeFile(missing / "app/generated/migrations.nim")
+    expect CatchableError: discard initializeDatabaseProject(readProject(missing))
+
+  test "the recognized legacy registry becomes a stable delegate":
+    let app = base / "f2-delegate"
+    copyDir(fixture, app)
+    let oldUp = readFile(app / "db/migrations/001_create_tasks.up.sql")
+    let seeded = app / "target/seeded.sqlite3"
+    createDir(seeded.parentDir)
+    block:
+      let db = openDatabase(seeded)
+      db.migrate(@[Migration(version: 1, name: "001_create_tasks", sql: oldUp)])
+      discard db.execute("INSERT INTO tasks(title,done) VALUES (?,?)",
+        @[dbValue("original"), dbValue(false)])
+      db.close()
+    discard initializeDatabaseProject(readProject(app))
+    let delegate = readFile(app / "app/generated/migrations.nim")
+    check "proc generatedMigrations*(): seq[MigrationDefinition]" in delegate
+    check "catalog.applicationMigrations()" in delegate
+    check readFile(app / "db/migrations/001_create_tasks.up.sql") == oldUp
+    let source = currentSourcePath().parentDir.parentDir.parentDir / "src"
+    let binary = app / "target/f2-caller"
+    writeFile(app / "tests/f2_caller.nim", """
+import leaf/sqlite
+import ../app/generated/migrations
+
+let db = openDatabase("target/seeded.sqlite3")
+db.migrate(generatedMigrations())
+doAssert db.query("SELECT title FROM tasks")[0][0].asString == "original"
+doAssert readMigrationHistory(db).len == 1
+db.close()
+echo "caller ok"
+""")
+    let child = startProcess(compiler(), workingDir = app,
+      args = @["c", "-r", "--hints:off", "--path:" & source,
+        "--nimcache:" & app / "target/f2-cache", "--out:" & binary,
+        app / "tests/f2_caller.nim"], options = {poUsePath, poStdErrToStdOut})
+    let output = child.outputStream.readAll()
+    let code = child.waitForExit()
+    child.close()
+    checkpoint output
+    check code == 0
+    check "caller ok" in output
+    # A later Nim resource uses the same fixed delegate without rewriting it.
+    let before = readFile(app / "app/generated/migrations.nim")
+    discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Note",
+      fields: @["title:string"]), app)
+    check readFile(app / "app/generated/migrations.nim") == before
+    let manifest = parseFile(app / ".leaf/scaffold.json")
+    check manifest["schema"].getInt == 3

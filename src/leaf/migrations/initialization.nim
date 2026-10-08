@@ -1,7 +1,7 @@
 ## Database initialization for an existing Leaf project. Configuration and
 ## catalog files are planned and preflighted; importing them never opens storage.
 import std/[json, os, strutils]
-import ../[core, project, scaffold_files, scaffold_types]
+import ../[core, project, scaffold_files, scaffold_templates, scaffold_types]
 
 const
   DatabaseConfigPath* = "config/database.nim"
@@ -83,6 +83,66 @@ proc addDatabaseFile(plan: var seq[ScaffoldFile], root, path, content: string,
     else:
       fail(what & " was customized; keep it and add the manual startup call: " & path)
 
+const RegistryPath = "app/generated/migrations.nim"
+const LegacyManifestPath = ".leaf/scaffold.json"
+
+proc migrationDelegateSource*(): string =
+  ## Stable compatibility delegate: it keeps the original `generatedMigrations`
+  ## name and the original `db.migrate(generatedMigrations())` expression
+  ## working, while returning the new typed descriptors through the catalog.
+  GeneratedHeader & "import leaf/migrations\n" &
+    "import ../../db/catalog as catalog\n" &
+    "export migrations\n" &
+    "export catalog\n\n" &
+    "proc generatedMigrations*(): seq[MigrationDefinition] =\n" &
+    "  catalog.applicationMigrations()\n"
+
+proc legacyManifestResources(root: string): tuple[legacy: bool, resources: seq[ResourceSpec]] =
+  ## Read the existing manifest only to classify scaffold provenance and to
+  ## rebuild the canonical old registry for byte-exact comparison.
+  let path = guardedPath(root, LegacyManifestPath)
+  if not fileExists(path): return (false, @[])
+  let value = parseFile(path)
+  if value.kind != JObject or "schema" notin value or value["schema"].kind != JInt:
+    fail("invalid scaffold manifest")
+  let schema = value["schema"].getInt
+  result.legacy = schema in [1, 2]
+  if "resources" notin value or value["resources"].kind != JArray:
+    fail("invalid scaffold manifest resources")
+  for entry in value["resources"]:
+    if entry.kind != JObject or "singular" notin entry or "fields" notin entry:
+      fail("invalid scaffold manifest resource")
+    var fields: seq[string]
+    for field in entry["fields"]:
+      fields.add(field["name"].getStr & ":" & field["type"].getStr)
+    var version: int64
+    if entry["migration"].kind == JString:
+      for c in entry["migration"].getStr:
+        if c notin {'0'..'9'}: fail("invalid scaffold migration version")
+        version = version * 10 + int64(ord(c) - ord('0'))
+    else:
+      version = int64(entry["migration"].getInt)
+    result.resources.add(parseResource(entry["singular"].getStr, fields, version))
+
+proc registryPlan(root: string): seq[ScaffoldFile] =
+  ## Classify `app/generated/migrations.nim`: an exact old registry is converted
+  ## in the same atomic plan, the stable delegate is idempotent, and anything
+  ## else is custom and must be refused before any write.
+  let classification = legacyManifestResources(root)
+  let path = guardedPath(root, RegistryPath)
+  if fileExists(path):
+    let previous = readFile(path)
+    if previous == migrationDelegateSource(): return @[]
+    if classification.legacy and previous == legacyMigrationRegistry(classification.resources):
+      result.add(ScaffoldFile(path: RegistryPath, content: migrationDelegateSource(),
+        update: true, previous: previous))
+      return
+    fail("app/generated/migrations.nim was customized; keep it or restore the generated file: " &
+      RegistryPath)
+  elif classification.legacy:
+    fail("legacy scaffold registry is missing; restore " & RegistryPath &
+      " before automatic conversion")
+
 proc databaseInitPlan*(root, name: string): seq[ScaffoldFile] =
   ## Config/catalog/readme/include additions; empty when everything matches.
   discard guardedPath(root, "leaf.json")
@@ -95,6 +155,7 @@ proc databaseInitPlan*(root, name: string): seq[ScaffoldFile] =
   let readmePath = guardedPath(root, MigrationsDir / "README.md")
   if not fileExists(readmePath):
     result.add(ScaffoldFile(path: MigrationsDir / "README.md", content: migrationsReadmeSource()))
+  for file in registryPlan(root): result.add(file)
   let includeUpdate = databaseIncludeUpdate(root)
   if includeUpdate.needed:
     result.add(ScaffoldFile(path: "leaf.json", content: includeUpdate.content,
