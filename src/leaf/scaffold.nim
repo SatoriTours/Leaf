@@ -9,7 +9,6 @@ import ./migrations/initialization
 export scaffold_types
 
 const
-  ScaffoldSchema = 3
   ManifestPath = ".leaf/scaffold.json"
   PagesPath = "app/generated/pages.nim"
   RoutesPath = "config/generated/routes.nim"
@@ -64,93 +63,23 @@ proc manifest(resources: seq[ResourceSpec], modelSchema: int): string =
     value["timestamps"] = %true
   pretty(value) & "\n"
 
-proc member(value: JsonNode, name: string, kind: JsonNodeKind): JsonNode =
-  if value.kind != JObject or name notin value or value[name].kind != kind:
-    fail("invalid scaffold manifest field: " & name)
-  value[name]
-
-proc parseDecimalVersion(raw: string): int64 =
-  if raw.len == 0: fail("invalid scaffold migration version")
-  var value: int64
-  for c in raw:
-    if c notin {'0'..'9'}: fail("invalid scaffold migration version")
-    let digit = int64(ord(c) - ord('0'))
-    if value > (high(int64) - digit) div 10: fail("invalid scaffold migration version")
-    value = value * 10 + digit
-  if value <= 0: fail("invalid scaffold migration version")
-  value
-
-proc requireCatalogConsistency(root: string, resources: seq[ResourceSpec]) =
-  ## A registered resource must correspond to an actual migration file with the
-  ## same logical name and version; a forged or stale manifest is rejected.
-  let files = migrations.scanMigrationFiles(root / MigrationsDir)
-  for resource in resources:
-    let expected = "create_" & resource.plural
-    var found = false
-    for file in files:
-      if file.name == expected and file.version == resource.migration: found = true
-    if not found:
-      fail("scaffold manifest resource " & resource.model & " does not match migration " &
-        expected & " at version " & $resource.migration)
-
 proc ensureNoMigrationCollision(root: string, resource: ResourceSpec) =
   ## The proposed logical migration name must not already exist in the catalog.
   for file in migrations.scanMigrationFiles(root / MigrationsDir):
     if file.name == "create_" & resource.plural:
       fail("migration already exists: create_" & resource.plural)
 
-proc checkResource(resources: seq[ResourceSpec], resource: ResourceSpec) =
-  if identity(resource.model) == "task": fail("Task already exists in the home example")
-  if resource.plural == "leaf_schema_migrations" or resource.plural.startsWith("sqlite_"):
-    fail("resource table name is reserved by SQLite storage: " & resource.plural)
-  if resource.plural in ["home", "search", "settings"]: fail("resource route conflicts with a built-in route")
-  for prior in resources:
-    if identity(prior.model) == identity(resource.model) or prior.plural == resource.plural or
-        prior.singular == resource.singular:
-      fail("resource already exists: " & resource.model)
-    if prior.migration == resource.migration: fail("duplicate migration version")
-
 proc loadManifest(root: string): ScaffoldManifest =
   let path = guardedPath(root, ManifestPath)
   if not fileExists(path):
     fail("resource generation needs a scaffold application; create one in the current directory")
-  let value = parseFile(path)
-  result.schema = member(value, "schema", JInt).getInt
-  if result.schema notin [1, 2, 3]: fail("unsupported scaffold manifest schema")
-  if result.schema == 3:
-    result.modelSchema = member(value, "model_schema", JInt).getInt
-    if result.modelSchema notin [1, 2]: fail("unsupported scaffold model schema")
-  else:
-    result.modelSchema = result.schema
-  if result.modelSchema == 2:
-    if member(value, "model_api", JInt).getInt != 1 or not member(value, "timestamps", JBool).getBool:
-      fail("unsupported scaffold model metadata")
-    result.modelApi = 1
-    result.timestamps = true
-  let entries = member(value, "resources", JArray)
-  for entry in entries:
-    let name = member(entry, "model", JString).getStr
-    let singular = member(entry, "singular", JString).getStr
-    var fields: seq[string]
-    for field in member(entry, "fields", JArray):
-      fields.add(member(field, "name", JString).getStr & ":" & member(field, "type", JString).getStr)
-    let version = if result.schema == 3:
-        parseDecimalVersion(member(entry, "migration", JString).getStr)
-      else:
-        int64(member(entry, "migration", JInt).getInt)
-    if version <= 0: fail("invalid scaffold migration version")
-    let resource = parseResource(singular, fields, version)
-    if name != resource.model or singular != resource.singular:
-      fail("noncanonical resource identity in scaffold manifest")
-    if result.modelSchema == 2: checkModelFields(resource)
-    checkResource(result.resources, resource)
-    result.resources.add resource
+  result = readCanonicalManifest(parseFile(path))
+  checkManifestSources(root, result.resources, result.schema != 3)
   for file in [ScaffoldFile(path: PagesPath, content: pageRegistry(result.resources, result.modelSchema)),
       ScaffoldFile(path: RoutesPath, content: routeRegistry(result.resources))]:
     let registered = guardedPath(root, file.path)
     if not fileExists(registered) or readFile(registered) != file.content:
       fail("generated registry was modified or is missing: " & file.path)
-  requireCatalogConsistency(root, result.resources)
 
 proc appFiles(name: string, taskVersion: int64): seq[ScaffoldFile] =
   const
@@ -208,7 +137,7 @@ proc resourcePlan(root, name: string, loaded: ScaffoldManifest,
     updated.update = true
     updated.previous = readFile(guardedPath(root, file.path))
     result.add(updated)
-  for file in databaseInitPlan(root, name): result.add(file)
+  for file in databaseInitPlan(root, name, false): result.add(file)
 
 proc nextVersion(root: string): int64 =
   migrations.nextMigrationVersion(

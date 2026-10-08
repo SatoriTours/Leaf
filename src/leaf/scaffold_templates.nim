@@ -1,6 +1,6 @@
 ## Typed resource source and SQL generators. Fixed application templates live nearby.
-import std/[strutils, sequtils]
-import ./scaffold_types
+import std/[json, strutils, sequtils]
+import ./[core, scaffold_types, scaffold_model_templates]
 
 proc modelCode*(resource: ResourceSpec): string =
   let m = resource.model
@@ -163,3 +163,80 @@ proc legacyMigrationRegistry*(resources: seq[ResourceSpec]): string =
     result.add("    Migration(version: " & $resource.migration & ", name: " & name.escape &
       ", sql: migrationSql" & $resource.migration & ")")
   result.add("\n  ]\n")
+
+const ScaffoldSchema* = 3
+
+proc member*(value: JsonNode, name: string, kind: JsonNodeKind): JsonNode =
+  if value.kind != JObject or name notin value or value[name].kind != kind:
+    fail("invalid scaffold manifest field: " & name)
+  value[name]
+
+proc parseDecimalVersion*(raw: string): int64 =
+  if raw.len == 0: fail("invalid scaffold migration version")
+  var value: int64
+  for c in raw:
+    if c notin {'0'..'9'}: fail("invalid scaffold migration version")
+    let digit = int64(ord(c) - ord('0'))
+    if value > (high(int64) - digit) div 10: fail("invalid scaffold migration version")
+    value = value * 10 + digit
+  if value <= 0: fail("invalid scaffold migration version")
+  value
+
+proc checkResource*(resources: seq[ResourceSpec], resource: ResourceSpec) =
+  if identity(resource.model) == "task": fail("Task already exists in the home example")
+  if resource.plural == "leaf_schema_migrations" or resource.plural.startsWith("sqlite_"):
+    fail("resource table name is reserved by SQLite storage: " & resource.plural)
+  if resource.plural in ["home", "search", "settings"]: fail("resource route conflicts with a built-in route")
+  for prior in resources:
+    if identity(prior.model) == identity(resource.model) or prior.plural == resource.plural or
+        prior.singular == resource.singular:
+      fail("resource already exists: " & resource.model)
+    if prior.migration == resource.migration: fail("duplicate migration version")
+
+proc manifest*(resources: seq[ResourceSpec], modelSchema: int): string =
+  var entries = newJArray()
+  for resource in resources:
+    var fields = newJArray()
+    for field in resource.fields: fields.add(%*{"name": field.name, "type": field.kind})
+    entries.add(%*{"model": resource.model, "singular": resource.singular,
+      "fields": fields, "migration": $resource.migration})
+  var value = %*{"schema": ScaffoldSchema, "model_schema": modelSchema, "resources": entries}
+  if modelSchema == 2:
+    value["model_api"] = %1
+    value["timestamps"] = %true
+  pretty(value) & "\n"
+
+proc readCanonicalManifest*(value: JsonNode): ScaffoldManifest =
+  ## Strict canonical manifest parsing shared by the initializer and the scaffold,
+  ## so neither can accept a manifest the other would reject.
+  result.schema = member(value, "schema", JInt).getInt
+  if result.schema notin [1, 2, 3]: fail("unsupported scaffold manifest schema")
+  if result.schema == 3:
+    result.modelSchema = member(value, "model_schema", JInt).getInt
+    if result.modelSchema notin [1, 2]: fail("unsupported scaffold model schema")
+  else:
+    result.modelSchema = result.schema
+  if result.modelSchema == 2:
+    if member(value, "model_api", JInt).getInt != 1 or not member(value, "timestamps", JBool).getBool:
+      fail("unsupported scaffold model metadata")
+    result.modelApi = 1
+    result.timestamps = true
+  let entries = member(value, "resources", JArray)
+  for entry in entries:
+    let name = member(entry, "model", JString).getStr
+    let singular = member(entry, "singular", JString).getStr
+    var fields: seq[string]
+    for field in member(entry, "fields", JArray):
+      fields.add(member(field, "name", JString).getStr & ":" & member(field, "type", JString).getStr)
+    let version = if result.schema == 3:
+        parseDecimalVersion(member(entry, "migration", JString).getStr)
+      else:
+        let raw = member(entry, "migration", JInt).getInt
+        if raw <= 0: fail("invalid scaffold migration version")
+        int64(raw)
+    let resource = parseResource(singular, fields, version)
+    if name != resource.model or singular != resource.singular:
+      fail("noncanonical resource identity in scaffold manifest")
+    if result.modelSchema == 2: checkModelFields(resource)
+    checkResource(result.resources, resource)
+    result.resources.add resource
