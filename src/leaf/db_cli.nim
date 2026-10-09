@@ -293,6 +293,7 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
   var forced = false
   var deadline = getMonoTime()
   var reportText = ""
+  var cleanupUnconfirmed = false
   try:
     while not process.pollSplit():
       if wasInterrupted() and not requested:
@@ -307,6 +308,7 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
     # Owned reap first; diagnostics and the report handoff are fallible and must
     # never skip cleanup.
     process.closeSplit()
+    cleanupUnconfirmed = process.cleanupUnconfirmed or process.protocolError
     try:
       # The child's own channels are diagnostics only: stdout carries exactly
       # one official report object.
@@ -331,6 +333,14 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
       "the maintenance program did not stop within " & $GracefulCancelSeconds &
       "s; run status to verify the committed state"), jsonOutput)
     return 130
+  if cleanupUnconfirmed:
+    # The owned tree could not be confirmed cleaned: report it, never claim a
+    # clean completion.
+    var result = MigrationResult(command: name, executionConfirmed: false)
+    result.errors.add MigrationIssue(code: "cleanup_unconfirmed",
+      message: "the maintenance process tree could not be confirmed cleaned")
+    emit(result, jsonOutput)
+    return 1
   if reportText.len > 0:
     stdout.write(reportText)
     return process.code

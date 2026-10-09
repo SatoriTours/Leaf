@@ -20,8 +20,11 @@ type SplitProcess* = ref object
     controlFd: cint   # parent write end: closing it asks the guardian to clean
     statusFd: cint    # guardian reports the direct child's exit code
     startupFailure: int
-    cleanupUnconfirmed*: bool
+    statusBuffer: array[4, char]
+    statusRead: int
     reaped: bool
+  protocolError*: bool
+  cleanupUnconfirmed*: bool
   stdoutText*, stderrText*: string
   code*: int
   closed: bool
@@ -82,6 +85,19 @@ when defined(posix):
       copyMem(addr text[start], addr buffer[0], count)
       total += count
     if text.len > SplitOutputCap: text = text[^SplitOutputCap .. ^1]
+
+  proc guardianWriteFrame(fd: cint, value: int32): bool =
+    ## Checked and partial-write/EINTR safe; a closed peer (EPIPE) is not fatal
+    ## and never prevents cleanup.
+    var buffer: array[4, char]
+    copyMem(addr buffer[0], unsafeAddr value, 4)
+    var written = 0
+    while written < 4:
+      let count = posix.write(fd, addr buffer[written], 4 - written)
+      if count > 0: written += count
+      elif count < 0 and errno == EINTR: continue
+      else: return false
+    true
 
   proc guardianChildren(self: int): seq[int] =
     ## Every live descendant is a direct child of the subreaper, so one scan is
@@ -147,6 +163,8 @@ when defined(posix):
     ## Ownership is acquired at spawn: the guardian becomes the subreaper before
     ## the command starts, so every descendant reparents to it, and it cleans the
     ## whole tree when the parent closes the control pipe (or dies).
+    discard posix.signal(SIGPIPE, SIG_IGN)
+    # Every fallible pre-launch setup happens before the command exists.
     var failure = int32(0)
     when defined(linux):
       if prctl(PR_SET_CHILD_SUBREAPER, clong(1)) != 0:
@@ -154,16 +172,14 @@ when defined(posix):
     else:
       failure = -3'i32   # no kernel ownership primitive on this platform
     if failure != 0:
-      discard write(statusWrite, addr failure, sizeof(failure))
+      discard guardianWriteFrame(statusWrite, failure)
       splitExit(125)
-    # Clean the caller's unrelated descriptors before the command exists, so the
-    # exec'd child inherits neither caller files/locks nor sibling IPC.
     splitCloseUnrelated([outWrite, errWrite, controlRead, statusWrite])
+    splitSetNonBlocking(controlRead)
     let self = int(getpid())
     let child = fork()
     if child < 0:
-      var forkFailure = -1'i32
-      discard write(statusWrite, addr forkFailure, sizeof(forkFailure))
+      discard guardianWriteFrame(statusWrite, -1'i32)
       splitExit(125)
     if child == 0:
       discard setpgid(0, 0)
@@ -179,37 +195,51 @@ when defined(posix):
       let argv = allocCStringArray(@[exe] & args)
       discard execvp(exe.cstring, argv)
       splitExit(127)
-    var pidValue = int32(child)
-    discard write(statusWrite, addr pidValue, sizeof(pidValue))
-    splitSetNonBlocking(controlRead)
+    # START is published only once the owner is fully ready to supervise.
     var code = -1
     var reported = false
     var eof = false
-    while true:
-      var status: cint
+    try:
+      if not guardianWriteFrame(statusWrite, int32(child)):
+        raise newException(IOError, "guardian could not publish the command pid")
       while true:
-        let waited = waitpid(-1, status, WNOHANG)
-        if waited <= 0: break
-        if waited == child and code < 0:
-          code = guardianExitCode(status)
-          var value = int32(code)
-          discard write(statusWrite, addr value, sizeof(value))
-          reported = true
-      if not eof:
-        var buffer: array[1, char]
-        let count = posix.read(controlRead, addr buffer[0], 1)
-        if count == 0: eof = true
-        elif count < 0 and errno notin [EAGAIN, EWOULDBLOCK, EINTR]: eof = true
-      if eof:
-        guardianKillTree(self)
-        guardianCleanup(self, int(child), code)
-        if guardianChildren(self).len == 0: break
-      sleep(5)
-    if code < 0: code = 0
-    if not reported:
-      var value = int32(code)
-      discard write(statusWrite, addr value, sizeof(value))
-    splitExit(0)
+        var status: cint
+        while true:
+          let waited = waitpid(-1, status, WNOHANG)
+          if waited <= 0: break
+          if waited == child and code < 0:
+            code = guardianExitCode(status)
+            if not reported:
+              reported = guardianWriteFrame(statusWrite, int32(code))
+        if not eof:
+          var buffer: array[1, char]
+          let count = posix.read(controlRead, addr buffer[0], 1)
+          if count == 0: eof = true
+          elif count < 0 and errno notin [EAGAIN, EWOULDBLOCK, EINTR]: eof = true
+        if eof:
+          guardianKillTree(self)
+          guardianCleanup(self, int(child), code)
+          if guardianChildren(self).len == 0: break
+        sleep(5)
+      if code < 0: code = 0
+      if not reported:
+        reported = guardianWriteFrame(statusWrite, int32(code))
+      splitExit(0)
+    except CatchableError:
+      # The owner must never die unhandled after a command exists: kill and reap
+      # the gated command, report a framework error, then exit.
+      if child > 0:
+        discard kill(child, SIGKILL)
+        let deadline = getMonoTime() + initDuration(seconds = 5)
+        var status: cint
+        while getMonoTime() < deadline:
+          let waited = waitpid(child, status, WNOHANG)
+          if waited == child: break
+          if waited < 0 and errno != EINTR: break
+          sleep(5)
+      if not reported:
+        reported = guardianWriteFrame(statusWrite, -4'i32)
+      splitExit(125)
 
   proc splitAbortCleanup(guardian: Pid, outFd, errFd, controlFd, statusFd: cint) =
     ## Exception-safe constructor cleanup: ask the guardian to clean, confirm a
@@ -330,13 +360,26 @@ when defined(posix):
     drainChannel(p.errFd, p.stderrText, SplitDrainBudget)
 
   proc readChildStatus(p: SplitProcess) =
-    if p.code >= 0: return
-    var buffer: array[4, char]
-    let count = posix.read(p.statusFd, addr buffer[0], 4)
-    if count == 4:
-      var value: int
-      copyMem(addr value, addr buffer[0], 4)
-      p.code = value
+    ## Buffers the whole status frame across partial reads; a value outside the
+    ## exit domain 0..255 is a framework error, never an exit status.
+    if p.code >= 0 or p.protocolError: return
+    while p.statusRead < 4:
+      let count = posix.read(p.statusFd, addr p.statusBuffer[p.statusRead],
+        4 - p.statusRead)
+      if count > 0:
+        p.statusRead += count
+      elif count < 0 and errno == EINTR:
+        continue
+      else:
+        return
+    if p.statusRead == 4:
+      var value: int32
+      copyMem(addr value, addr p.statusBuffer[0], 4)
+      if value in 0'i32 .. 255'i32:
+        p.code = int(value)
+      else:
+        p.protocolError = true
+        p.code = 125
 
   proc pollSplit*(p: SplitProcess): bool =
     if p == nil or p.closed: return true
@@ -363,18 +406,15 @@ when defined(posix):
       if waited < 0 and errno == EINTR: continue
       if waited < 0: break
       if getMonoTime() > deadline:
+        # Never kill a lifecycle owner that still owns a live tree: preserve
+        # ownership and report the unconfirmed state truthfully.
         p.cleanupUnconfirmed = true
-        discard kill(p.pid, SIGKILL)
-        var forcedStatus: cint
-        let forcedDeadline = getMonoTime() + initDuration(seconds = 5)
-        while getMonoTime() < forcedDeadline:
-          let forced = waitpid(p.pid, forcedStatus, WNOHANG)
-          if forced == p.pid: break
-          if forced < 0 and errno != EINTR: break
-          sleep(5)
         break
       sleep(5)
     p.reaped = true
+    if p.code < 0 and not p.protocolError:
+      p.readChildStatus()
+      if p.code < 0: p.cleanupUnconfirmed = true
     p.readChildStatus()
     p.drainSplit()
     discard close(p.outFd)
