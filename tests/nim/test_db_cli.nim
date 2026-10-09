@@ -4,7 +4,7 @@
 ## from a preview or status command.
 import ./cleanup_support
 import std/[json, monotimes, os, strtabs, strutils, tempfiles, times, unittest]
-import leaf/[db_cli, migrations, project, scaffold, sqlite]
+import leaf/[db_cli, migrations, process_io, project, scaffold, sqlite]
 import ./migration_compile_support
 
 let base = createTempDir("leaf-db-cli-", "")
@@ -495,9 +495,13 @@ sleep(200)
             sleep(20)
           check not alive
 
+  when not defined(posix):
+    test "signal-driven cancellation is POSIX-only":
+      skip()
+
   test "the selected-direction capability gate rejects an unsupported backend":
     let definition = MigrationDefinition(version: 2, name: "drop_title",
-      format: mfNimV1, hasDown: true,
+      format: mfNimV1, hasDown: true, sourcePath: "db/migrations/2_drop_title.nim",
       upOps: @[SchemaOperation(kind: moRemoveColumn)])
     let plan = MigrationPlan(steps: @[MigrationStep(version: 2, direction: mdUp,
       name: "drop_title")])
@@ -506,5 +510,59 @@ sleep(200)
     check rejected[0].code == "unsupported_sqlite"
     check rejected[0].version == some(2'i64)
     check rejected[0].direction == some(mdUp)
-    check rejected[0].file.len >= 0
+    check rejected[0].file == "db/migrations/2_drop_title.nim"
     check selectedCapabilityIssues(@[definition], plan, (3, 40, 0)).len == 0
+
+  when defined(linux):
+    test "sibling splits and live nested trees are always owned and reaped":
+      let tools = base / "tools-guardian"
+      createDir(tools)
+      writeProbeFiles(tools, @[
+        ("sleeper.nim", "import std/os\nsleep(60_000)\n"),
+        ("live_middle.nim", """
+import std/[os, strutils]
+import leaf/process_io
+
+let sleeper = findExe("sleep")
+let leaf = startManaged(sleeper, @["60"], getCurrentDir())
+writeFile(paramStr(1), $leaf.pid)
+sleep(60_000)
+""")])
+      let sleeper = buildProbe(tools, "sleeper.nim", base / "guardian-cache", "sleeper")
+      let middle = buildProbe(tools, "live_middle.nim", base / "guardian-cache", "live_middle")
+      check sleeper.code == 0
+      check middle.code == 0
+      if sleeper.code == 0 and middle.code == 0:
+        proc alive(pid: int): bool =
+          if not fileExists("/proc/" & $pid & "/stat"): return false
+          let stat = readFile("/proc/" & $pid & "/stat")
+          stat[stat.rfind(')') + 2] notin {'Z', 'X'}
+        # E1: two siblings, close order must not matter and must not hang.
+        for order in [0, 1]:
+          let a = startSplitManaged(sleeper.binary, @[], tools)
+          let b = startSplitManaged(sleeper.binary, @[], tools)
+          let first = if order == 0: a else: b
+          let second = if order == 0: b else: a
+          let started = getMonoTime()
+          first.closeSplit()
+          second.closeSplit()
+          check (getMonoTime() - started) < initDuration(seconds = 10)
+          check a.code != -1
+          check b.code != -1
+        # E2: a live middle with a session-opening managed child is cleaned.
+        let marker = base / "guardian-leaf.pid"
+        let running = startSplitManaged(middle.binary, @[marker], tools)
+        for attempt in 0 ..< 200:
+          if fileExists(marker): break
+          sleep(10)
+        check fileExists(marker)
+        let leaf = parseInt(readFile(marker))
+        check alive(leaf)
+        let started = getMonoTime()
+        running.closeSplit()
+        check (getMonoTime() - started) < initDuration(seconds = 10)
+        var stopped = false
+        for attempt in 0 ..< 200:
+          if not alive(leaf): stopped = true; break
+          sleep(10)
+        check stopped

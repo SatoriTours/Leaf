@@ -320,9 +320,12 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
       discard
     for path in [token, report, report & ".tmp"]:
       if fileExists(path):
-        try: removeFile(path)
+        try:
+          removeFile(path)
         except CatchableError as cleanupError:
-          stderr.writeLine("leaf: could not remove " & path & ": " & cleanupError.msg)
+          # A failed removal is disclosed but must never skip the later ones.
+          try: stderr.writeLine("leaf: could not remove " & path & ": " & cleanupError.msg)
+          except CatchableError: discard
   if forced:
     emit(interruptedReport(name,
       "the maintenance program did not stop within " & $GracefulCancelSeconds &
