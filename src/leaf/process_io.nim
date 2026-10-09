@@ -25,6 +25,8 @@ type SplitProcess* = ref object
     reaped: bool
   protocolError*: bool
   cleanupUnconfirmed*: bool
+  statusEof*: bool
+  statusError*: bool
   stdoutText*, stderrText*: string
   code*: int
   closed: bool
@@ -163,23 +165,34 @@ when defined(posix):
     ## Ownership is acquired at spawn: the guardian becomes the subreaper before
     ## the command starts, so every descendant reparents to it, and it cleans the
     ## whole tree when the parent closes the control pipe (or dies).
-    discard posix.signal(SIGPIPE, SIG_IGN)
-    # Every fallible pre-launch setup happens before the command exists.
-    var failure = int32(0)
-    when defined(linux):
-      if prctl(PR_SET_CHILD_SUBREAPER, clong(1)) != 0:
-        failure = -2'i32
-    else:
-      failure = -3'i32   # no kernel ownership primitive on this platform
-    if failure != 0:
-      discard guardianWriteFrame(statusWrite, failure)
-      splitExit(125)
-    splitCloseUnrelated([outWrite, errWrite, controlRead, statusWrite])
-    splitSetNonBlocking(controlRead)
-    let self = int(getpid())
-    let child = fork()
-    if child < 0:
-      discard guardianWriteFrame(statusWrite, -1'i32)
+    # The whole lifecycle is one non-returning boundary: no setup, fork, loop or
+    # write may ever unwind into caller code or run the caller's atexit hooks.
+    var child: Pid = Pid(-1)
+    var code = -1
+    var reported = false
+    var eof = false
+    var self = 0
+    try:
+      discard posix.signal(SIGPIPE, SIG_IGN)
+      var failure = int32(0)
+      when defined(linux):
+        if prctl(PR_SET_CHILD_SUBREAPER, clong(1)) != 0:
+          failure = -2'i32
+      else:
+        failure = -3'i32   # no kernel ownership primitive on this platform
+      if failure != 0:
+        discard guardianWriteFrame(statusWrite, failure)
+        splitExit(125)
+      splitCloseUnrelated([outWrite, errWrite, controlRead, statusWrite])
+      splitSetNonBlocking(controlRead)
+      self = int(getpid())
+      child = fork()
+      if child < 0:
+        discard guardianWriteFrame(statusWrite, -1'i32)
+        splitExit(125)
+    except CatchableError:
+      # Nothing owned exists yet: report and leave without touching any pid.
+      discard guardianWriteFrame(statusWrite, -4'i32)
       splitExit(125)
     if child == 0:
       discard setpgid(0, 0)
@@ -196,9 +209,6 @@ when defined(posix):
       discard execvp(exe.cstring, argv)
       splitExit(127)
     # START is published only once the owner is fully ready to supervise.
-    var code = -1
-    var reported = false
-    var eof = false
     try:
       if not guardianWriteFrame(statusWrite, int32(child)):
         raise newException(IOError, "guardian could not publish the command pid")
@@ -362,16 +372,23 @@ when defined(posix):
   proc readChildStatus(p: SplitProcess) =
     ## Buffers the whole status frame across partial reads; a value outside the
     ## exit domain 0..255 is a framework error, never an exit status.
-    if p.code >= 0 or p.protocolError: return
+    if p.code >= 0 or p.protocolError or p.statusEof or p.statusError: return
     while p.statusRead < 4:
       let count = posix.read(p.statusFd, addr p.statusBuffer[p.statusRead],
         4 - p.statusRead)
       if count > 0:
         p.statusRead += count
-      elif count < 0 and errno == EINTR:
+      elif count == 0:
+        # EOF is terminal: no more bytes can arrive.
+        p.statusEof = true
+        break
+      elif errno == EINTR:
         continue
-      else:
+      elif errno in [EAGAIN, EWOULDBLOCK]:
         return
+      else:
+        p.statusError = true
+        break
     if p.statusRead == 4:
       var value: int32
       copyMem(addr value, addr p.statusBuffer[0], 4)
@@ -380,6 +397,11 @@ when defined(posix):
       else:
         p.protocolError = true
         p.code = 125
+    elif p.statusEof or p.statusError:
+      # A truncated or unreadable frame is a terminal protocol failure, never a
+      # running command and never a fabricated success.
+      p.protocolError = true
+      p.code = 125
 
   proc pollSplit*(p: SplitProcess): bool =
     if p == nil or p.closed: return true

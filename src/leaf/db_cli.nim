@@ -333,17 +333,36 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
       "the maintenance program did not stop within " & $GracefulCancelSeconds &
       "s; run status to verify the committed state"), jsonOutput)
     return 130
+  if reportText.len > 0:
+    # A complete, validated business report is never erased by a process-level
+    # failure: the confirmed migration facts stay, the process error is appended.
+    if cleanupUnconfirmed and jsonOutput:
+      try:
+        var node = parseJson(reportText)
+        if node.kind == JObject:
+          if "errors" notin node or node["errors"].kind != JArray:
+            node["errors"] = newJArray()
+          node["errors"].add(%*{"code": "cleanup_unconfirmed",
+            "message": "the maintenance process tree could not be confirmed cleaned",
+            "version": nil, "file": "", "direction": nil})
+          stdout.writeLine(node.pretty())
+        else:
+          stdout.write(reportText)
+      except CatchableError:
+        stdout.write(reportText)
+    else:
+      stdout.write(reportText)
+    if cleanupUnconfirmed:
+      stderr.writeLine("leaf: owned process cleanup could not be confirmed")
+      return 1
+    return process.code
   if cleanupUnconfirmed:
-    # The owned tree could not be confirmed cleaned: report it, never claim a
-    # clean completion.
+    # No report and no confirmable cleanup: truthful unknown state.
     var result = MigrationResult(command: name, executionConfirmed: false)
     result.errors.add MigrationIssue(code: "cleanup_unconfirmed",
       message: "the maintenance process tree could not be confirmed cleaned")
     emit(result, jsonOutput)
     return 1
-  if reportText.len > 0:
-    stdout.write(reportText)
-    return process.code
   # An exit without a report is a failure, not an interruption, unless the run
   # was actually cancelled or the child returned the interrupt status.
   var result = MigrationResult(command: name, executionConfirmed: false)
