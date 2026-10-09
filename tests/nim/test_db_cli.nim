@@ -4,7 +4,7 @@
 ## from a preview or status command.
 import ./cleanup_support
 import std/[json, monotimes, os, strtabs, strutils, tempfiles, times, unittest]
-import leaf/[migrations, project, scaffold, sqlite]
+import leaf/[db_cli, migrations, project, scaffold, sqlite]
 import ./migration_compile_support
 
 let base = createTempDir("leaf-db-cli-", "")
@@ -30,7 +30,10 @@ suite "Headless database CLI":
     let app = base / "app with 中文 $dir"
     createDir(app)
     check runCliIn(app, @["g", "scaffold"]).code == 0
+    checkpoint "before init cwd=" & getCurrentDir() & " appExists=" & $dirExists(app) &
+      " binExists=" & $fileExists(cli.binary)
     let initRun = runCliIn(app, @["db", "init"])
+    checkpoint "init code=" & $initRun.code & " out=" & initRun.stdoutText & " err=" & initRun.stderrText
     check initRun.code == 0
     check "configuration ready" in initRun.stdoutText
     check "app/application.nim" notin initRun.stdoutText  # full scaffold: automatic
@@ -113,92 +116,92 @@ suite "Headless database CLI":
     check failed.stderrText.len > 0
 
   test "a real SQL interruption keeps the committed step and reports 130":
-    let app = base / "sql-interrupt"
-    createDir(app)
-    check runCliIn(app, @["g", "scaffold"]).code == 0
-    # A slow legacy migration runs after the fast task migration commits.
-    writeFile(app / "db" / "migrations" / "99999999999999999_slow.up.sql",
-      "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 30000)\n" &
-      "SELECT count(*) FROM c a, c b;\n")
-    writeFile(app / "db" / "migrations" / "99999999999999999_slow.down.sql", "SELECT 1;\n")
-    let database = app / "var" / "sql-interrupt.sqlite3"
-    var env = newStringTable(modeCaseSensitive)
-    for key, value in envPairs(): env[key] = value
-    env["LEAF_DATABASE_PATH"] = database
-    var signalled = false
-    let interrupted = runCli(cli.binary, app, @["db", "migrate", "--json"], env,
-      seconds = 120, ready = proc(): bool =
-        if signalled: return false
-        if not fileExists(database): return false
-        # Cancel only after the first migration is actually committed.
-        try:
-          let probe = openDatabaseReadOnly(database)
-          let committed = readMigrationHistory(probe).len >= 1
-          probe.close()
-          if committed:
-            signalled = true
-            return true
-        except CatchableError:
-          discard
-        false)
-    checkpoint "code=" & $interrupted.code & " stdout=" & interrupted.stdoutText &
-      " stderr=" & interrupted.stderrText
-    check interrupted.code == 130
-    let value = parseJson(interrupted.stdoutText.strip())
-    if value["execution_confirmed"].getBool:
+    when defined(posix):
+      let app = base / "sql-interrupt"
+      createDir(app)
+      check runCliIn(app, @["g", "scaffold"]).code == 0
+      # A slow legacy migration runs after the fast task migration commits.
+      writeFile(app / "db" / "migrations" / "99999999999999999_slow.up.sql",
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 30000)\n" &
+        "SELECT count(*) FROM c a, c b;\n")
+      writeFile(app / "db" / "migrations" / "99999999999999999_slow.down.sql", "SELECT 1;\n")
+      let database = app / "var" / "sql-interrupt.sqlite3"
+      var env = newStringTable(modeCaseSensitive)
+      for key, value in envPairs(): env[key] = value
+      env["LEAF_DATABASE_PATH"] = database
+      var signalled = false
+      let interrupted = runCli(cli.binary, app, @["db", "migrate", "--json"], env,
+        seconds = 120, ready = proc(): bool =
+          if signalled: return false
+          if not fileExists(database): return false
+          # Cancel only after the first migration is actually committed.
+          try:
+            let probe = openDatabaseReadOnly(database)
+            let committed = readMigrationHistory(probe).len >= 1
+            probe.close()
+            if committed:
+              signalled = true
+              return true
+          except CatchableError:
+            discard
+          false)
+      checkpoint "code=" & $interrupted.code & " stdout=" & interrupted.stdoutText &
+        " stderr=" & interrupted.stderrText
+      check interrupted.code == 130
+      let value = parseJson(interrupted.stdoutText.strip())
+      # The cancellation must land after the first committed step, so the report is
+      # confirmed and names exactly what committed.
+      check value["execution_confirmed"].getBool
       var cancelled = 0
       for issue in value["errors"]:
-        if issue["code"].getStr in ["migration_cancelled", "migration_interrupted"]:
-          inc cancelled
-      check cancelled >= 1
-      # The fast task migration was committed before the slow one was cancelled.
-      check fileExists(database)
+        if issue["code"].getStr == "migration_cancelled": inc cancelled
+      check cancelled == 1
+      check value["executed"].len == 1
+      let taskVersion = value["current_version"].getStr
+      check taskVersion.len > 0
+      check value["executed"][0]["version"].getStr == taskVersion
+      check value["executed"][0]["direction"].getStr == "up"
       let db = openDatabaseReadOnly(database)
       let history = readMigrationHistory(db)
       db.close()
       check history.len == 1
-    else:
-      check value["executed"].kind == JNull
-      check value["current_version"].kind == JNull
-      var unconfirmed = 0
-      for issue in value["errors"]:
-        if issue["code"].getStr == "interrupted_unconfirmed": inc unconfirmed
-      check unconfirmed == 1
-    var leftover = 0
-    for path in walkFiles(app / "target" / "leaf-db" / "cancel-*.token"): inc leftover
-    for path in walkFiles(app / "target" / "leaf-db" / "report-*.json"): inc leftover
-    check leftover == 0
+      check $history[0].version == taskVersion
+      var leftover = 0
+      for path in walkFiles(app / "target" / "leaf-db" / "cancel-*.token"): inc leftover
+      for path in walkFiles(app / "target" / "leaf-db" / "report-*.json"): inc leftover
+      check leftover == 0
 
   test "an interrupted migration reports 130 without inventing committed steps":
-    let app = base / "interrupt"
-    createDir(app)
-    check runCliIn(app, @["g", "scaffold"]).code == 0
-    # A legacy SQL migration that is slow enough to interrupt.
-    writeFile(app / "db" / "migrations" / "900_slow.up.sql",
-      "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 40000000)\n" &
-      "SELECT count(*) FROM c;\n")
-    writeFile(app / "db" / "migrations" / "900_slow.down.sql", "SELECT 1;\n")
-    let database = app / "target" / "interrupt.sqlite3"
-    var env = newStringTable(modeCaseSensitive)
-    for key, value in envPairs(): env[key] = value
-    env["LEAF_DATABASE_PATH"] = database
-    let interrupted = runCliIn(app, @["db", "migrate", "--json"], env, interruptAfterMs = 1500)
-    checkpoint "code=" & $interrupted.code & " stdout=" & interrupted.stdoutText &
-      " stderr=" & interrupted.stderrText
-    check interrupted.code == 130
-    let value = parseJson(interrupted.stdoutText.strip())
-    check not value["execution_confirmed"].getBool or value["errors"].len > 0
-    if not value["execution_confirmed"].getBool:
-      check value["executed"].kind == JNull
-      check value["current_version"].kind == JNull
-      var unconfirmed = 0
-      for issue in value["errors"]:
-        if issue["code"].getStr in ["interrupted_unconfirmed", "migration_interrupted"]:
-          inc unconfirmed
-      check unconfirmed >= 1
-    var leftover = 0
-    for path in walkFiles(app / "target" / "leaf-db" / "cancel-*.token"): inc leftover
-    check leftover == 0
+    when defined(posix):
+      let app = base / "interrupt"
+      createDir(app)
+      check runCliIn(app, @["g", "scaffold"]).code == 0
+      # A legacy SQL migration that is slow enough to interrupt.
+      writeFile(app / "db" / "migrations" / "900_slow.up.sql",
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 40000000)\n" &
+        "SELECT count(*) FROM c;\n")
+      writeFile(app / "db" / "migrations" / "900_slow.down.sql", "SELECT 1;\n")
+      let database = app / "target" / "interrupt.sqlite3"
+      var env = newStringTable(modeCaseSensitive)
+      for key, value in envPairs(): env[key] = value
+      env["LEAF_DATABASE_PATH"] = database
+      let interrupted = runCliIn(app, @["db", "migrate", "--json"], env, interruptAfterMs = 1500)
+      checkpoint "code=" & $interrupted.code & " stdout=" & interrupted.stdoutText &
+        " stderr=" & interrupted.stderrText
+      check interrupted.code == 130
+      let value = parseJson(interrupted.stdoutText.strip())
+      check not value["execution_confirmed"].getBool or value["errors"].len > 0
+      if not value["execution_confirmed"].getBool:
+        check value["executed"].kind == JNull
+        check value["current_version"].kind == JNull
+        var unconfirmed = 0
+        for issue in value["errors"]:
+          if issue["code"].getStr in ["interrupted_unconfirmed", "migration_interrupted"]:
+            inc unconfirmed
+        check unconfirmed >= 1
+      var leftover = 0
+      for path in walkFiles(app / "target" / "leaf-db" / "cancel-*.token"): inc leftover
+      check leftover == 0
 
   test "strict JSON failures and precise preflight fields":
     # Parser and project failures still produce one JSON object on stdout.
@@ -336,7 +339,8 @@ suite "Headless database CLI":
       for path in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
         let rel = relativePath(path, root)
         # Only the permitted maintenance compile artifacts are excluded.
-        if rel == "target/leaf-db" or rel.startsWith("target/leaf-db/"): continue
+        let normalized = rel.replace('\\', '/')
+        if normalized == "target/leaf-db" or normalized.startsWith("target/leaf-db/"): continue
         if dirExists(path): result.add (rel & "/", "dir:" & stamp(path))
         else: result.add (rel, "file:" & stamp(path) & ":" & readFile(path))
     writeFile(app / "target-notes.txt", "in scope\n")
@@ -397,49 +401,58 @@ suite "Headless database CLI":
     check state() == "0"
 
   test "an unresponsive ready child is forced and never claims confirmation":
-    let app = base / "forced"
-    createDir(app)
-    check runCliIn(app, @["g", "scaffold"]).code == 0
-    # A configuration that blocks at import time: the maintenance child becomes
-    # ready but can never observe the cancellation token.
-    let marker = app / "target" / "forced-ready"
-    createDir(marker.parentDir)
-    # Keep the configuration API and block the import afterwards.
-    writeFile(app / "config" / "database.nim",
-      readFile(app / "config" / "database.nim") &
-      "\nimport std/os\n" &
-      "writeFile(" & marker.escape & ", \"ready\")\n" &
-      "sleep(60_000)\n")
-    let database = app / "var" / "forced.sqlite3"
-    var env = newStringTable(modeCaseSensitive)
-    for key, value in envPairs(): env[key] = value
-    env["LEAF_DATABASE_PATH"] = database
-    var signalled = false
-    let forced = runCli(cli.binary, app, @["db", "migrate", "--json"], env,
-      seconds = 300, ready = proc(): bool =
-        if signalled: return false
-        signalled = fileExists(marker)
-        signalled)
-    checkpoint "forced code=" & $forced.code & " signalled=" & $signalled &
-      " marker=" & $fileExists(marker) & " stdout=" & forced.stdoutText &
-      " stderr-tail=" & (if forced.stderrText.len > 80: forced.stderrText[^80..^1] else: forced.stderrText)
-    check signalled
-    check fileExists(marker)
-    check forced.code == 130
-    let value = parseJson(forced.stdoutText.strip())
-    check not value["execution_confirmed"].getBool
-    check value["executed"].kind == JNull
-    check value["current_version"].kind == JNull
-    var unconfirmed = 0
-    for issue in value["errors"]:
-      if issue["code"].getStr == "interrupted_unconfirmed": inc unconfirmed
-    check unconfirmed == 1
-    check not fileExists(database)
-    var leftovers = 0
-    for path in walkFiles(app / "target" / "leaf-db" / "cancel-*.token"): inc leftovers
-    for path in walkFiles(app / "target" / "leaf-db" / "report-*.json"): inc leftovers
-    for path in walkFiles(app / "target" / "leaf-db" / "report-*.json.tmp"): inc leftovers
-    check leftovers == 0
+    when defined(posix):
+      let app = base / "forced"
+      createDir(app)
+      check runCliIn(app, @["g", "scaffold"]).code == 0
+      # A configuration that blocks at import time: the maintenance child becomes
+      # ready but can never observe the cancellation token.
+      let marker = app / "target" / "forced-ready"
+      createDir(marker.parentDir)
+      # Keep the configuration API and block the import afterwards.
+      writeFile(app / "config" / "database.nim",
+        readFile(app / "config" / "database.nim") &
+        "\nimport std/os\n" &
+        "writeFile(" & marker.escape & ", \"ready\")\n" &
+        "sleep(60_000)\n")
+      let database = app / "var" / "forced.sqlite3"
+      var env = newStringTable(modeCaseSensitive)
+      for key, value in envPairs(): env[key] = value
+      env["LEAF_DATABASE_PATH"] = database
+      var signalled = false
+      let started = getMonoTime()
+      let forced = runCli(cli.binary, app, @["db", "migrate", "--json"], env,
+        seconds = 300, ready = proc(): bool =
+          if signalled: return false
+          signalled = fileExists(marker)
+          signalled)
+      let elapsed = getMonoTime() - started
+      check elapsed > initDuration(seconds = 9)
+      check elapsed < initDuration(seconds = 40)
+      checkpoint "forced code=" & $forced.code & " signalled=" & $signalled &
+        " marker=" & $fileExists(marker) & " stdout=" & forced.stdoutText &
+        " stderr-tail=" & (if forced.stderrText.len > 80: forced.stderrText[^80..^1] else: forced.stderrText)
+      check signalled
+      check fileExists(marker)
+      check forced.code == 130
+      let value = parseJson(forced.stdoutText.strip())
+      check not value["execution_confirmed"].getBool
+      check value["executed"].kind == JNull
+      check value["current_version"].kind == JNull
+      var unconfirmed = 0
+      for issue in value["errors"]:
+        if issue["code"].getStr == "interrupted_unconfirmed": inc unconfirmed
+      check unconfirmed == 1
+      check not fileExists(database)
+      # A follow-up status must work and report the known-empty state.
+      let after = runCliIn(app, @["db", "status", "--json"], env)
+      check after.code == 0
+      check parseJson(after.stdoutText.strip())["current_version"].getStr == "0"
+      var leftovers = 0
+      for path in walkFiles(app / "target" / "leaf-db" / "cancel-*.token"): inc leftovers
+      for path in walkFiles(app / "target" / "leaf-db" / "report-*.json"): inc leftovers
+      for path in walkFiles(app / "target" / "leaf-db" / "report-*.json.tmp"): inc leftovers
+      check leftovers == 0
 
   when defined(linux):
     test "the split helper cleans LEAF nested children after the leader exits":
@@ -481,3 +494,17 @@ sleep(200)
             if state in {'Z', 'X'}: alive = false; break
             sleep(20)
           check not alive
+
+  test "the selected-direction capability gate rejects an unsupported backend":
+    let definition = MigrationDefinition(version: 2, name: "drop_title",
+      format: mfNimV1, hasDown: true,
+      upOps: @[SchemaOperation(kind: moRemoveColumn)])
+    let plan = MigrationPlan(steps: @[MigrationStep(version: 2, direction: mdUp,
+      name: "drop_title")])
+    let rejected = selectedCapabilityIssues(@[definition], plan, (3, 24, 0))
+    check rejected.len == 1
+    check rejected[0].code == "unsupported_sqlite"
+    check rejected[0].version == some(2'i64)
+    check rejected[0].direction == some(mdUp)
+    check rejected[0].file.len >= 0
+    check selectedCapabilityIssues(@[definition], plan, (3, 40, 0)).len == 0

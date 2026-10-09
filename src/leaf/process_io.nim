@@ -14,70 +14,26 @@ type SplitProcess* = ref object
   when defined(windows):
     process: WindowsProcess
   else:
-    pid: Pid
+    pid: Pid          # guardian pid
+    childPid: int     # the actual command, reported by the guardian handshake
     outFd, errFd: cint
+    controlFd: cint   # parent write end: closing it asks the guardian to clean
+    statusFd: cint    # guardian reports the direct child's exit code
     reaped: bool
-    when defined(linux):
-      # Descendants seen while the leader was alive, with their start time so a
-      # recycled pid is never killed later.
-      tracked: seq[tuple[pid: int, start: string]]
   stdoutText*, stderrText*: string
   code*: int
   closed: bool
 
-when defined(linux):
-  proc statField(pid: int, index: int): string =
-    ## 1-based field of /proc/<pid>/stat; the comm field may contain spaces.
-    try:
-      let raw = readFile("/proc/" & $pid & "/stat")
-      let close = raw.rfind(')')
-      if close < 0: return ""
-      let rest = strutils.splitWhitespace(raw[close + 1 .. ^1].strip())
-      let offset = index - 3
-      if offset >= 0 and offset < rest.len: rest[offset] else: ""
-    except CatchableError:
-      ""
-
-  proc trackTree(rootPid: int, tracked: var seq[tuple[pid: int, start: string]]) =
-    ## Accumulate LEAF's own nested children (which may open a new session and
-    ## escape the root process group) before the leader is reaped.
-    var byParent = initTable[int, seq[int]]()
-    try:
-      for entry in walkDir("/proc"):
-        let name = entry.path.extractFilename
-        if name.len == 0 or name[0] notin {'0'..'9'}: continue
-        var pid = 0
-        try: pid = parseInt(name)
-        except ValueError: continue
-        var parent = 0
-        try: parent = parseInt(statField(pid, 4))
-        except ValueError: continue
-        byParent.mgetOrPut(parent, @[]).add pid
-    except CatchableError:
-      return
-    var queue = @[rootPid]
-    var seen = initHashSet[int]()
-    seen.incl rootPid
-    while queue.len > 0:
-      let current = queue.pop()
-      for child in byParent.getOrDefault(current):
-        if child in seen: continue
-        seen.incl child
-        let started = statField(child, 22)
-        if started.len > 0:
-          var known = false
-          for item in tracked:
-            if item.pid == child: known = true
-          if not known: tracked.add (child, started)
-        queue.add child
-
-  proc killTracked(tracked: seq[tuple[pid: int, start: string]]) =
-    for item in tracked:
-      # Only kill the exact process we observed, never a recycled pid.
-      if statField(item.pid, 22) == item.start:
-        discard kill(Pid(item.pid), SIGKILL)
-
 when defined(posix):
+  proc splitExit(code: cint) {.importc: "_exit", header: "<unistd.h>", noreturn.}
+    ## The guardian is a fork of the caller, so it must not run the caller's
+    ## atexit handlers (which would delete caller-owned directories).
+
+  when defined(linux):
+    proc prctl(option: cint): cint {.importc, header: "<sys/prctl.h>",
+      varargs.}
+    const PR_SET_CHILD_SUBREAPER = 36
+
   proc splitSetNonBlocking(fd: cint) =
     let flags = fcntl(fd, F_GETFL, 0)
     if flags < 0: raise newException(OSError, "fcntl F_GETFL failed")
@@ -96,89 +52,198 @@ when defined(posix):
       total += count
     if text.len > SplitOutputCap: text = text[^SplitOutputCap .. ^1]
 
+  proc guardianChildren(self: int): seq[int] =
+    ## Every live descendant is a direct child of the subreaper, so one scan is
+    ## authoritative; no ancestry guessing and no polling of the original pid.
+    result = @[]
+    try:
+      for entry in walkDir("/proc"):
+        let name = entry.path.extractFilename
+        if name.len == 0 or name[0] notin {'0'..'9'}: continue
+        var pid = 0
+        try: pid = parseInt(name)
+        except ValueError: continue
+        if pid == self: continue
+        try:
+          let raw = readFile("/proc/" & $pid & "/stat")
+          let close = raw.rfind(')')
+          if close < 0: continue
+          let rest = strutils.splitWhitespace(raw[close + 1 .. ^1].strip())
+          if rest.len > 1 and rest[1] == $self: result.add pid
+        except CatchableError:
+          discard
+    except CatchableError:
+      discard
+
+  proc guardianKillTree(self: int) =
+    for pid in guardianChildren(self):
+      discard kill(Pid(pid), SIGKILL)
+
+  proc guardianExitCode(status: cint): int =
+    if (status and 0x7f) == 0: (status shr 8) and 0xff
+    else: 128 + (status and 0x7f)
+
+  proc guardianMain(outWrite, errWrite, controlRead, statusWrite: cint,
+      env: StringTableRef, exe: string, args: seq[string],
+      workingDir: string) {.noreturn.} =
+    ## Ownership is acquired at spawn: the guardian becomes the subreaper before
+    ## the command starts, so every descendant reparents to it, and it cleans the
+    ## whole tree when the parent closes the control pipe (or dies).
+    when defined(linux):
+      discard prctl(PR_SET_CHILD_SUBREAPER, clong(1))
+    let self = int(getpid())
+    let child = fork()
+    if child == 0:
+      discard setpgid(0, 0)
+      discard dup2(outWrite, 1)
+      discard dup2(errWrite, 2)
+      discard close(outWrite); discard close(errWrite); discard close(controlRead)
+      discard close(statusWrite)
+      if env != nil:
+        for key, value in env: putEnv(key, value)
+      if workingDir.len > 0 and chdir(workingDir.cstring) != 0:
+        stderr.writeLine("leaf: cannot enter working directory: " & workingDir)
+        splitExit(126)
+      let argv = allocCStringArray(@[exe] & args)
+      discard execvp(exe.cstring, argv)
+      splitExit(127)
+    discard close(outWrite)
+    discard close(errWrite)
+    var pidValue = int32(child)
+    discard write(statusWrite, addr pidValue, sizeof(pidValue))
+    splitSetNonBlocking(controlRead)
+    var code = -1
+    var reported = false
+    var eof = false
+    while true:
+      var status: cint
+      while true:
+        let waited = waitpid(-1, status, WNOHANG)
+        if waited <= 0: break
+        if waited == child and code < 0:
+          code = guardianExitCode(status)
+          var value = int32(code)
+          discard write(statusWrite, addr value, sizeof(value))
+          reported = true
+      if not eof:
+        var buffer: array[1, char]
+        let count = posix.read(controlRead, addr buffer[0], 1)
+        if count == 0: eof = true
+        elif count < 0 and errno notin [EAGAIN, EWOULDBLOCK, EINTR]: eof = true
+      if eof:
+        guardianKillTree(self)
+        while true:
+          let waited = waitpid(-1, status, 0)
+          if waited <= 0: break
+          if waited == child and code < 0: code = guardianExitCode(status)
+        if guardianChildren(self).len == 0: break
+      sleep(5)
+    if code < 0: code = 0
+    if not reported:
+      var value = int32(code)
+      discard write(statusWrite, addr value, sizeof(value))
+    splitExit(0)
+
   proc startSplitManaged*(exe: string, args: seq[string], workingDir: string,
       env: StringTableRef = nil): SplitProcess =
-    var outPipe, errPipe: array[2, cint]
+    var outPipe = [-1.cint, -1.cint]
+    var errPipe = [-1.cint, -1.cint]
+    var controlPipe = [-1.cint, -1.cint]
+    var statusPipe = [-1.cint, -1.cint]
+    template cleanupPipes() =
+      for pair in [outPipe, errPipe, controlPipe, statusPipe]:
+        if pair[0] >= 0: discard close(pair[0])
+        if pair[1] >= 0: discard close(pair[1])
     if pipe(outPipe) != 0: raise newException(OSError, "pipe failed")
     if pipe(errPipe) != 0:
-      discard close(outPipe[0]); discard close(outPipe[1])
+      cleanupPipes()
+      raise newException(OSError, "pipe failed")
+    if pipe(controlPipe) != 0:
+      cleanupPipes()
+      raise newException(OSError, "pipe failed")
+    if pipe(statusPipe) != 0:
+      cleanupPipes()
       raise newException(OSError, "pipe failed")
     try:
       splitSetNonBlocking(outPipe[0])
       splitSetNonBlocking(errPipe[0])
     except CatchableError:
-      discard close(outPipe[0]); discard close(outPipe[1])
-      discard close(errPipe[0]); discard close(errPipe[1])
+      cleanupPipes()
       raise
-    # Stable literal argv storage that lives until the child execs.
-    let argv = allocCStringArray(@[exe] & args)
-    let pid = fork()
-    if pid < 0:
-      deallocCStringArray(argv)
-      discard close(outPipe[0]); discard close(outPipe[1])
-      discard close(errPipe[0]); discard close(errPipe[1])
+    let guardian = fork()
+    if guardian < 0:
+      cleanupPipes()
       raise newException(OSError, "fork failed")
-    if pid == 0:
-      discard setpgid(0, 0)
-      discard dup2(outPipe[1], 1)
-      discard dup2(errPipe[1], 2)
-      discard close(outPipe[0]); discard close(outPipe[1])
-      discard close(errPipe[0]); discard close(errPipe[1])
-      if env != nil:
-        for key, value in env: putEnv(key, value)
-      if workingDir.len > 0 and chdir(workingDir.cstring) != 0:
-        stderr.writeLine("leaf: cannot enter working directory: " & workingDir)
-        quit(126)
-      discard execvp(exe.cstring, argv)
-      quit(127)
-    deallocCStringArray(argv)
+    if guardian == 0:
+      discard close(outPipe[0]); discard close(errPipe[0])
+      discard close(controlPipe[1]); discard close(statusPipe[0])
+      guardianMain(outPipe[1], errPipe[1], controlPipe[0], statusPipe[1], env,
+        exe, args, workingDir)
     discard close(outPipe[1]); discard close(errPipe[1])
-    result = SplitProcess(pid: pid, outFd: outPipe[0], errFd: errPipe[0], code: -1)
+    discard close(controlPipe[0]); discard close(statusPipe[1])
+    result = SplitProcess(pid: guardian, outFd: outPipe[0], errFd: errPipe[0],
+      controlFd: controlPipe[1], statusFd: statusPipe[0], code: -1)
+    # Handshake: the guardian reports the real command pid before we can signal
+    # it. The read is bounded by poll so a dead guardian cannot hang startup.
+    var descriptor = TPollfd(fd: statusPipe[0], events: POLLIN)
+    if posix.poll(addr descriptor, 1, 5000) > 0:
+      var pidBuffer: array[4, char]
+      var pidRead = 0
+      while pidRead < 4:
+        let count = posix.read(statusPipe[0], addr pidBuffer[pidRead], 4 - pidRead)
+        if count <= 0:
+          if count < 0 and errno == EINTR: continue
+          break
+        pidRead += count
+      if pidRead == 4:
+        var value: int
+        copyMem(addr value, addr pidBuffer[0], 4)
+        result.childPid = value
+    splitSetNonBlocking(statusPipe[0])
 
   proc splitPid*(p: SplitProcess): int =
-    if p == nil: 0 else: int(p.pid)
+    if p == nil: 0
+    elif p.childPid > 0: p.childPid
+    else: int(p.pid)
 
   proc drainSplit*(p: SplitProcess) =
     if p == nil or p.closed: return
     drainChannel(p.outFd, p.stdoutText, SplitDrainBudget)
     drainChannel(p.errFd, p.stderrText, SplitDrainBudget)
 
+  proc readChildStatus(p: SplitProcess) =
+    if p.code >= 0: return
+    var buffer: array[4, char]
+    let count = posix.read(p.statusFd, addr buffer[0], 4)
+    if count == 4:
+      var value: int
+      copyMem(addr value, addr buffer[0], 4)
+      p.code = value
+
   proc pollSplit*(p: SplitProcess): bool =
-    if p == nil or p.closed or p.reaped: return true
+    if p == nil or p.closed: return true
     p.drainSplit()
-    when defined(linux): trackTree(p.pid, p.tracked)
-    var status: cint
-    let waited = waitpid(p.pid, status, WNOHANG)
-    if waited == p.pid:
-      p.reaped = true
-      # Descendants may outlive the leader: clean the group and every tracked
-      # nested child, then finish draining.
-      discard kill(-p.pid, SIGKILL)
-      when defined(linux): killTracked(p.tracked)
-      p.code = if (status and 0x7f) == 0: (status shr 8) and 0xff
-        else: 128 + (status and 0x7f)
-      p.drainSplit()
-      return true
-    if waited < 0:
-      if errno == EINTR: return false
-      # Already reaped elsewhere: finish instead of looping forever.
-      p.reaped = true
-      return true
-    false
+    if p.code < 0: p.readChildStatus()
+    p.code >= 0
 
   proc closeSplit*(p: SplitProcess) =
     if p == nil or p.closed: return
-    when defined(linux): trackTree(p.pid, p.tracked)
-    if not p.reaped:
-      discard kill(-p.pid, SIGKILL)
-      discard kill(p.pid, SIGKILL)
-      var status: cint
-      discard waitpid(p.pid, status, 0)
-      p.reaped = true
-    discard kill(-p.pid, SIGKILL)
-    when defined(linux): killTracked(p.tracked)
+    # Closing the control pipe asks the guardian to kill and reap the tree.
+    discard close(p.controlFd)
+    p.controlFd = -1
+    var status: cint
+    while true:
+      let waited = waitpid(p.pid, status, 0)
+      if waited == p.pid: break
+      if waited < 0 and errno == EINTR: continue
+      break
+    p.reaped = true
+    p.readChildStatus()
+    p.drainSplit()
     discard close(p.outFd)
     discard close(p.errFd)
+    discard close(p.statusFd)
+    p.outFd = -1; p.errFd = -1; p.statusFd = -1
     p.closed = true
 else:
   proc drainWindowsChannel(handle: Handle, text: var string, budget: int) =

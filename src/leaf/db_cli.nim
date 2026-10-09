@@ -87,6 +87,24 @@ proc failure(command, database, code, message: string, jsonOutput: bool,
   emit(result, jsonOutput)
   1
 
+proc selectedCapabilityIssues*(catalog: openArray[MigrationDefinition],
+    plan: MigrationPlan, version: tuple[major, minor, patch: int]): seq[MigrationIssue] =
+  ## The exact selected-direction capability gate the controller runs, exposed so
+  ## a regression can prove the negative path without an older SQLite runtime.
+  for step in plan.steps:
+    let index = findDefinition(catalog, step.version)
+    if index < 0: continue
+    let definition = catalog[index]
+    if definition.format == mfSqlV1: continue
+    let operations = if step.direction == mdUp: definition.upOps else: definition.downOps
+    try:
+      checkCapabilities(operations, version)
+    except MigrationError as error:
+      result.add MigrationIssue(code: error.issueCode, message: error.msg,
+        version: some(step.version), file: definition.sourcePath,
+        direction: some(step.direction))
+
+
 proc runMaintenance*(databasePath: string, catalog: seq[MigrationDefinition],
     args: seq[string]): int =
   ## Execute one database command against `catalog` and print its report.
@@ -111,7 +129,8 @@ proc runMaintenance*(databasePath: string, catalog: seq[MigrationDefinition],
     # must not create a file, parent directory, history table or lock.
     db = if existing: openDatabaseReadOnly(databasePath) else: openDatabase(":memory:")
   except CatchableError as error:
-    return failure(name, databasePath, "database_unusable", error.msg, jsonOutput)
+    return failure(name, databasePath, "database_unusable", error.msg, jsonOutput,
+      command.dryRun)
   var history: seq[MigrationRecord]
   var result = MigrationResult(command: name, database: databasePath)
   result.dryRun = command.dryRun
@@ -153,28 +172,10 @@ proc runMaintenance*(databasePath: string, catalog: seq[MigrationDefinition],
     return 1
   # Capability preflight on the read-only handle: an unsupported selected
   # direction must fail before any writable open creates a database or parent.
-  try:
-    let runtime = sqliteRuntimeVersion()
-    for step in plan.steps:
-      let index = findDefinition(catalog, step.version)
-      if index < 0: continue
-      let definition = catalog[index]
-      if definition.format == mfSqlV1: continue
-      let operations = if step.direction == mdUp: definition.upOps else: definition.downOps
-      try:
-        checkCapabilities(operations, runtime)
-      except MigrationError as error:
-        # Attach the known selected step so the report is actionable.
-        var enriched = newException(MigrationError, error.msg)
-        enriched.issueCode = error.issueCode
-        enriched.migrationVersion = some(step.version)
-        enriched.file = definition.sourcePath
-        enriched.direction = some(step.direction)
-        raise enriched
-  except MigrationError as error:
+  let capabilityIssues = selectedCapabilityIssues(catalog, plan, sqliteRuntimeVersion())
+  if capabilityIssues.len > 0:
     result.executionConfirmed = true
-    result.errors.add MigrationIssue(code: error.issueCode, message: error.msg,
-      version: error.migrationVersion, file: error.file, direction: error.direction)
+    for issue in capabilityIssues: result.errors.add issue
     db.close()
     emit(result, jsonOutput)
     return 1
@@ -320,7 +321,8 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
     for path in [token, report, report & ".tmp"]:
       if fileExists(path):
         try: removeFile(path)
-        except CatchableError: discard
+        except CatchableError as cleanupError:
+          stderr.writeLine("leaf: could not remove " & path & ": " & cleanupError.msg)
   if forced:
     emit(interruptedReport(name,
       "the maintenance program did not stop within " & $GracefulCancelSeconds &
