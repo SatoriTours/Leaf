@@ -6,6 +6,7 @@ import ./cleanup_support
 import std/[json, monotimes, os, strtabs, strutils, tempfiles, times, unittest]
 import leaf/[db_cli, migrations, process_io, project, scaffold, sqlite]
 import ./migration_compile_support
+when defined(posix): import std/posix
 
 let base = createTempDir("leaf-db-cli-", "")
 removeDirectoryOnExit(base)
@@ -135,15 +136,17 @@ suite "Headless database CLI":
           if signalled: return false
           if not fileExists(database): return false
           # Cancel only after the first migration is actually committed.
+          var probe: Database
           try:
-            let probe = openDatabaseReadOnly(database)
+            probe = openDatabaseReadOnly(database)
             let committed = readMigrationHistory(probe).len >= 1
-            probe.close()
             if committed:
               signalled = true
               return true
           except CatchableError:
             discard
+          finally:
+            if probe != nil: probe.close()
           false)
       checkpoint "code=" & $interrupted.code & " stdout=" & interrupted.stdoutText &
         " stderr=" & interrupted.stderrText
@@ -539,30 +542,45 @@ sleep(60_000)
           stat[stat.rfind(')') + 2] notin {'Z', 'X'}
         # E1: two siblings, close order must not matter and must not hang.
         for order in [0, 1]:
-          let a = startSplitManaged(sleeper.binary, @[], tools)
-          let b = startSplitManaged(sleeper.binary, @[], tools)
-          let first = if order == 0: a else: b
-          let second = if order == 0: b else: a
-          let started = getMonoTime()
-          first.closeSplit()
-          second.closeSplit()
-          check (getMonoTime() - started) < initDuration(seconds = 10)
-          check a.code != -1
-          check b.code != -1
+          var a: SplitProcess
+          var b: SplitProcess
+          try:
+            a = startSplitManaged(sleeper.binary, @[], tools)
+            b = startSplitManaged(sleeper.binary, @[], tools)
+            let first = if order == 0: a else: b
+            let second = if order == 0: b else: a
+            let started = getMonoTime()
+            first.closeSplit()
+            second.closeSplit()
+            check (getMonoTime() - started) < initDuration(seconds = 10)
+            check a.code != -1
+            check b.code != -1
+          finally:
+            if a != nil: a.closeSplit()
+            if b != nil: b.closeSplit()
         # E2: a live middle with a session-opening managed child is cleaned.
         let marker = base / "guardian-leaf.pid"
-        let running = startSplitManaged(middle.binary, @[marker], tools)
-        for attempt in 0 ..< 200:
-          if fileExists(marker): break
-          sleep(10)
-        check fileExists(marker)
-        let leaf = parseInt(readFile(marker))
-        check alive(leaf)
-        let started = getMonoTime()
-        running.closeSplit()
-        check (getMonoTime() - started) < initDuration(seconds = 10)
-        var stopped = false
-        for attempt in 0 ..< 200:
-          if not alive(leaf): stopped = true; break
-          sleep(10)
-        check stopped
+        var running: SplitProcess
+        var leaf = 0
+        try:
+          running = startSplitManaged(middle.binary, @[marker], tools)
+          var ready = false
+          for attempt in 0 ..< 500:
+            if fileExists(marker): ready = true; break
+            sleep(10)
+          check ready
+          if ready:
+            leaf = parseInt(readFile(marker))
+            check alive(leaf)
+            let started = getMonoTime()
+            running.closeSplit()
+            check (getMonoTime() - started) < initDuration(seconds = 10)
+            var stopped = false
+            for attempt in 0 ..< 500:
+              if not alive(leaf): stopped = true; break
+              sleep(10)
+            check stopped
+        finally:
+          if running != nil: running.closeSplit()
+          if leaf > 0 and alive(leaf):
+            when defined(posix): discard kill(Pid(leaf), SIGKILL)

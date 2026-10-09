@@ -20,6 +20,7 @@ type SplitProcess* = ref object
     controlFd: cint   # parent write end: closing it asks the guardian to clean
     statusFd: cint    # guardian reports the direct child's exit code
     startupFailure: int
+    cleanupUnconfirmed*: bool
     reaped: bool
   stdoutText*, stderrText*: string
   code*: int
@@ -43,7 +44,8 @@ when defined(posix):
 
   proc splitSetCloexec(fd: cint) =
     let flags = fcntl(fd, F_GETFD, 0)
-    if flags >= 0: discard fcntl(fd, F_SETFD, flags or FD_CLOEXEC)
+    if flags < 0 or fcntl(fd, F_SETFD, flags or FD_CLOEXEC) < 0:
+      raise newException(OSError, "fcntl FD_CLOEXEC failed")
 
   proc splitCloseUnrelated(keep: openArray[cint]) =
     ## The guardian never execs, so FD_CLOEXEC alone cannot protect it from
@@ -108,32 +110,32 @@ when defined(posix):
     if (status and 0x7f) == 0: (status shr 8) and 0xff
     else: 128 + (status and 0x7f)
 
-  proc guardianKillTree(self, child: int) =
-    ## Kill the command's own process group (the portable fallback where no
-    ## subreaper exists) plus every kernel-owned child of the subreaper.
-    if child > 0: discard kill(Pid(-child), SIGKILL)
+  proc guardianKillTree(self: int) =
+    ## Only currently kernel-owned, non-reaped children are signalled. A reaped
+    ## command pid is never used as a group id (it may be recycled by a foreign
+    ## group by the time a delayed caller closes).
     for pid in guardianChildren(self):
       discard kill(Pid(pid), SIGKILL)
 
-  proc guardianCleanup(self, child: int, code: var int, budgetMs = 5000) =
-    ## Iterative and non-blocking: newly adopted grandchildren are killed on the
-    ## next scan, never waited on while still unsignalled and alive.
+  proc guardianCleanup(self: int, child: int, code: var int, budgetMs = 5000) =
+    ## Iterative and non-blocking. Every successful waitpid result is recorded
+    ## exactly once; there is no second ECHILD probe that could swallow the
+    ## command's final status.
     let deadline = getMonoTime() + initDuration(milliseconds = budgetMs)
     while true:
       var status: cint
-      var progressed = false
+      var reapedAny = false
       while true:
         let waited = waitpid(-1, status, WNOHANG)
         if waited > 0:
-          progressed = true
+          reapedAny = true
           if waited == child and code < 0: code = guardianExitCode(status)
           continue
         if waited < 0 and errno == EINTR: continue
         break
-      if waitpid(-1, status, WNOHANG) < 0 and errno == ECHILD: return
       let remaining = guardianChildren(self)
       if remaining.len == 0:
-        if progressed: continue
+        if reapedAny: continue
         return
       for pid in remaining: discard kill(Pid(pid), SIGKILL)
       if getMonoTime() > deadline: return
@@ -154,6 +156,9 @@ when defined(posix):
     if failure != 0:
       discard write(statusWrite, addr failure, sizeof(failure))
       splitExit(125)
+    # Clean the caller's unrelated descriptors before the command exists, so the
+    # exec'd child inherits neither caller files/locks nor sibling IPC.
+    splitCloseUnrelated([outWrite, errWrite, controlRead, statusWrite])
     let self = int(getpid())
     let child = fork()
     if child < 0:
@@ -174,8 +179,6 @@ when defined(posix):
       let argv = allocCStringArray(@[exe] & args)
       discard execvp(exe.cstring, argv)
       splitExit(127)
-    # The guardian keeps only the intentional IPC and the standard streams.
-    splitCloseUnrelated([outWrite, errWrite, controlRead, statusWrite])
     var pidValue = int32(child)
     discard write(statusWrite, addr pidValue, sizeof(pidValue))
     splitSetNonBlocking(controlRead)
@@ -198,7 +201,7 @@ when defined(posix):
         if count == 0: eof = true
         elif count < 0 and errno notin [EAGAIN, EWOULDBLOCK, EINTR]: eof = true
       if eof:
-        guardianKillTree(self, int(child))
+        guardianKillTree(self)
         guardianCleanup(self, int(child), code)
         if guardianChildren(self).len == 0: break
       sleep(5)
@@ -207,6 +210,31 @@ when defined(posix):
       var value = int32(code)
       discard write(statusWrite, addr value, sizeof(value))
     splitExit(0)
+
+  proc splitAbortCleanup(guardian: Pid, outFd, errFd, controlFd, statusFd: cint) =
+    ## Exception-safe constructor cleanup: ask the guardian to clean, confirm a
+    ## bounded reap, then close every own endpoint.
+    if controlFd >= 0: discard close(controlFd)
+    let deadline = getMonoTime() + initDuration(seconds = 5)
+    var status: cint
+    while true:
+      let waited = waitpid(guardian, status, WNOHANG)
+      if waited == guardian: break
+      if waited < 0 and errno == EINTR: continue
+      if waited < 0: break
+      if getMonoTime() > deadline:
+        discard kill(guardian, SIGKILL)
+        let forcedDeadline = getMonoTime() + initDuration(seconds = 3)
+        while getMonoTime() < forcedDeadline:
+          let forced = waitpid(guardian, status, WNOHANG)
+          if forced == guardian: break
+          if forced < 0 and errno != EINTR: break
+          sleep(5)
+        break
+      sleep(5)
+    if outFd >= 0: discard close(outFd)
+    if errFd >= 0: discard close(errFd)
+    if statusFd >= 0: discard close(statusFd)
 
   proc startSplitManaged*(exe: string, args: seq[string], workingDir: string,
       env: StringTableRef = nil): SplitProcess =
@@ -252,28 +280,44 @@ when defined(posix):
     discard close(controlPipe[0]); discard close(statusPipe[1])
     result = SplitProcess(pid: guardian, outFd: outPipe[0], errFd: errPipe[0],
       controlFd: controlPipe[1], statusFd: statusPipe[0], code: -1)
-    # Handshake: the guardian reports the real command pid before we can signal
-    # it. The read is bounded by poll so a dead guardian cannot hang startup.
-    var descriptor = TPollfd(fd: statusPipe[0], events: POLLIN)
-    if posix.poll(addr descriptor, 1, 5000) > 0:
-      var pidBuffer: array[4, char]
+    # Handshake: the guardian reports the real command pid before the caller can
+    # signal it. The wait uses one monotonic budget (EINTR does not reset it),
+    # frames are validated, and any missing/error/invalid frame fails fast with
+    # owned cleanup instead of returning an unusable handle.
+    var owned = SplitProcess(pid: guardian, outFd: outPipe[0], errFd: errPipe[0],
+      controlFd: controlPipe[1], statusFd: statusPipe[0], code: -1)
+    try:
+      let handshakeDeadline = getMonoTime() + initDuration(seconds = 5)
+      var frame: array[4, char]
       var pidRead = 0
       while pidRead < 4:
-        let count = posix.read(statusPipe[0], addr pidBuffer[pidRead], 4 - pidRead)
+        var descriptor = TPollfd(fd: statusPipe[0], events: POLLIN)
+        let remaining = (handshakeDeadline - getMonoTime()).inMilliseconds
+        if remaining <= 0:
+          raise newException(IOError, "split guardian handshake timed out")
+        let ready = posix.poll(addr descriptor, 1, cint(remaining))
+        if ready < 0:
+          if errno == EINTR: continue
+          raise newException(IOError, "split guardian handshake poll failed")
+        if ready == 0:
+          raise newException(IOError, "split guardian handshake timed out")
+        let count = posix.read(statusPipe[0], addr frame[pidRead], 4 - pidRead)
         if count <= 0:
           if count < 0 and errno == EINTR: continue
-          break
+          raise newException(IOError, "split guardian handshake closed early")
         pidRead += count
-      if pidRead == 4:
-        var value: int32
-        copyMem(addr value, addr pidBuffer[0], 4)
-        if value > 0:
-          result.childPid = int(value)
-        else:
-          # The guardian could not acquire ownership: never invent a pid and
-          # never fall back to the guardian pid.
-          result.startupFailure = int(value)
-    splitSetNonBlocking(statusPipe[0])
+      var pidValue: int32
+      copyMem(addr pidValue, addr frame[0], 4)
+      if pidValue <= 0:
+        raise newException(IOError, "split guardian could not acquire ownership (" &
+          $pidValue & ")")
+      owned.childPid = int(pidValue)
+      splitSetNonBlocking(statusPipe[0])
+      result = owned
+    except CatchableError:
+      splitAbortCleanup(guardian, outPipe[0], errPipe[0], controlPipe[1],
+        statusPipe[0])
+      raise
 
   proc splitPid*(p: SplitProcess): int =
     ## Only the real command pid; a failed ownership acquisition reports 0 so a
@@ -308,8 +352,9 @@ when defined(posix):
     # Closing the control pipe asks the guardian to kill and reap the tree.
     discard close(p.controlFd)
     p.controlFd = -1
-    # The guardian cleans the tree then exits; bound the wait so a wedged
-    # guardian cannot hang the caller, and force it afterwards.
+    # The guardian cleans the tree then exits. The wait is bounded and never
+    # unbounded: if the guardian cannot confirm cleanup in time we force it and
+    # record that cleanup was NOT confirmed instead of claiming a clean reap.
     let deadline = getMonoTime() + initDuration(seconds = 15)
     var status: cint
     while true:
@@ -318,8 +363,15 @@ when defined(posix):
       if waited < 0 and errno == EINTR: continue
       if waited < 0: break
       if getMonoTime() > deadline:
+        p.cleanupUnconfirmed = true
         discard kill(p.pid, SIGKILL)
-        discard waitpid(p.pid, status, 0)
+        var forcedStatus: cint
+        let forcedDeadline = getMonoTime() + initDuration(seconds = 5)
+        while getMonoTime() < forcedDeadline:
+          let forced = waitpid(p.pid, forcedStatus, WNOHANG)
+          if forced == p.pid: break
+          if forced < 0 and errno != EINTR: break
+          sleep(5)
         break
       sleep(5)
     p.reaped = true
