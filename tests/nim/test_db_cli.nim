@@ -85,6 +85,30 @@ suite "Headless database CLI":
     check runCliIn(app, @["db", "up", version, "--json"], env).code == 0
     check runCliIn(app, @["db", "down", version, "--dry-run", "--json"], env).code == 0
 
+  test "default text database commands keep their existing presentation":
+    let app = base / "text-mode"
+    createDir(app)
+    check runCliIn(app, @["g", "scaffold"]).code == 0
+    let database = app / "var" / "text.sqlite3"
+    var env = newStringTable(modeCaseSensitive)
+    for key, value in envPairs(): env[key] = value
+    env["LEAF_DATABASE_PATH"] = database
+    let status = runCliIn(app, @["db", "status"], env)
+    check status.code == 0
+    check "status" in status.stdoutText
+    check "{" notin status.stdoutText
+    let dry = runCliIn(app, @["db", "migrate", "--dry-run"], env)
+    check dry.code == 0
+    check "planned up" in dry.stdoutText
+    check not fileExists(database)
+    let migrate = runCliIn(app, @["db", "migrate"], env)
+    check migrate.code == 0
+    check "executed up" in migrate.stdoutText
+    check fileExists(database)
+    let down = runCliIn(app, @["db", "rollback", "--steps", "1"], env)
+    check down.code == 0
+    check "executed down" in down.stdoutText
+
   test "maintenance runs without Rust or GUI tooling and keeps stdout separate":
     let app = base / "headless"
     createDir(app)

@@ -13,6 +13,7 @@ const
   MaintenanceBinary* = "target/leaf-db/maintenance"
   CancelTokenEnv* = "LEAF_MIGRATION_CANCEL_TOKEN"
   ReportEnv* = "LEAF_MIGRATION_REPORT"
+  TextReportEnv* = "LEAF_MIGRATION_TEXT_REPORT"
   GracefulCancelSeconds* = 10
 
 proc maintenanceSource*(): string =
@@ -55,17 +56,25 @@ proc cancellationRequested(): bool =
   token.len > 0 and fileExists(token)
 
 proc emit(result: MigrationResult, jsonOutput: bool) =
-  ## With a parent-provided report path the child hands over one complete object
-  ## atomically, so a forced stop can never leave a partial JSON on stdout.
-  let text = if jsonOutput: resultJson(result).pretty() else: resultText(result)
+  ## The authoritative internal transport is always the canonical JSON envelope;
+  ## the presentation (JSON or the existing text rendering) is chosen by the
+  ## parent from the validated document, so text commands keep working.
   let report = getEnv(ReportEnv)
   if report.len > 0:
     let temporary = report & ".tmp"
-    writeFile(temporary, text & "\n")
+    writeFile(temporary, resultJson(result).pretty() & "\n")
     if fileExists(report): removeFile(report)
     moveFile(temporary, report)
+    if not jsonOutput:
+      let textPath = getEnv(TextReportEnv)
+      if textPath.len > 0:
+        let textTemporary = textPath & ".tmp"
+        writeFile(textTemporary, resultText(result) & "\n")
+        if fileExists(textPath): removeFile(textPath)
+        moveFile(textTemporary, textPath)
   else:
-    stdout.writeLine(text)
+    if jsonOutput: stdout.writeLine(resultJson(result).pretty())
+    else: stdout.writeLine(resultText(result))
 
 proc errorJson*(command, code, message: string): string =
   ## One stable object for parser/project/compiler failures under `--json`.
@@ -201,14 +210,29 @@ proc runMaintenance*(databasePath: string, catalog: seq[MigrationDefinition],
 const ScaffoldApplicationEntry = staticRead("templates/scaffold/model_application.nim")
 const LegacyApplicationEntry = staticRead("templates/scaffold/application.nim")
 
-proc trustedReport*(text, command: string): bool =
-  ## A complete maintenance report must be one JSON object for the requested
-  ## command; anything else is malformed transport, never a trusted result.
+proc trustedReport*(text, command: string, dryRun: bool): bool =
+  ## The whole document must match the expected command, request flag and result
+  ## schema with correct kinds; a partial, wrong-typed, inconsistent or trailing
+  ## document is malformed transport, never a trusted result.
   try:
     let node = parseJson(text)
-    node.kind == JObject and "command" in node and node["command"].kind == JString and
-      node["command"].getStr == command and
-      "execution_confirmed" in node and node["execution_confirmed"].kind == JBool
+    if node.kind != JObject: return false
+    for field in ["command", "database", "dry_run", "execution_confirmed",
+        "planned", "executed", "skipped", "current_version", "pending_versions",
+        "statuses", "errors"]:
+      if field notin node: return false
+    if node["command"].kind != JString or node["command"].getStr != command: return false
+    if node["database"].kind != JString: return false
+    if node["dry_run"].kind != JBool or node["dry_run"].getBool != dryRun: return false
+    if node["execution_confirmed"].kind != JBool: return false
+    for field in ["planned", "executed", "skipped", "statuses", "errors"]:
+      if node[field].kind notin {JArray, JNull}: return false
+    if node["current_version"].kind notin {JString, JNull}: return false
+    if node["pending_versions"].kind notin {JArray, JNull}: return false
+    for issue in node["errors"]:
+      if issue.kind != JObject or "code" notin issue or issue["code"].kind != JString:
+        return false
+    true
   except CatchableError:
     false
 
@@ -293,6 +317,8 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
   for key, value in envPairs(): env[key] = value
   env[CancelTokenEnv] = token
   env[ReportEnv] = report
+  let textPath = directory / ("report-" & unique & ".txt")
+  if not jsonOutput: env[TextReportEnv] = textPath
   var process: SplitProcess
   try:
     process = startSplitManaged(binary, childArgs(request, dryRun, jsonOutput),
@@ -304,6 +330,7 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
   var forced = false
   var deadline = getMonoTime()
   var reportText = ""
+  var textReport = ""
   var cleanupUnconfirmed = false
   try:
     while not process.pollSplit():
@@ -329,9 +356,10 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
       discard
     try:
       if fileExists(report): reportText = readFile(report)
+      if not jsonOutput and fileExists(textPath): textReport = readFile(textPath)
     except CatchableError:
       discard
-    for path in [token, report, report & ".tmp"]:
+    for path in [token, report, report & ".tmp", textPath, textPath & ".tmp"]:
       if fileExists(path):
         try:
           removeFile(path)
@@ -344,7 +372,7 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
       "the maintenance program did not stop within " & $GracefulCancelSeconds &
       "s; run status to verify the committed state"), jsonOutput)
     return 130
-  if reportText.len > 0 and not trustedReport(reportText, name):
+  if reportText.len > 0 and not trustedReport(reportText, name, dryRun):
     # Malformed transport: one stable controlled failure with the caller's flags.
     var result = MigrationResult(command: name, executionConfirmed: false)
     result.dryRun = dryRun
@@ -352,6 +380,15 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
       message: "the maintenance program produced an invalid report")
     emit(result, jsonOutput)
     return 1
+  if reportText.len > 0 and not jsonOutput:
+    # Text presentation: the parent renders the validated result's existing text
+    # form, never raw JSON.
+    if textReport.len > 0: stdout.write(textReport)
+    else: stdout.writeLine(name & ": report could not be rendered")
+    if cleanupUnconfirmed:
+      stderr.writeLine("leaf: owned process cleanup could not be confirmed")
+      return 1
+    return process.code
   if reportText.len > 0:
     # A complete, validated business report is never erased by a process-level
     # failure: the confirmed migration facts stay, the process error is appended.
