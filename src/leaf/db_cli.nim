@@ -214,16 +214,38 @@ proc decodeSignedVersion(node: JsonNode, value: var int64): bool =
     negative = true
     index = 1
     if raw.len == 1: return false
-  var parsed: int64
-  while index < raw.len:
-    let character = raw[index]
-    if character notin {'0'..'9'}: return false
-    let digit = int64(ord(character) - ord('0'))
-    if parsed > (high(int64) - digit) div 10: return false
-    parsed = parsed * 10 + digit
-    inc index
-  value = if negative: -parsed else: parsed
+  if negative:
+    # Accumulate negatively so low(int64) stays representable.
+    var parsed: int64
+    while index < raw.len:
+      let character = raw[index]
+      if character notin {'0'..'9'}: return false
+      let digit = int64(ord(character) - ord('0'))
+      if parsed < (low(int64) + digit) div 10: return false
+      parsed = parsed * 10 - digit
+      inc index
+    value = parsed
+  else:
+    var parsed: int64
+    while index < raw.len:
+      let character = raw[index]
+      if character notin {'0'..'9'}: return false
+      let digit = int64(ord(character) - ord('0'))
+      if parsed > (high(int64) - digit) div 10: return false
+      parsed = parsed * 10 + digit
+      inc index
+    value = parsed
   true
+
+proc decodePositiveVersion(node: JsonNode, value: var int64): bool =
+  ## Plans, statuses, skipped and pending are real migration versions (> 0).
+  if not decodeSignedVersion(node, value): return false
+  value > 0
+
+proc decodeCurrentVersion(node: JsonNode, value: var int64): bool =
+  ## A known current version may be 0 (known-empty history).
+  if not decodeSignedVersion(node, value): return false
+  value >= 0
 
 proc decodeIssueNode(node: JsonNode, issue: var MigrationIssue): bool =
   if node.kind != JObject: return false
@@ -256,7 +278,7 @@ proc decodeStepNode(node: JsonNode, step: var MigrationStep): bool =
   for field in ["version", "direction", "name", "file", "statements"]:
     if field notin node: return false
   var version: int64
-  if not decodeSignedVersion(node["version"], version): return false
+  if not decodePositiveVersion(node["version"], version): return false
   step.version = version
   if node["direction"].kind != JString: return false
   case node["direction"].getStr
@@ -277,13 +299,16 @@ proc decodeStatusNode(node: JsonNode, status: var MigrationStatus): bool =
   for field in ["version", "name", "file", "state", "issues"]:
     if field notin node: return false
   var version: int64
-  if not decodeSignedVersion(node["version"], version): return false
+  if not decodePositiveVersion(node["version"], version): return false
   status.version = version
   if node["name"].kind != JString or node["file"].kind != JString or
       node["state"].kind != JString: return false
   status.name = node["name"].getStr
   status.file = node["file"].getStr
   status.state = node["state"].getStr
+  if status.state notin ["up", "down", "pending-template", "corrupt",
+      "unknown-format", "missing", "legacy-unverified-down", "modified"]:
+    return false
   if node["issues"].kind != JArray: return false
   for issue in node["issues"]:
     var decoded: MigrationIssue
@@ -315,6 +340,17 @@ proc decodeReport*(text, command: string, dryRun: bool,
         node["statuses"].kind != JArray or node["errors"].kind != JArray: return false
     if node["current_version"].kind notin {JString, JNull}: return false
     if node["pending_versions"].kind notin {JArray, JNull}: return false
+    # The producer's nullable contract: pending is an array iff the execution is
+    # confirmed AND the current version is known; an unconfirmed result carries
+    # null executed/current/pending. Inconsistent combinations are rejected.
+    if confirmed:
+      if node["current_version"].kind == JString:
+        if node["pending_versions"].kind != JArray: return false
+      else:
+        if node["pending_versions"].kind != JNull: return false
+    else:
+      if node["current_version"].kind != JNull or
+          node["pending_versions"].kind != JNull: return false
     output = MigrationResult(command: node["command"].getStr,
       database: node["database"].getStr, dryRun: node["dry_run"].getBool,
       executionConfirmed: confirmed)
@@ -329,18 +365,18 @@ proc decodeReport*(text, command: string, dryRun: bool,
         output.executed.add decoded
     for version in node["skipped"]:
       var value: int64
-      if not decodeSignedVersion(version, value): return false
+      if not decodePositiveVersion(version, value): return false
       output.skipped.add value
     if node["current_version"].kind == JString:
       var value: int64
-      if not decodeSignedVersion(node["current_version"], value): return false
+      if not decodeCurrentVersion(node["current_version"], value): return false
       output.currentVersion = some(value)
     else:
       output.currentVersion = none(int64)
     if node["pending_versions"].kind == JArray:
       for version in node["pending_versions"]:
         var value: int64
-        if not decodeSignedVersion(version, value): return false
+        if not decodePositiveVersion(version, value): return false
         output.pendingVersions.add value
     for status in node["statuses"]:
       var decoded: MigrationStatus
@@ -373,9 +409,11 @@ proc executeDatabaseInit*(project: Project, dryRun: bool): int =
     stdout.writeLine("see db/migrations/README.md for the startup example")
   0
 
-proc interruptedReport(command: string, message: string): MigrationResult =
-  ## A forced stop never claims which steps committed.
+proc interruptedReport(command: string, message: string,
+    dryRun = false): MigrationResult =
+  ## A forced stop never claims which steps committed, but keeps the request flags.
   result.command = command
+  result.dryRun = dryRun
   result.executionConfirmed = false
   result.errors.add MigrationIssue(code: "interrupted_unconfirmed", message: message)
 
@@ -414,8 +452,8 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
     compileFailed = job.code != 0 and not compileInterrupted
     if compileInterrupted:
       stderr.writeLine(job.output)
-      emit(interruptedReport(name, "interrupted while compiling the maintenance program"),
-        jsonOutput)
+      emit(interruptedReport(name, "interrupted while compiling the maintenance program",
+        dryRun), jsonOutput)
       return 130
     if compileFailed: stderr.writeLine(job.output)
   finally:
@@ -484,7 +522,7 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
   if forced:
     emit(interruptedReport(name,
       "the maintenance program did not stop within " & $GracefulCancelSeconds &
-      "s; run status to verify the committed state"), jsonOutput)
+      "s; run status to verify the committed state", dryRun), jsonOutput)
     return 130
   var decoded: MigrationResult
   if reportText.len > 0:

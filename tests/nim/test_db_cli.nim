@@ -112,6 +112,47 @@ suite "Headless database CLI":
     check not decodeReport(canonical().pretty(), "migrate", false, decoded)
     check not decodeReport(canonical().pretty() & "{}", "migrate", true, decoded)
 
+  test "the decoder enforces field domains and nullable consistency":
+    proc canonical(): JsonNode =
+      %*{"command": "migrate", "database": "/tmp/x.sqlite3", "dry_run": true,
+        "execution_confirmed": true, "planned": [], "executed": [], "skipped": [],
+        "current_version": "0", "pending_versions": [], "statuses": [], "errors": []}
+    var decoded: MigrationResult
+    check decodeReport(canonical().pretty(), "migrate", true, decoded)
+    var value = canonical()
+    value["planned"] = %*[{"version": "0", "direction": "up", "name": "n",
+      "file": "f", "statements": []}]
+    check not decodeReport(value.pretty(), "migrate", true, decoded)
+    value = canonical(); value["current_version"] = %"-1"
+    check not decodeReport(value.pretty(), "migrate", true, decoded)
+    value = canonical(); value["pending_versions"] = %*["-2"]
+    check not decodeReport(value.pretty(), "migrate", true, decoded)
+    value = canonical()
+    value["statuses"] = %*[{"version": "-3", "name": "n", "file": "f",
+      "state": "up", "issues": []}]
+    check not decodeReport(value.pretty(), "migrate", true, decoded)
+    value = canonical()
+    value["statuses"] = %*[{"version": "1", "name": "n", "file": "f",
+      "state": "NOT_A_STATE", "issues": []}]
+    check not decodeReport(value.pretty(), "migrate", true, decoded)
+    value = canonical(); value["pending_versions"] = newJNull()
+    check not decodeReport(value.pretty(), "migrate", true, decoded)
+    value = canonical(); value["execution_confirmed"] = %false
+    value["executed"] = newJNull(); value["current_version"] = %"99"
+    value["pending_versions"] = %*[100]
+    check not decodeReport(value.pretty(), "migrate", true, decoded)
+    value = canonical()
+    value["errors"] = %*[{"code": "x", "message": "m", "file": "",
+      "version": "-9223372036854775808", "direction": "up"}]
+    check decodeReport(value.pretty(), "migrate", true, decoded)
+    check decoded.errors[0].version == some(low(int64))
+    for state in ["up", "down", "pending-template", "corrupt", "unknown-format",
+        "missing", "legacy-unverified-down", "modified"]:
+      var entry = canonical()
+      entry["statuses"] = %*[{"version": "1", "name": "n", "file": "f",
+        "state": state, "issues": []}]
+      check decodeReport(entry.pretty(), "migrate", true, decoded)
+
   test "default text database commands keep their existing presentation":
     let app = base / "text-mode"
     createDir(app)
