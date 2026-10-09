@@ -519,31 +519,38 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
           # A failed removal is disclosed but must never skip the later ones.
           try: stderr.writeLine("leaf: could not remove " & path & ": " & cleanupError.msg)
           except CatchableError: discard
-  if forced:
-    emit(interruptedReport(name,
-      "the maintenance program did not stop within " & $GracefulCancelSeconds &
-      "s; run status to verify the committed state", dryRun), jsonOutput)
-    return 130
   var decoded: MigrationResult
   if reportText.len > 0:
     if not decodeReport(reportText, name, dryRun, decoded):
-      # Malformed transport: one stable controlled failure with the caller flags.
       var result = MigrationResult(command: name, executionConfirmed: false)
       result.dryRun = dryRun
       result.errors.add MigrationIssue(code: "malformed_report",
         message: "the maintenance program produced an invalid report")
       emit(result, jsonOutput)
       return 1
-    if cleanupUnconfirmed:
+    # One selection path for every outcome: a validated complete report always
+    # keeps its confirmed business facts, with the process interruption or
+    # cleanup state appended. Business certainty and tree cleanup are separate.
+    if forced:
+      decoded.errors.add MigrationIssue(code: "interrupted_unconfirmed",
+        message: "the maintenance program did not stop within " &
+          $GracefulCancelSeconds & "s; run status to verify the committed state")
+      stderr.writeLine("leaf: owned process cleanup could not be confirmed")
+    elif cleanupUnconfirmed:
       decoded.errors.add MigrationIssue(code: "cleanup_unconfirmed",
         message: "the maintenance process tree could not be confirmed cleaned")
       stderr.writeLine("leaf: owned process cleanup could not be confirmed")
-    # JSON and text are both rendered from the same validated document.
     if jsonOutput: stdout.writeLine(resultJson(decoded).pretty())
     else: stdout.writeLine(resultText(decoded))
-    return (if cleanupUnconfirmed: 1 else: process.code)
+    if forced: return 130
+    if cleanupUnconfirmed: return 1
+    return process.code
+  if forced:
+    emit(interruptedReport(name,
+      "the maintenance program did not stop within " & $GracefulCancelSeconds &
+      "s; run status to verify the committed state", dryRun), jsonOutput)
+    return 130
   if cleanupUnconfirmed:
-    # No report and no confirmable cleanup: truthful unknown state.
     var result = MigrationResult(command: name, executionConfirmed: false)
     result.dryRun = dryRun
     result.errors.add MigrationIssue(code: "cleanup_unconfirmed",

@@ -590,6 +590,53 @@ sleep(200)
             sleep(20)
           check not alive
 
+  when defined(posix):
+    test "a forced timeout keeps the confirmed report facts":
+      for jsonMode in [true, false]:
+        let app = base / ("forced-facts-" & $jsonMode)
+        createDir(app)
+        check runCliIn(app, @["g", "scaffold"]).code == 0
+        let marker = app / "target" / "facts-ready"
+        createDir(marker.parentDir)
+        writeFile(app / "config" / "database.nim",
+          readFile(app / "config" / "database.nim") &
+          "\nimport std/[os, exitprocs]\naddExitProc(proc() =\n  writeFile(" & marker.escape &
+          ", \"ready\")\n  sleep(60_000))\n")
+        let database = app / "var" / "facts.sqlite3"
+        var env = newStringTable(modeCaseSensitive)
+        for key, value in envPairs(): env[key] = value
+        env["LEAF_DATABASE_PATH"] = database
+        var signalled = false
+        var arguments = @["db", "migrate"]
+        if jsonMode: arguments.add "--json"
+        let forced = runCli(cli.binary, app, arguments, env, seconds = 120,
+          ready = proc(): bool =
+            if signalled: return false
+            if not fileExists(marker): return false
+            sleep(300)
+            signalled = true
+            true)
+        checkpoint "json=" & $jsonMode & " code=" & $forced.code & " out=" &
+          forced.stdoutText
+        check forced.code == 130
+        if jsonMode:
+          let value = parseJson(forced.stdoutText.strip())
+          check value["execution_confirmed"].getBool
+          check value["executed"].len == 1
+          check value["current_version"].kind == JString
+          check value["database"].getStr.len > 0
+          var interrupted = 0
+          for issue in value["errors"]:
+            if issue["code"].getStr == "interrupted_unconfirmed": inc interrupted
+          check interrupted == 1
+        else:
+          check "executed up" in forced.stdoutText
+          check "current version:" in forced.stdoutText
+        let probe = openDatabaseReadOnly(database)
+        let history = readMigrationHistory(probe)
+        probe.close()
+        check history.len == 1
+
   when not defined(posix):
     test "signal-driven cancellation is POSIX-only":
       skip()
