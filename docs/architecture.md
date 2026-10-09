@@ -54,3 +54,10 @@ Backend 实例通过私有资源占用 token 拒绝跨 Runtime 的同时使用�
 - `backends/win32/capabilities.nim`：纯 Linux 可验证的 `win32Capabilities()`。支持 column/row/text/button/input/checkbox/toggle/progress/tag/separator/spinner、gap/padding/width/height/flex_grow/align/justify/overflow、全部四种 align、start/end/center/between、仅 hidden overflow、仅 default variant、`cfInputReset`；不声明 virtualList、min/max、flex_shrink、around/evenly、scroll/visible，也不声明颜色/字体等装饰。required 值缺失在挂载前拒绝，装饰与 variant 按 compatible 结构化诊断 / strict 拒绝。switch 映射原生 checkbox 语义，不是装饰。
 - 权威结构顺序来自 Session acceptedEntities 的 `index`；`Recording.entities.index` 是历史镜像，不作 layout 坐标权威，只用 `Recording.childrenOf` 作结构对照。
 - 本任务不含 Win32 API、真实字体测量、窗口/DPI 宿主：真实测量属 T4，Linux 测试不声明原生测量通过。
+
+## A2 T3-L：UI 线程 guard 与 close 状态（L 子门，非 W 验收）
+
+- `ui_thread.nim`：`guardUiApplication(app, currentThread)` 在调用时捕获 owner 线程，返回 `app` 的值副本并包装 `executionScope`；包装 scope 先检查 owner，再把带 body-entry 检查的 guarded body 交给原 scope（原 scope 为 nil 时直接执行）。只支持同步恰一次 scope：异线程入口、0 次 body、重复 body 都被拒绝。每次调用使用原子 latch，即使原 scope 吞掉 worker 异常，owner 返回时仍抛 `UiError`，不会让未 render 的 Runtime 初始化成功。原 primary/post-body 异常保留类型与消息，guard 违规作为附加 secondary 信息；不 import Win32、不改 ORM scope 参数/context、不改 Runtime 安装与发布顺序。
+- `backends/win32/host_state.nim`：`CloseState(pending, posted, complete)` 与 `requestClose` / `markClosePosted` / `closeOnTick` / `closeSucceeded` / `closeFailed`。重复请求合并为单个 pending；`posted` 合并 WM_APP/timer 安全 tick；busy tick 返回 false 且不消费请求、不自旋；失败保持 pending 并可重试；只有真正 dispose 成功才 `complete`，完成后幂等、不再重开。
+- `scripts/test_win32.nim`：非 Windows 明确输出 `NotRun` 并 exit 2；Windows 上扫描 `tests/windows/test_*.nim` 逐套 compile/run 且要求 exit 0，空目录/无测试明确失败——没有实际运行的 Windows host 测试就不报成功。
+- **未完成（W 子门）**：`win32/api.nim`、`calls.nim`、`host.nim`、真实 Unicode 窗口/消息循环/DPI、`tests/windows/test_win32_host.nim` 与真实 ABI/Windows 头编译验证均未在本批实现，本批不声明任何 Windows 窗口/IME/ABI 验收。
