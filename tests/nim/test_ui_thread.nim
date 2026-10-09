@@ -147,10 +147,50 @@ suite "UI thread guard":
       discard runtime.materialize("list", 0, 1)
     check builds == 0
 
+  test "a body saved by a failed scope cannot run later on the owner":
+    var current = 1'u64
+    let threadId = proc(): uint64 = current
+    var lateBody: proc() {.closure.}
+    var renders = 0
+    let original = proc(body: proc() {.closure.}) = lateBody = body
+    let guarded = guardUiApplication(app(original,
+      proc(ctx: BuildContext): Node = (inc renders; text("x", key = "x"))),
+      threadId)
+    var initialRejected = false
+    try:
+      discard newRuntime(guarded)
+    except UiError:
+      initialRejected = true
+    check initialRejected
+    check renders == 0
+    check lateBody != nil
+    # The saved body belongs to the finished, failed call: it must never run.
+    expect UiError:
+      lateBody()
+    check renders == 0
+
+  test "primary identity, dynamic type and parent chain survive with secondary":
+    let cause = newException(IOError, "cause")
+    let primary = newException(ValueError, "primary")
+    primary.parent = cause
+    var current = 1'u64
+    let threadId = proc(): uint64 = current
+    let original = proc(body: proc() {.closure.}) = raise primary
+    let guarded = guardUiApplication(app(original), threadId)
+    var caught: ref CatchableError
+    try:
+      guarded.executionScope(proc() = discard)
+    except CatchableError as error:
+      caught = error
+    check caught == primary
+    check caught of ValueError
+    check caught.parent == cause
+    check "primary" in caught.msg
+    check "body invoked 0" in caught.msg
+
 when compileOption("threads"):
   var sharedBody: proc() {.closure.}
   var sharedCaught = false
-
   proc bodyWorker() {.thread.} =
     ## Borrowed body: the owner keeps the closure alive until join returns,
     ## so this one-thread-at-a-time call is safe.
@@ -182,3 +222,27 @@ when compileOption("threads"):
     check "UI guard" in message
     check actions == 0
     check sharedCaught
+  test "an owner fallback after a rejected real worker body runs no action":
+    var borrowed: proc() {.closure.}
+    var workerCaught = false
+    proc workerFallback() {.thread.} =
+      {.cast(gcsafe).}:
+        try:
+          borrowed()
+        except CatchableError:
+          workerCaught = true
+    var actions = 0
+    let threadId = proc(): uint64 = uint64(getThreadId())
+    let original = proc(body: proc() {.closure.}) =
+      borrowed = body
+      var thread: Thread[void]
+      createThread(thread, workerFallback)
+      joinThread(thread)
+      # A call already rejected on the worker is retried on its owner.
+      body()
+    let guarded = guardUiApplication(app(original), threadId)
+    expect UiError:
+      guarded.executionScope(proc() = inc actions)
+    check workerCaught
+    check actions == 0
+    borrowed = nil

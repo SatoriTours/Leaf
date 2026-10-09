@@ -32,13 +32,20 @@ proc guardUiApplication*(app: Application, currentThread: ThreadIdProc): Applica
     calls.store(0)
     var violation: Atomic[bool]
     violation.store(false)
+    var authorized: Atomic[bool]
+    authorized.store(true)
     proc guardedBody() =
-      # Body-entry owner check precedes any render/handler/rowbuilder action.
+      # A guard violation revokes this call immediately: a body saved by a
+      # failed, finished or already-noncompliant scope can never run later.
+      if not authorized.load():
+        fail("UI guard: this scope invocation no longer authorizes the body")
       if currentThread() != expected:
+        authorized.store(false)
         violation.store(true)
         fail("UI body must run on the owning thread")
       let count = calls.fetchAdd(1) + 1
       if count > 1:
+        authorized.store(false)
         violation.store(true)
         fail("UI body must run exactly once")
       body()
@@ -50,6 +57,10 @@ proc guardUiApplication*(app: Application, currentThread: ThreadIdProc): Applica
         guardedBody()
     except CatchableError as error:
       primary = error
+    finally:
+      # The synchronous scope call is over: revoke body authorization on every
+      # exit path (normal, primary exception, zero body, worker violation).
+      authorized.store(false)
     # Even if the original scope swallowed a worker exception, the latch makes
     # the owner fail instead of silently accepting an unrendered Runtime.
     var secondary = ""

@@ -7,7 +7,7 @@
 ## On non-Windows it reports NotRun and exits 2 -- the refusal is explicit and
 ## is not evidence that any Windows host behavior passed.
 when defined(windows):
-  import std/[os, osproc, strutils]
+  import std/[os, osproc, strutils, algorithm]
 
 proc main(): int =
   when defined(windows):
