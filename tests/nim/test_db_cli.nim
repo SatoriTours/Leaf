@@ -85,6 +85,33 @@ suite "Headless database CLI":
     check runCliIn(app, @["db", "up", version, "--json"], env).code == 0
     check runCliIn(app, @["db", "down", version, "--dry-run", "--json"], env).code == 0
 
+  test "the report decoder rejects every malformed document":
+    proc canonical(): JsonNode =
+      %*{"command": "migrate", "database": "/tmp/x.sqlite3", "dry_run": true,
+        "execution_confirmed": true, "planned": [], "executed": [], "skipped": [],
+        "current_version": "0", "pending_versions": [], "statuses": [], "errors": []}
+    var decoded: MigrationResult
+    check decodeReport(canonical().pretty(), "migrate", true, decoded)
+    check decoded.command == "migrate" and decoded.dryRun
+    check decoded.currentVersion == some(0'i64)
+    var value = canonical(); value["errors"] = newJNull()
+    check not decodeReport(value.pretty(), "migrate", true, decoded)
+    value = canonical(); value["planned"] = %*[123]
+    check not decodeReport(value.pretty(), "migrate", true, decoded)
+    value = canonical(); value["statuses"] = %*["bad"]
+    check not decodeReport(value.pretty(), "migrate", true, decoded)
+    value = canonical(); value["current_version"] = %"NOT_VERSION"
+    check not decodeReport(value.pretty(), "migrate", true, decoded)
+    value = canonical(); value["pending_versions"] = %*[true]
+    check not decodeReport(value.pretty(), "migrate", true, decoded)
+    value = canonical(); value["current_version"] = %"999999999999999999999999999999"
+    check not decodeReport(value.pretty(), "migrate", true, decoded)
+    value = canonical(); value["execution_confirmed"] = %false
+    check not decodeReport(value.pretty(), "migrate", true, decoded)
+    check not decodeReport(canonical().pretty(), "status", true, decoded)
+    check not decodeReport(canonical().pretty(), "migrate", false, decoded)
+    check not decodeReport(canonical().pretty() & "{}", "migrate", true, decoded)
+
   test "default text database commands keep their existing presentation":
     let app = base / "text-mode"
     createDir(app)

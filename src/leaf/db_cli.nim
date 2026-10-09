@@ -65,13 +65,6 @@ proc emit(result: MigrationResult, jsonOutput: bool) =
     writeFile(temporary, resultJson(result).pretty() & "\n")
     if fileExists(report): removeFile(report)
     moveFile(temporary, report)
-    if not jsonOutput:
-      let textPath = getEnv(TextReportEnv)
-      if textPath.len > 0:
-        let textTemporary = textPath & ".tmp"
-        writeFile(textTemporary, resultText(result) & "\n")
-        if fileExists(textPath): removeFile(textPath)
-        moveFile(textTemporary, textPath)
   else:
     if jsonOutput: stdout.writeLine(resultJson(result).pretty())
     else: stdout.writeLine(resultText(result))
@@ -210,28 +203,153 @@ proc runMaintenance*(databasePath: string, catalog: seq[MigrationDefinition],
 const ScaffoldApplicationEntry = staticRead("templates/scaffold/model_application.nim")
 const LegacyApplicationEntry = staticRead("templates/scaffold/application.nim")
 
-proc trustedReport*(text, command: string, dryRun: bool): bool =
-  ## The whole document must match the expected command, request flag and result
-  ## schema with correct kinds; a partial, wrong-typed, inconsistent or trailing
-  ## document is malformed transport, never a trusted result.
+proc decodeSignedVersion(node: JsonNode, value: var int64): bool =
+  ## Bounded decimal (optionally signed) version string; no overflow, no coercion.
+  if node.kind != JString: return false
+  let raw = node.getStr
+  if raw.len == 0: return false
+  var index = 0
+  var negative = false
+  if raw[0] == '-':
+    negative = true
+    index = 1
+    if raw.len == 1: return false
+  var parsed: int64
+  while index < raw.len:
+    let character = raw[index]
+    if character notin {'0'..'9'}: return false
+    let digit = int64(ord(character) - ord('0'))
+    if parsed > (high(int64) - digit) div 10: return false
+    parsed = parsed * 10 + digit
+    inc index
+  value = if negative: -parsed else: parsed
+  true
+
+proc decodeIssueNode(node: JsonNode, issue: var MigrationIssue): bool =
+  if node.kind != JObject: return false
+  for field in ["code", "message", "file", "version", "direction"]:
+    if field notin node: return false
+  if node["code"].kind != JString or node["message"].kind != JString or
+      node["file"].kind != JString: return false
+  issue.code = node["code"].getStr
+  issue.message = node["message"].getStr
+  issue.file = node["file"].getStr
+  case node["version"].kind
+  of JNull: issue.version = none(int64)
+  of JString:
+    var value: int64
+    if not decodeSignedVersion(node["version"], value): return false
+    issue.version = some(value)
+  else: return false
+  case node["direction"].kind
+  of JNull: issue.direction = none(MigrationDirection)
+  of JString:
+    case node["direction"].getStr
+    of "up": issue.direction = some(mdUp)
+    of "down": issue.direction = some(mdDown)
+    else: return false
+  else: return false
+  true
+
+proc decodeStepNode(node: JsonNode, step: var MigrationStep): bool =
+  if node.kind != JObject: return false
+  for field in ["version", "direction", "name", "file", "statements"]:
+    if field notin node: return false
+  var version: int64
+  if not decodeSignedVersion(node["version"], version): return false
+  step.version = version
+  if node["direction"].kind != JString: return false
+  case node["direction"].getStr
+  of "up": step.direction = mdUp
+  of "down": step.direction = mdDown
+  else: return false
+  if node["name"].kind != JString or node["file"].kind != JString: return false
+  step.name = node["name"].getStr
+  step.sourcePath = node["file"].getStr
+  if node["statements"].kind != JArray: return false
+  for statement in node["statements"]:
+    if statement.kind != JString: return false
+    step.statements.add statement.getStr
+  true
+
+proc decodeStatusNode(node: JsonNode, status: var MigrationStatus): bool =
+  if node.kind != JObject: return false
+  for field in ["version", "name", "file", "state", "issues"]:
+    if field notin node: return false
+  var version: int64
+  if not decodeSignedVersion(node["version"], version): return false
+  status.version = version
+  if node["name"].kind != JString or node["file"].kind != JString or
+      node["state"].kind != JString: return false
+  status.name = node["name"].getStr
+  status.file = node["file"].getStr
+  status.state = node["state"].getStr
+  if node["issues"].kind != JArray: return false
+  for issue in node["issues"]:
+    var decoded: MigrationIssue
+    if not decodeIssueNode(issue, decoded): return false
+    status.issues.add decoded
+  true
+
+proc decodeReport*(text, command: string, dryRun: bool,
+    output: var MigrationResult): bool =
+  ## Total typed decoder from the authoritative resultJson document. Every field
+  ## is kind-checked before any access or iteration, so no Assertion/Field/
+  ## Overflow defect can escape and no partial document is ever trusted.
   try:
     let node = parseJson(text)
     if node.kind != JObject: return false
-    for field in ["command", "database", "dry_run", "execution_confirmed",
-        "planned", "executed", "skipped", "current_version", "pending_versions",
-        "statuses", "errors"]:
+    for field in ["command", "database", "dry_run", "execution_confirmed", "planned",
+        "executed", "skipped", "current_version", "pending_versions", "statuses",
+        "errors"]:
       if field notin node: return false
     if node["command"].kind != JString or node["command"].getStr != command: return false
     if node["database"].kind != JString: return false
     if node["dry_run"].kind != JBool or node["dry_run"].getBool != dryRun: return false
     if node["execution_confirmed"].kind != JBool: return false
-    for field in ["planned", "executed", "skipped", "statuses", "errors"]:
-      if node[field].kind notin {JArray, JNull}: return false
+    let confirmed = node["execution_confirmed"].getBool
+    if confirmed:
+      if node["executed"].kind != JArray: return false
+    elif node["executed"].kind != JNull: return false
+    if node["planned"].kind != JArray or node["skipped"].kind != JArray or
+        node["statuses"].kind != JArray or node["errors"].kind != JArray: return false
     if node["current_version"].kind notin {JString, JNull}: return false
     if node["pending_versions"].kind notin {JArray, JNull}: return false
+    output = MigrationResult(command: node["command"].getStr,
+      database: node["database"].getStr, dryRun: node["dry_run"].getBool,
+      executionConfirmed: confirmed)
+    for step in node["planned"]:
+      var decoded: MigrationStep
+      if not decodeStepNode(step, decoded): return false
+      output.planned.add decoded
+    if confirmed:
+      for step in node["executed"]:
+        var decoded: MigrationStep
+        if not decodeStepNode(step, decoded): return false
+        output.executed.add decoded
+    for version in node["skipped"]:
+      var value: int64
+      if not decodeSignedVersion(version, value): return false
+      output.skipped.add value
+    if node["current_version"].kind == JString:
+      var value: int64
+      if not decodeSignedVersion(node["current_version"], value): return false
+      output.currentVersion = some(value)
+    else:
+      output.currentVersion = none(int64)
+    if node["pending_versions"].kind == JArray:
+      for version in node["pending_versions"]:
+        var value: int64
+        if not decodeSignedVersion(version, value): return false
+        output.pendingVersions.add value
+    for status in node["statuses"]:
+      var decoded: MigrationStatus
+      if not decodeStatusNode(status, decoded): return false
+      output.statuses.add decoded
     for issue in node["errors"]:
-      if issue.kind != JObject or "code" notin issue or issue["code"].kind != JString:
-        return false
+      var decoded: MigrationIssue
+      if not decodeIssueNode(issue, decoded): return false
+      output.errors.add decoded
     true
   except CatchableError:
     false
@@ -317,8 +435,6 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
   for key, value in envPairs(): env[key] = value
   env[CancelTokenEnv] = token
   env[ReportEnv] = report
-  let textPath = directory / ("report-" & unique & ".txt")
-  if not jsonOutput: env[TextReportEnv] = textPath
   var process: SplitProcess
   try:
     process = startSplitManaged(binary, childArgs(request, dryRun, jsonOutput),
@@ -330,7 +446,6 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
   var forced = false
   var deadline = getMonoTime()
   var reportText = ""
-  var textReport = ""
   var cleanupUnconfirmed = false
   try:
     while not process.pollSplit():
@@ -356,10 +471,9 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
       discard
     try:
       if fileExists(report): reportText = readFile(report)
-      if not jsonOutput and fileExists(textPath): textReport = readFile(textPath)
     except CatchableError:
       discard
-    for path in [token, report, report & ".tmp", textPath, textPath & ".tmp"]:
+    for path in [token, report, report & ".tmp"]:
       if fileExists(path):
         try:
           removeFile(path)
@@ -372,49 +486,28 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
       "the maintenance program did not stop within " & $GracefulCancelSeconds &
       "s; run status to verify the committed state"), jsonOutput)
     return 130
-  if reportText.len > 0 and not trustedReport(reportText, name, dryRun):
-    # Malformed transport: one stable controlled failure with the caller's flags.
-    var result = MigrationResult(command: name, executionConfirmed: false)
-    result.dryRun = dryRun
-    result.errors.add MigrationIssue(code: "malformed_report",
-      message: "the maintenance program produced an invalid report")
-    emit(result, jsonOutput)
-    return 1
-  if reportText.len > 0 and not jsonOutput:
-    # Text presentation: the parent renders the validated result's existing text
-    # form, never raw JSON.
-    if textReport.len > 0: stdout.write(textReport)
-    else: stdout.writeLine(name & ": report could not be rendered")
-    if cleanupUnconfirmed:
-      stderr.writeLine("leaf: owned process cleanup could not be confirmed")
-      return 1
-    return process.code
+  var decoded: MigrationResult
   if reportText.len > 0:
-    # A complete, validated business report is never erased by a process-level
-    # failure: the confirmed migration facts stay, the process error is appended.
-    if cleanupUnconfirmed and jsonOutput:
-      try:
-        var node = parseJson(reportText)
-        if node.kind == JObject:
-          if "errors" notin node or node["errors"].kind != JArray:
-            node["errors"] = newJArray()
-          node["errors"].add(%*{"code": "cleanup_unconfirmed",
-            "message": "the maintenance process tree could not be confirmed cleaned",
-            "version": nil, "file": "", "direction": nil})
-          stdout.writeLine(node.pretty())
-        else:
-          stdout.write(reportText)
-      except CatchableError:
-        stdout.write(reportText)
-    else:
-      stdout.write(reportText)
-    if cleanupUnconfirmed:
-      stderr.writeLine("leaf: owned process cleanup could not be confirmed")
+    if not decodeReport(reportText, name, dryRun, decoded):
+      # Malformed transport: one stable controlled failure with the caller flags.
+      var result = MigrationResult(command: name, executionConfirmed: false)
+      result.dryRun = dryRun
+      result.errors.add MigrationIssue(code: "malformed_report",
+        message: "the maintenance program produced an invalid report")
+      emit(result, jsonOutput)
       return 1
-    return process.code
+    if cleanupUnconfirmed:
+      decoded.errors.add MigrationIssue(code: "cleanup_unconfirmed",
+        message: "the maintenance process tree could not be confirmed cleaned")
+      stderr.writeLine("leaf: owned process cleanup could not be confirmed")
+    # JSON and text are both rendered from the same validated document.
+    if jsonOutput: stdout.writeLine(resultJson(decoded).pretty())
+    else: stdout.writeLine(resultText(decoded))
+    return (if cleanupUnconfirmed: 1 else: process.code)
   if cleanupUnconfirmed:
     # No report and no confirmable cleanup: truthful unknown state.
     var result = MigrationResult(command: name, executionConfirmed: false)
+    result.dryRun = dryRun
     result.errors.add MigrationIssue(code: "cleanup_unconfirmed",
       message: "the maintenance process tree could not be confirmed cleaned")
     emit(result, jsonOutput)
