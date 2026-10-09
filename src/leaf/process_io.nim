@@ -1,5 +1,5 @@
 ## Bounded, nonblocking subprocess output. Arguments never pass through a shell.
-import std/[os, osproc, monotimes, times, unicode, strutils, strtabs]
+import std/[os, osproc, monotimes, sets, tables, times, unicode, strutils, strtabs]
 when defined(posix): import std/posix
 when defined(windows): import std/winlean
 when defined(windows): import ./windows_process
@@ -17,9 +17,65 @@ type SplitProcess* = ref object
     pid: Pid
     outFd, errFd: cint
     reaped: bool
+    when defined(linux):
+      # Descendants seen while the leader was alive, with their start time so a
+      # recycled pid is never killed later.
+      tracked: seq[tuple[pid: int, start: string]]
   stdoutText*, stderrText*: string
   code*: int
   closed: bool
+
+when defined(linux):
+  proc statField(pid: int, index: int): string =
+    ## 1-based field of /proc/<pid>/stat; the comm field may contain spaces.
+    try:
+      let raw = readFile("/proc/" & $pid & "/stat")
+      let close = raw.rfind(')')
+      if close < 0: return ""
+      let rest = strutils.splitWhitespace(raw[close + 1 .. ^1].strip())
+      let offset = index - 3
+      if offset >= 0 and offset < rest.len: rest[offset] else: ""
+    except CatchableError:
+      ""
+
+  proc trackTree(rootPid: int, tracked: var seq[tuple[pid: int, start: string]]) =
+    ## Accumulate LEAF's own nested children (which may open a new session and
+    ## escape the root process group) before the leader is reaped.
+    var byParent = initTable[int, seq[int]]()
+    try:
+      for entry in walkDir("/proc"):
+        let name = entry.path.extractFilename
+        if name.len == 0 or name[0] notin {'0'..'9'}: continue
+        var pid = 0
+        try: pid = parseInt(name)
+        except ValueError: continue
+        var parent = 0
+        try: parent = parseInt(statField(pid, 4))
+        except ValueError: continue
+        byParent.mgetOrPut(parent, @[]).add pid
+    except CatchableError:
+      return
+    var queue = @[rootPid]
+    var seen = initHashSet[int]()
+    seen.incl rootPid
+    while queue.len > 0:
+      let current = queue.pop()
+      for child in byParent.getOrDefault(current):
+        if child in seen: continue
+        seen.incl child
+        let started = statField(child, 22)
+        if started.len > 0:
+          var known = false
+          for item in tracked:
+            if item.pid == child: known = true
+          if not known: tracked.add (child, started)
+        queue.add child
+
+  proc killTracked(tracked: seq[tuple[pid: int, start: string]]) =
+    for item in tracked:
+      # Only kill the exact process we observed, never a recycled pid.
+      if statField(item.pid, 22) == item.start:
+        discard kill(Pid(item.pid), SIGKILL)
 
 when defined(posix):
   proc splitSetNonBlocking(fd: cint) =
@@ -88,29 +144,39 @@ when defined(posix):
     drainChannel(p.errFd, p.stderrText, SplitDrainBudget)
 
   proc pollSplit*(p: SplitProcess): bool =
-    if p == nil or p.closed: return true
+    if p == nil or p.closed or p.reaped: return true
     p.drainSplit()
+    when defined(linux): trackTree(p.pid, p.tracked)
     var status: cint
-    if waitpid(p.pid, status, WNOHANG) == p.pid:
+    let waited = waitpid(p.pid, status, WNOHANG)
+    if waited == p.pid:
       p.reaped = true
-      # Descendants may outlive the leader; always clean the owned group.
+      # Descendants may outlive the leader: clean the group and every tracked
+      # nested child, then finish draining.
       discard kill(-p.pid, SIGKILL)
+      when defined(linux): killTracked(p.tracked)
       p.code = if (status and 0x7f) == 0: (status shr 8) and 0xff
         else: 128 + (status and 0x7f)
       p.drainSplit()
+      return true
+    if waited < 0:
+      if errno == EINTR: return false
+      # Already reaped elsewhere: finish instead of looping forever.
+      p.reaped = true
       return true
     false
 
   proc closeSplit*(p: SplitProcess) =
     if p == nil or p.closed: return
+    when defined(linux): trackTree(p.pid, p.tracked)
     if not p.reaped:
       discard kill(-p.pid, SIGKILL)
       discard kill(p.pid, SIGKILL)
       var status: cint
       discard waitpid(p.pid, status, 0)
       p.reaped = true
-    else:
-      discard kill(-p.pid, SIGKILL)
+    discard kill(-p.pid, SIGKILL)
+    when defined(linux): killTracked(p.tracked)
     discard close(p.outFd)
     discard close(p.errFd)
     p.closed = true
@@ -133,8 +199,8 @@ else:
 
   proc startSplitManaged*(exe: string, args: seq[string], workingDir: string,
       env: StringTableRef = nil): SplitProcess =
-    result = SplitProcess(process: startWindows(exe, args, workingDir, env, false),
-      code: -1)
+    result = SplitProcess(process: startWindows(exe, args, workingDir, env, false,
+      split = true), code: -1)
 
   proc splitPid*(p: SplitProcess): int =
     if p == nil: 0 else: p.process.pid

@@ -84,14 +84,13 @@ proc parseRunArgs(args: seq[string], forWatch = false): seq[string] =
       for offset in 1 .. count: result.add(args[i + offset])
       case flag
       of "--toggle":
-        if args[i + 1] notin ["true", "false"]:
+        # KEY is arbitrary text; only the BOOL argument is typed.
+        if args[i + 2] notin ["true", "false"]:
           fail("--toggle requires true or false")
       of "--list":
-        for offset in 2 .. 3:
-          if args[i + offset].len == 0:
-            fail("--list bounds must be integers")
-          for character in args[i + offset]:
-            if character notin {'0'..'9'}: fail("--list bounds must be integers")
+        # KEY is text; both bounds must be checked integers before any IO.
+        discard parseDecimal(args[i + 2], "--list first")
+        discard parseDecimal(args[i + 3], "--list finish")
       else: discard
       i += count
       inc events

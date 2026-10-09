@@ -79,8 +79,10 @@ proc databaseCommandName*(args: seq[string]): string =
 proc wantsDatabaseJson*(args: seq[string]): bool =
   args.len >= 2 and args[0] == "db" and "--json" in args
 
-proc failure(command, database, code, message: string, jsonOutput: bool): int =
+proc failure(command, database, code, message: string, jsonOutput: bool,
+    dryRun = false): int =
   var result = MigrationResult(command: command, database: database)
+  result.dryRun = dryRun
   result.errors.add MigrationIssue(code: code, message: message)
   emit(result, jsonOutput)
   1
@@ -195,7 +197,8 @@ proc runMaintenance*(databasePath: string, catalog: seq[MigrationDefinition],
   except CatchableError as error:
     return failure(name, databasePath, "migration_failed", error.msg, jsonOutput)
 
-const ScaffoldApplicationEntry = staticRead("templates/scaffold/application.nim")
+const ScaffoldApplicationEntry = staticRead("templates/scaffold/model_application.nim")
+const LegacyApplicationEntry = staticRead("templates/scaffold/application.nim")
 
 proc executeDatabaseInit*(project: Project, dryRun: bool): int =
   ## Install configuration and catalog; never open storage or edit the entry.
@@ -205,10 +208,12 @@ proc executeDatabaseInit*(project: Project, dryRun: bool): int =
   # Only a byte-identical generated entry proves automatic startup ownership; an
   # unrelated custom file must never be described as already wired.
   let entry = project.root / "app" / "application.nim"
-  if fileExists(entry) and readFile(entry) == ScaffoldApplicationEntry:
-    stdout.writeLine("configuration ready; the generated application startup already opens storage")
+  let generated = fileExists(entry) and
+    readFile(entry) in [ScaffoldApplicationEntry, LegacyApplicationEntry]
+  if generated:
+    stdout.writeLine("configuration ready; the generated application entry already opens storage")
   else:
-    stdout.writeLine("configuration ready; open storage from your own entry point manually:")
+    stdout.writeLine("configuration ready; if your entry point does not already open storage, add:")
     stdout.writeLine("  import ./config/database")
     stdout.writeLine("  let db = openApplicationDatabase()")
     stdout.writeLine("see db/migrations/README.md for the startup example")
@@ -227,7 +232,8 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
   if not fileExists(project.root / "config" / "database.nim") or
       not fileExists(project.root / "db" / "catalog.nim"):
     return failure(name, "", "configuration_missing",
-      "run leaf db init first: config/database.nim and db/catalog.nim are required", jsonOutput)
+      "run leaf db init first: config/database.nim and db/catalog.nim are required", jsonOutput,
+      dryRun)
   let directory = project.root / MaintenanceRelative
   createDir(directory)
   let entry = project.root / MaintenanceEntry
@@ -243,7 +249,7 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
     job = startHeadlessBuild(project, entry, binary, directory)
   except CatchableError as error:
     return failure(name, "", "compile_failed",
-      "cannot start the maintenance build: " & error.msg, jsonOutput)
+      "cannot start the maintenance build: " & error.msg, jsonOutput, dryRun)
   var compileInterrupted = false
   var compileFailed = false
   try:
@@ -262,7 +268,7 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
     job.close()
   if compileFailed:
     return failure(name, "", "compile_failed",
-      "maintenance program failed to compile", jsonOutput)
+      "maintenance program failed to compile", jsonOutput, dryRun)
   # Unique per-run token and report paths under target: the token stays absent
   # until cancellation and every temporary is removed only after the child is
   # reaped, in a true finally.
@@ -281,7 +287,7 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
       project.root, env)
   except CatchableError as error:
     return failure(name, "", "protocol_error",
-      "cannot start the maintenance program: " & error.msg, jsonOutput)
+      "cannot start the maintenance program: " & error.msg, jsonOutput, dryRun)
   var requested = false
   var forced = false
   var deadline = getMonoTime()
@@ -297,14 +303,24 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
         break
       sleep(10)
   finally:
-    # The child's own channels are diagnostics only: stdout must carry exactly
-    # one official report object.
-    if process.stdoutText.len > 0: stderr.write(process.stdoutText)
-    if process.stderrText.len > 0: stderr.write(process.stderrText)
+    # Owned reap first; diagnostics and the report handoff are fallible and must
+    # never skip cleanup.
     process.closeSplit()
-    if fileExists(report): reportText = readFile(report)
+    try:
+      # The child's own channels are diagnostics only: stdout carries exactly
+      # one official report object.
+      if process.stdoutText.len > 0: stderr.write(process.stdoutText)
+      if process.stderrText.len > 0: stderr.write(process.stderrText)
+    except CatchableError:
+      discard
+    try:
+      if fileExists(report): reportText = readFile(report)
+    except CatchableError:
+      discard
     for path in [token, report, report & ".tmp"]:
-      if fileExists(path): removeFile(path)
+      if fileExists(path):
+        try: removeFile(path)
+        except CatchableError: discard
   if forced:
     emit(interruptedReport(name,
       "the maintenance program did not stop within " & $GracefulCancelSeconds &

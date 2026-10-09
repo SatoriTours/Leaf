@@ -110,3 +110,17 @@ suite "CLI option parsing":
     check parseCli(@["db", "migrate", "--to", "0"]).request.target == some(0'i64)
     check parseCli(@["--headless", "--stats"]).kind == ccRun
     check parseCli(@["--watch", "--trace"]).kind == ccDeveloper
+
+  test "typed event values validate the right argument":
+    # KEY is arbitrary text; only the BOOL argument is typed.
+    check parseCli(@["--headless", "--toggle", "done", "true"]).kind == ccRun
+    check parseCli(@["--headless", "--toggle", "done", "false"]).kind == ccRun
+    check parseCli(@["--headless", "--toggle", "--project", "true"]).kind == ccRun
+    check parseCli(@["--headless", "--toggle", "true", "false"]).kind == ccRun
+    expect UiError: discard parseCli(@["--headless", "--toggle", "true", "maybe"])
+    expect UiError: discard parseCli(@["--headless", "--toggle", "done", "yes"])
+    check parseCli(@["--headless", "--list", "key", "0", "10"]).runArgs.len == 5
+    # A 100-digit bound must fail before IO instead of at runtime.
+    expect UiError:
+      discard parseCli(@["--headless", "--list", "key",
+        "9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999", "10"])

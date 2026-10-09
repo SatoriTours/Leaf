@@ -187,12 +187,15 @@ suite "Headless database CLI":
       " stderr=" & interrupted.stderrText
     check interrupted.code == 130
     let value = parseJson(interrupted.stdoutText.strip())
-    if value["execution_confirmed"].getBool:
-      # The child cancelled gracefully and reported its own partial state.
-      check value["errors"].len > 0 or value["executed"].len >= 0
-    else:
+    check not value["execution_confirmed"].getBool or value["errors"].len > 0
+    if not value["execution_confirmed"].getBool:
       check value["executed"].kind == JNull
       check value["current_version"].kind == JNull
+      var unconfirmed = 0
+      for issue in value["errors"]:
+        if issue["code"].getStr in ["interrupted_unconfirmed", "migration_interrupted"]:
+          inc unconfirmed
+      check unconfirmed >= 1
     var leftover = 0
     for path in walkFiles(app / "target" / "leaf-db" / "cancel-*.token"): inc leftover
     check leftover == 0
@@ -273,6 +276,13 @@ suite "Headless database CLI":
       if item["code"].getStr == "legacy_unverified_down": inc warnings
     check warnings == 1
     check readFile(app / "db" / "migrations" / "001_create_tasks.up.sql") == oldUp
+    # A read-only status must not upgrade the legacy history shape or add WAL.
+    block:
+      let db = openDatabaseReadOnly(database)
+      let columns = db.query("PRAGMA table_info(leaf_schema_migrations)")
+      db.close()
+      check columns.len == 3
+    check not fileExists(database & "-wal")
     check runCliIn(app, @["db", "migrate", "--json"], env).code == 0
     check readFile(app / "db" / "migrations" / "001_create_tasks.up.sql") == oldUp
 
@@ -325,9 +335,11 @@ suite "Headless database CLI":
       result.add (".", "dir:" & stamp(root))
       for path in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
         let rel = relativePath(path, root)
-        if rel.startsWith("target"): continue
+        # Only the permitted maintenance compile artifacts are excluded.
+        if rel == "target/leaf-db" or rel.startsWith("target/leaf-db/"): continue
         if dirExists(path): result.add (rel & "/", "dir:" & stamp(path))
         else: result.add (rel, "file:" & stamp(path) & ":" & readFile(path))
+    writeFile(app / "target-notes.txt", "in scope\n")
     let before = snap(app)
     check runCliIn(app, @["db", "status", "--json"], env).code == 0
     check runCliIn(app, @["db", "migrate", "--dry-run", "--json"], env).code == 0
@@ -383,3 +395,89 @@ suite "Headless database CLI":
     check state() == version
     check runCliIn(app, @["db", "rollback", "--steps", "1", "--json"], env).code == 0
     check state() == "0"
+
+  test "an unresponsive ready child is forced and never claims confirmation":
+    let app = base / "forced"
+    createDir(app)
+    check runCliIn(app, @["g", "scaffold"]).code == 0
+    # A configuration that blocks at import time: the maintenance child becomes
+    # ready but can never observe the cancellation token.
+    let marker = app / "target" / "forced-ready"
+    createDir(marker.parentDir)
+    # Keep the configuration API and block the import afterwards.
+    writeFile(app / "config" / "database.nim",
+      readFile(app / "config" / "database.nim") &
+      "\nimport std/os\n" &
+      "writeFile(" & marker.escape & ", \"ready\")\n" &
+      "sleep(60_000)\n")
+    let database = app / "var" / "forced.sqlite3"
+    var env = newStringTable(modeCaseSensitive)
+    for key, value in envPairs(): env[key] = value
+    env["LEAF_DATABASE_PATH"] = database
+    var signalled = false
+    let forced = runCli(cli.binary, app, @["db", "migrate", "--json"], env,
+      seconds = 300, ready = proc(): bool =
+        if signalled: return false
+        signalled = fileExists(marker)
+        signalled)
+    checkpoint "forced code=" & $forced.code & " signalled=" & $signalled &
+      " marker=" & $fileExists(marker) & " stdout=" & forced.stdoutText &
+      " stderr-tail=" & (if forced.stderrText.len > 80: forced.stderrText[^80..^1] else: forced.stderrText)
+    check signalled
+    check fileExists(marker)
+    check forced.code == 130
+    let value = parseJson(forced.stdoutText.strip())
+    check not value["execution_confirmed"].getBool
+    check value["executed"].kind == JNull
+    check value["current_version"].kind == JNull
+    var unconfirmed = 0
+    for issue in value["errors"]:
+      if issue["code"].getStr == "interrupted_unconfirmed": inc unconfirmed
+    check unconfirmed == 1
+    check not fileExists(database)
+    var leftovers = 0
+    for path in walkFiles(app / "target" / "leaf-db" / "cancel-*.token"): inc leftovers
+    for path in walkFiles(app / "target" / "leaf-db" / "report-*.json"): inc leftovers
+    for path in walkFiles(app / "target" / "leaf-db" / "report-*.json.tmp"): inc leftovers
+    check leftovers == 0
+
+  when defined(linux):
+    test "the split helper cleans LEAF nested children after the leader exits":
+      let tools = base / "tools-nested"
+      createDir(tools)
+      writeProbeFiles(tools, @[("nested.nim", """
+import std/[os, strutils]
+import leaf/process_io
+
+let sleeper = findExe("sleep")
+let leaf = startSplitManaged(sleeper, @["60"], getCurrentDir())
+writeFile(paramStr(1), $leaf.splitPid())
+sleep(200)
+"""), ("nested_managed.nim", """
+import std/[os, strutils]
+import leaf/process_io
+
+let sleeper = findExe("sleep")
+let leaf = startManaged(sleeper, @["60"], getCurrentDir())
+writeFile(paramStr(1), $leaf.pid)
+sleep(200)
+""")])
+      for name in ["nested", "nested_managed"]:
+        let fixture = buildProbe(tools, name & ".nim", base / "nested-cache", name)
+        check fixture.code == 0
+        if fixture.code == 0:
+          let marker = base / ("nested-" & name & ".pid")
+          let ran = runCli(fixture.binary, tools, @[marker], seconds = 20)
+          check ran.code == 0
+          let leaf = parseInt(readFile(marker))
+          var alive = true
+          for attempt in 0 ..< 100:
+            var state = '?'
+            try:
+              let stat = readFile("/proc/" & $leaf & "/stat")
+              state = stat[stat.rfind(')') + 2]
+            except CatchableError:
+              state = 'X'
+            if state in {'Z', 'X'}: alive = false; break
+            sleep(20)
+          check not alive

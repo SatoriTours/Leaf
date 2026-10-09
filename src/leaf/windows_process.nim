@@ -38,7 +38,8 @@ when defined(windows):
     p.errorHandle.release()
 
   proc startWindows*(exe: string, args: seq[string], directory: string,
-                     env: StringTableRef, parentStreams: bool): WindowsProcess =
+                     env: StringTableRef, parentStreams: bool,
+                     split = false): WindowsProcess =
     result = WindowsProcess()
     var inputRead, inputWrite, outputWrite, errorRead, errorWrite: Handle
     var info: PROCESS_INFORMATION
@@ -61,14 +62,19 @@ when defined(windows):
         var attributes = SECURITY_ATTRIBUTES(nLength: int32(sizeof(SECURITY_ATTRIBUTES)), bInheritHandle: 1)
         if createPipe(inputRead, inputWrite, attributes, 0) == 0: raiseOSError(osLastError())
         if createPipe(result.outputHandle, outputWrite, attributes, 0) == 0: raiseOSError(osLastError())
-        if createPipe(errorRead, errorWrite, attributes, 0) == 0: raiseOSError(osLastError())
+        if split:
+          # Opt-in separate channels for startSplitManaged only.
+          if createPipe(errorRead, errorWrite, attributes, 0) == 0: raiseOSError(osLastError())
+          result.errorHandle = errorRead
+          if setHandleInformation(errorRead, HANDLE_FLAG_INHERIT, 0) == 0: raiseOSError(osLastError())
+          startup.hStdError = errorWrite
+        else:
+          # The ordinary managed contract stays merged, as callers expect.
+          startup.hStdError = outputWrite
         if setHandleInformation(inputWrite, HANDLE_FLAG_INHERIT, 0) == 0 or
-            setHandleInformation(result.outputHandle, HANDLE_FLAG_INHERIT, 0) == 0 or
-            setHandleInformation(errorRead, HANDLE_FLAG_INHERIT, 0) == 0: raiseOSError(osLastError())
-        result.errorHandle = errorRead
+            setHandleInformation(result.outputHandle, HANDLE_FLAG_INHERIT, 0) == 0: raiseOSError(osLastError())
         startup.hStdInput = inputRead
         startup.hStdOutput = outputWrite
-        startup.hStdError = errorWrite
       var line = quoteShellWindows(exe)
       for arg in args: line.add(" " & quoteShellWindows(arg))
       let commandLine = newWideCString(line)
