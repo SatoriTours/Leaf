@@ -130,10 +130,17 @@ suite "Headless database CLI":
       seconds = 120, ready = proc(): bool =
         if signalled: return false
         if not fileExists(database): return false
-        # Let the child enter the slow migration before cancelling it.
-        sleep(300)
-        signalled = true
-        true)
+        # Cancel only after the first migration is actually committed.
+        try:
+          let probe = openDatabaseReadOnly(database)
+          let committed = readMigrationHistory(probe).len >= 1
+          probe.close()
+          if committed:
+            signalled = true
+            return true
+        except CatchableError:
+          discard
+        false)
     checkpoint "code=" & $interrupted.code & " stdout=" & interrupted.stdoutText &
       " stderr=" & interrupted.stderrText
     check interrupted.code == 130
@@ -301,3 +308,78 @@ suite "Headless database CLI":
     removeFile(app / "db" / "migrations" / "777_create_notes.nim")
     check countMigrations() == 1
     check not fileExists(database)
+
+  test "read-only status and preview change no source bytes or mtimes":
+    let app = base / "readonly"
+    createDir(app)
+    check runCliIn(app, @["g", "scaffold"]).code == 0
+    let database = app / "var" / "readonly.sqlite3"
+    var env = newStringTable(modeCaseSensitive)
+    for key, value in envPairs(): env[key] = value
+    env["LEAF_DATABASE_PATH"] = database
+    check runCliIn(app, @["db", "migrate", "--json"], env).code == 0
+    proc stamp(path: string): string =
+      let value = getLastModificationTime(path)
+      $value.toUnix & "." & $value.nanosecond
+    proc snap(root: string): seq[tuple[path, text: string]] =
+      result.add (".", "dir:" & stamp(root))
+      for path in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
+        let rel = relativePath(path, root)
+        if rel.startsWith("target"): continue
+        if dirExists(path): result.add (rel & "/", "dir:" & stamp(path))
+        else: result.add (rel, "file:" & stamp(path) & ":" & readFile(path))
+    let before = snap(app)
+    check runCliIn(app, @["db", "status", "--json"], env).code == 0
+    check runCliIn(app, @["db", "migrate", "--dry-run", "--json"], env).code == 0
+    check snap(app) == before
+    check not fileExists(database & "-wal")
+
+  test "a damaged nearest project never falls back to an ancestor":
+    let app = base / "nearest"
+    createDir(app)
+    check runCliIn(app, @["g", "scaffold"]).code == 0
+    let nested = app / "nested"
+    createDir(nested)
+    writeFile(nested / "leaf.json", "this is not json !!!\n")
+    let ran = runCliIn(nested, @["db", "status", "--json"])
+    check ran.code == 1
+    check parseJson(ran.stdoutText.strip())["errors"][0]["code"].getStr == "invalid_arguments"
+
+  test "the maintenance program never imports main or the UI":
+    let app = base / "poison"
+    createDir(app)
+    check runCliIn(app, @["g", "scaffold"]).code == 0
+    writeFile(app / "main.nim", "this is not valid nim !!!\n")
+    writeFile(app / "app" / "application.nim", "also not valid nim !!!\n")
+    let database = app / "var" / "poison.sqlite3"
+    var env = newStringTable(modeCaseSensitive)
+    for key, value in envPairs(): env[key] = value
+    env["LEAF_DATABASE_PATH"] = database
+    let status = runCliIn(app, @["db", "status", "--json"], env)
+    check status.code == 0
+    check parseJson(status.stdoutText.strip())["command"].getStr == "status"
+
+  test "targets, steps and directions reach real database states":
+    let app = base / "states"
+    createDir(app)
+    check runCliIn(app, @["g", "scaffold"]).code == 0
+    let database = app / "var" / "states.sqlite3"
+    var env = newStringTable(modeCaseSensitive)
+    for key, value in envPairs(): env[key] = value
+    env["LEAF_DATABASE_PATH"] = database
+    proc state(): string =
+      let value = parseJson(runCliIn(app, @["db", "status", "--json"], env).stdoutText.strip())
+      value["current_version"].getStr
+    check runCliIn(app, @["db", "migrate", "--json"], env).code == 0
+    let version = state()
+    check version.len > 0
+    check runCliIn(app, @["db", "migrate", "--to", "0", "--json"], env).code == 0
+    check state() == "0"
+    check runCliIn(app, @["db", "up", version, "--json"], env).code == 0
+    check state() == version
+    check runCliIn(app, @["db", "down", version, "--json"], env).code == 0
+    check state() == "0"
+    check runCliIn(app, @["db", "forward", "--steps", "1", "--json"], env).code == 0
+    check state() == version
+    check runCliIn(app, @["db", "rollback", "--steps", "1", "--json"], env).code == 0
+    check state() == "0"

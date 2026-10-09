@@ -68,6 +68,7 @@ proc parseRunArgs(args: seq[string], forWatch = false): seq[string] =
     of "--log-file", "--dump-tree":
       if flag in seen: fail("duplicated option: " & flag)
       if i + 1 >= args.len: fail("missing argument for " & flag)
+      if args[i + 1].len == 0: fail("empty argument for " & flag)
       seen.add(flag)
       result.add(flag)
       result.add(args[i + 1])
@@ -81,6 +82,17 @@ proc parseRunArgs(args: seq[string], forWatch = false): seq[string] =
       if i + count >= args.len: fail("missing argument for " & flag)
       result.add(flag)
       for offset in 1 .. count: result.add(args[i + offset])
+      case flag
+      of "--toggle":
+        if args[i + 1] notin ["true", "false"]:
+          fail("--toggle requires true or false")
+      of "--list":
+        for offset in 2 .. 3:
+          if args[i + offset].len == 0:
+            fail("--list bounds must be integers")
+          for character in args[i + offset]:
+            if character notin {'0'..'9'}: fail("--list bounds must be integers")
+      else: discard
       i += count
       inc events
     else:
@@ -143,6 +155,7 @@ proc parseDatabase(args: seq[string]): CliCommand =
   var target: Option[int64]
   var steps = 1
   var positional = ""
+  var hasPositional = false
   var seenTo, seenSteps, seenDry, seenJson = false
   var i = 0
   while i < rest.len:
@@ -172,20 +185,22 @@ proc parseDatabase(args: seq[string]): CliCommand =
       inc i
     else:
       if flag.startsWith("--"): fail("unknown option for leaf db " & action & ": " & flag)
-      if positional.len > 0: fail("unexpected argument for leaf db " & action & ": " & flag)
+      if hasPositional: fail("unexpected argument for leaf db " & action & ": " & flag)
+      if flag.len == 0: fail("empty argument for leaf db " & action)
+      hasPositional = true
       positional = flag
     inc i
   case action
   of "migrate":
-    if positional.len > 0: fail("leaf db migrate does not take a positional argument")
+    if hasPositional: fail("leaf db migrate does not take a positional argument")
     result.request = MigrationRequest(kind: mrMigrate, target: target)
   of "rollback", "forward":
-    if positional.len > 0: fail("leaf db " & action & " takes only --steps")
+    if hasPositional: fail("leaf db " & action & " takes only --steps")
     result.request = MigrationRequest(kind: (if action == "rollback": mrRollback else: mrForward),
       steps: steps)
   of "up", "down":
     if target.isSome: fail("leaf db " & action & " takes a positional version")
-    if positional.len == 0: fail("usage: leaf db " & action & " VERSION")
+    if not hasPositional: fail("usage: leaf db " & action & " VERSION")
     let version = parseDecimal(positional, action)
     if version <= 0: fail("version must be positive for leaf db " & action)
     result.request = MigrationRequest(kind: (if action == "up": mrUp else: mrDown),
@@ -207,7 +222,7 @@ proc parseCli*(args: seq[string]): CliCommand =
     result.kind = ccVerifySdk
     result.sdkArgs = args[1 .. ^1]
   of "init":
-    if args.len != 2: fail("usage: leaf init DIRECTORY")
+    if args.len != 2 or args[1].len == 0: fail("usage: leaf init DIRECTORY")
     result.kind = ccInit
     result.initDirectory = args[1]
   of "g", "generate":
@@ -221,6 +236,7 @@ proc parseCli*(args: seq[string]): CliCommand =
     of "migration":
       if args.len notin [3, 4] or (args.len == 4 and args[3] != "--dry-run"):
         fail("usage: leaf g migration NAME [--dry-run]")
+      if args[2].len == 0: fail("migration name must not be empty")
       result.kind = ccMigrationGenerate
       result.migrationName = args[2]
       result.dryRun = args.len == 4
@@ -228,7 +244,9 @@ proc parseCli*(args: seq[string]): CliCommand =
   of "build":
     result.kind = ccBuild
     if args.len == 1: discard
-    elif args.len == 3 and args[1] == "--output": result.output = args[2]
+    elif args.len == 3 and args[1] == "--output":
+      if args[2].len == 0: fail("--output must not be empty")
+      result.output = args[2]
     else: fail("usage: leaf build [--output EXE]")
   of "pack":
     result = parsePack(args)

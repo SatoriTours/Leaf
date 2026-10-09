@@ -87,11 +87,12 @@ suite "CLI option parsing":
         discard parseCli(args)
 
   test "event arity consumes option-shaped values":
-    let command = parseCli(@["--headless", "--list", "key", "--project", "--headless",
-      "--change", "title", "value", "--stats"])
+    let command = parseCli(@["--headless", "--change", "title", "--project", "--stats"])
     check command.kind == ccRun
-    check command.runArgs == @["--headless", "--list", "key", "--project", "--headless",
-      "--change", "title", "value", "--stats"]
+    check command.runArgs == @["--headless", "--change", "title", "--project", "--stats"]
+    check parseCli(@["--headless", "--list", "key", "1", "10"]).runArgs[^1] == "10"
+    expect UiError: discard parseCli(@["--headless", "--toggle", "key", "maybe"])
+    expect UiError: discard parseCli(@["--headless", "--list", "key", "a", "10"])
     let repeated = parseCli(@["--headless", "--change", "a", "1", "--change", "b", "2"])
     check repeated.runArgs == @["--headless", "--change", "a", "1", "--change", "b", "2"]
 
