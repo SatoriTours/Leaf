@@ -195,18 +195,25 @@ when defined(posix):
       discard guardianWriteFrame(statusWrite, -4'i32)
       splitExit(125)
     if child == 0:
-      discard setpgid(0, 0)
-      discard dup2(outWrite, 1)
-      discard dup2(errWrite, 2)
-      discard close(outWrite); discard close(errWrite); discard close(controlRead)
-      discard close(statusWrite)
-      if env != nil:
-        for key, value in env: putEnv(key, value)
-      if workingDir.len > 0 and chdir(workingDir.cstring) != 0:
-        stderr.writeLine("leaf: cannot enter working directory: " & workingDir)
-        splitExit(126)
-      let argv = allocCStringArray(@[exe] & args)
-      discard execvp(exe.cstring, argv)
+      # The forked command is its own non-returning boundary: no pre-exec setup
+      # failure may ever unwind into the caller's catch/finally/atexit.
+      try:
+        discard setpgid(0, 0)
+        discard dup2(outWrite, 1)
+        discard dup2(errWrite, 2)
+        discard close(outWrite); discard close(errWrite); discard close(controlRead)
+        discard close(statusWrite)
+        if env != nil:
+          for key, value in env: putEnv(key, value)
+        if workingDir.len > 0 and chdir(workingDir.cstring) != 0:
+          try: stderr.writeLine("leaf: cannot enter working directory: " & workingDir)
+          except Exception: discard
+          splitExit(126)
+        let argv = allocCStringArray(@[exe] & args)
+        discard execvp(exe.cstring, argv)
+      except Exception as error:
+        try: stderr.writeLine("leaf: cannot launch the command: " & error.msg)
+        except Exception: discard
       splitExit(127)
     # START is published only once the owner is fully ready to supervise.
     try:

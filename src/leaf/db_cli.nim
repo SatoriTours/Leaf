@@ -201,6 +201,17 @@ proc runMaintenance*(databasePath: string, catalog: seq[MigrationDefinition],
 const ScaffoldApplicationEntry = staticRead("templates/scaffold/model_application.nim")
 const LegacyApplicationEntry = staticRead("templates/scaffold/application.nim")
 
+proc trustedReport*(text, command: string): bool =
+  ## A complete maintenance report must be one JSON object for the requested
+  ## command; anything else is malformed transport, never a trusted result.
+  try:
+    let node = parseJson(text)
+    node.kind == JObject and "command" in node and node["command"].kind == JString and
+      node["command"].getStr == command and
+      "execution_confirmed" in node and node["execution_confirmed"].kind == JBool
+  except CatchableError:
+    false
+
 proc executeDatabaseInit*(project: Project, dryRun: bool): int =
   ## Install configuration and catalog; never open storage or edit the entry.
   for action in initializeDatabaseProject(project, dryRun):
@@ -333,6 +344,14 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
       "the maintenance program did not stop within " & $GracefulCancelSeconds &
       "s; run status to verify the committed state"), jsonOutput)
     return 130
+  if reportText.len > 0 and not trustedReport(reportText, name):
+    # Malformed transport: one stable controlled failure with the caller's flags.
+    var result = MigrationResult(command: name, executionConfirmed: false)
+    result.dryRun = dryRun
+    result.errors.add MigrationIssue(code: "malformed_report",
+      message: "the maintenance program produced an invalid report")
+    emit(result, jsonOutput)
+    return 1
   if reportText.len > 0:
     # A complete, validated business report is never erased by a process-level
     # failure: the confirmed migration facts stay, the process error is appended.
@@ -366,6 +385,7 @@ proc executeDatabaseCommand*(project: Project, request: MigrationRequest,
   # An exit without a report is a failure, not an interruption, unless the run
   # was actually cancelled or the child returned the interrupt status.
   var result = MigrationResult(command: name, executionConfirmed: false)
+  result.dryRun = dryRun
   if requested or process.code == 130:
     result.errors.add MigrationIssue(code: "interrupted_unconfirmed",
       message: "the maintenance program stopped without a report; run status to verify")
