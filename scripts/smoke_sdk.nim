@@ -80,8 +80,9 @@ proc smokeSdk*(sdkPath: string, headlessOnly = false) =
   environment["LEAF_DATABASE_PATH"] = root / "application.sqlite3"
   environment["NIMBLE_DIR"] = root / "empty-nimble"
   createDir(environment["NIMBLE_DIR"])
+  createDir(project)
   proc run(arguments: varargs[string]): string =
-    checkedCommand(cli, @arguments, root, environment)
+    checkedCommand(cli, @arguments, project, environment)
   stdout.write(run("--version"))
   let metadata = parseFile(sdk / "sdk.json")
   require(metadata["channel"].getStr in run("--version"), "SDK channel missing from version output")
@@ -91,20 +92,29 @@ proc smokeSdk*(sdkPath: string, headlessOnly = false) =
   when defined(windows):
     require(within(report["cc"].getStr, sdk), "C compiler is outside relocated SDK: " & $report)
   if not headlessOnly: require(report["gpui"]["available"].getBool, "GPUI unavailable: " & $report["gpui"])
-  discard run("g", "scaffold", project)
-  discard run("g", "scaffold", "Note", "title:string", "archived:bool", "--project", project)
-  discard run("--check", project)
+  discard run("g", "scaffold")
+  discard run("g", "scaffold", "Note", "title:string", "archived:bool")
+  let preview = parseJson(run("db", "migrate", "--dry-run", "--json"))
+  require(preview["executed"].len == 0, "Preview executed migrations")
+  require(not fileExists(root / "application.sqlite3"), "Preview created storage")
+  let applied = parseJson(run("db", "migrate", "--json"))
+  require(applied["errors"].len == 0 and applied["executed"].len == 2, "Offline migrations failed")
+  let settled = parseJson(run("db", "status", "--json"))
+  require(settled["pending_versions"].len == 0, "Applied migrations remain pending")
+  discard run("db", "rollback", "--json")
+  discard run("db", "forward", "--json")
+  discard run("--check")
   require(fileExists(root / "application.sqlite3"), "SQLite application database was not created")
-  discard run("--check", project)
+  discard run("--check")
   let binary = project / (when defined(windows): "target/nim/app.exe" else: "target/nim/app")
   require(fileExists(binary), "Application binary was not created")
   let taskText = "SDK 中文持久化"
-  discard run("--headless", "--change", "task_draft", taskText, "--click", "task_add", project)
-  require(taskText in run("--headless", project), "Task was not persisted across processes")
+  discard run("--headless", "--change", "task_draft", taskText, "--click", "task_add")
+  require(taskText in run("--headless"), "Task was not persisted across processes")
   let noteText = "SDK second model"
   discard run("--headless", "--click", "nav_notes", "--click", "notes_new",
-    "--change", "notes_field_title", noteText, "--click", "notes_save", project)
-  require(noteText in run("--headless", "--click", "nav_notes", project), "Note was not persisted")
+    "--change", "notes_field_title", noteText, "--click", "notes_save")
+  require(noteText in run("--headless", "--click", "nav_notes"), "Note was not persisted")
   for test in ["test_home", "test_notes"]:
     var args = @["c", "-r", "--skipUserCfg:on", "--skipParentCfg:on", "--skipProjCfg:on", "--noNimblePath",
       "--path:" & sdk / "src", "--nimcache:" & project / "target/isolated-cache",
@@ -114,9 +124,10 @@ proc smokeSdk*(sdkPath: string, headlessOnly = false) =
     discard checkedCommand(sdk / "toolchain/nim/bin" / "nim".addFileExt(ExeExt), args, project, environment)
   let otherProject = root / "other-app"
   environment["LEAF_DATABASE_PATH"] = root / "other.sqlite3"
-  discard run("g", "scaffold", otherProject)
-  discard run("--headless", "--change", "task_draft", "Independent application", "--click", "task_add", otherProject)
-  require("Independent application" in run("--headless", otherProject), "Second application did not persist")
+  createDir(otherProject)
+  discard checkedCommand(cli, @["g", "scaffold"], otherProject, environment)
+  discard checkedCommand(cli, @["--headless", "--change", "task_draft", "Independent application", "--click", "task_add"], otherProject, environment)
+  require("Independent application" in checkedCommand(cli, @["--headless"], otherProject, environment), "Second application did not persist")
   echo "SDK relocation + offline model CRUD and persistence passed"
 
 when isMainModule:

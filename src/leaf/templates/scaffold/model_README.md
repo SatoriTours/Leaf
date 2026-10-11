@@ -3,11 +3,11 @@
 This Leaf application uses page groups, inherited models and SQLite migrations.
 
 ```sh
-leaf --check .
-leaf --watch .
-leaf --headless --change task_draft 'First task' --click task_add .
+leaf --check
+leaf --watch
+leaf --headless --change task_draft 'First task' --click task_add
 leaf g scaffold Note title:string archived:bool
-leaf pack . --target linux --output dist
+leaf pack --target linux --output dist
 nim c -r --path:/path/to/leaf/src tests/test_home.nim
 ```
 
@@ -15,11 +15,11 @@ nim c -r --path:/path/to/leaf/src tests/test_home.nim
 - `app/pages/<group>/logic.nim` owns independent drafts and calls models directly. Editing and cancelling a draft never modifies a saved record. Failed saves retain input and show structured validation messages.
 - `page.nim` includes logic and Views. Add new View imports there.
 - `app/application.nim` opens and migrates one connection at startup. Its render and executionScope bind that connection for queries and later callbacks. Business methods need no database argument.
-- `config/routes.nim` is human owned. Generated pages, routes, migrations and `.leaf/scaffold.json` are generator owned; edited registries are never silently overwritten.
+- `config/routes.nim` is human owned. Generated pages, routes and `.leaf/scaffold.json` are generator owned; edited registries are never silently overwritten.
 
-Schema 2 resources use int64 IDs, UTC created_at/updated_at timestamps, required trimmed strings (maximum 200 Unicode codepoints), and finite floats. Fields support string, bool, int and float. Timestamps are SQLite REAL Unix seconds; clean saves do not update timestamps. SQLite INTEGER PRIMARY KEY may reuse deleted IDs. Schema 1 applications continue generating their original service API until manually migrated.
+Schema 3 manifests retain model_schema 2; these resources use int64 IDs, UTC created_at/updated_at timestamps, required trimmed strings (maximum 200 Unicode codepoints), and finite floats. Fields support string, bool, int and float. Timestamps are SQLite REAL Unix seconds; clean saves do not update timestamps. SQLite INTEGER PRIMARY KEY may reuse deleted IDs. Schema 1 applications continue generating their original service API until manually migrated.
 
-Set `LEAF_DATABASE_PATH` to change storage; the default is the application's user-data directory. Importing configuration does not open a connection. Startup embeds and applies migrations atomically and records checksums in `leaf_schema_migrations`. Never change an applied migration; add a new migration and update the registry. Down SQL is for manual maintenance.
+Set `LEAF_DATABASE_PATH` to change storage; the default is the application's user-data directory. Importing configuration does not open a connection. Startup embeds and applies migrations atomically and records checksums in `leaf_schema_migrations`. Never change an applied migration; add a new file in db/migrations. Use leaf db migrate --dry-run to preview and leaf db rollback --steps 1 to reverse a migration. Rollback does not restore deleted data.
 
 Model query examples within the application's scope:
 

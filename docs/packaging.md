@@ -1,7 +1,8 @@
 # 发布 Nim + GPUI 应用
 
 ```sh
-target/nim/leaf pack my-app --target linux --output dist
+cd my-app
+leaf pack --target linux --output dist
 ```
 
 发布工具编译 Nim 入口，并将 GPUI + GPUI Kit 动态库放在可执行文件旁。Linux 为 tar.gz，macOS 为 .app ZIP，Windows 为 ZIP；生成 SHA256，包含业务资源、Nim 与 Rust 依赖许可证信息。

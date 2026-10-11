@@ -57,10 +57,13 @@ sh install.sh --channel beta --prefix /path/to/leaf --bin-dir /path/to/bin --no-
 ```sh
 leaf --version
 leaf doctor --json
-leaf g scaffold my-app
-leaf g scaffold Note title:string archived:bool --project my-app
-leaf --check my-app
-leaf my-app
+mkdir my-app
+cd my-app
+leaf g scaffold
+leaf g scaffold Note title:string archived:bool
+leaf db migrate --dry-run
+leaf --check
+leaf
 ```
 
 默认 SQLite 数据库位于系统用户数据目录，可通过 `LEAF_DATABASE_PATH` 覆盖。`leaf --check` 会运行应用的初始化和迁移，所以也会创建数据库。

@@ -177,6 +177,8 @@ suite "SDK archive and native installer":
       for item in ["src/leaf.nim", "src/leaf/templates/scaffold/main.nim", "LICENSE",
                    "toolchain/nim/lib/system.nim", "src/leaf/vendor/orm/lock.json",
                    "src/leaf/orm_config.nim", "src/leaf/orm_config.nims",
+                   "src/leaf/migrations.nim", "src/leaf/migrations/catalog.nim",
+                   "src/leaf/migrations/runner.nim", "src/leaf/db_cli.nim",
                    "licenses/orm/norm-LICENSE.txt", "licenses/orm/lowdb-LICENSE.txt",
                    "licenses/orm/db_connector-LICENSE.txt", "licenses/inventory.json", "lib/" & bridgeName(f.target), "bin/leaf"]:
         check fileExists(unpacked / "leaf-sdk" / item)

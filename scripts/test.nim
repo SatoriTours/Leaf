@@ -11,15 +11,19 @@ proc main(): int =
   createDir(root / "target" / "nim")
   var directories = @["nim", "release"]
   let modelOnly = commandLineParams() == @["--model-only"]
+  let databaseOnly = commandLineParams() == @["--database-only"]
   if paramCount() > 0:
-    if commandLineParams() notin [@["--release-only"], @["--model-only"]]:
-      stderr.writeLine("Usage: test_runner [--release-only | --model-only]")
+    if commandLineParams() notin [@["--release-only"], @["--model-only"], @["--database-only"]]:
+      stderr.writeLine("Usage: test_runner [--release-only | --model-only | --database-only]")
       return 1
-    if not modelOnly: directories = @["release"]
+    if not modelOnly and not databaseOnly: directories = @["release"]
   var tests: seq[string]
   for directory in directories:
     for path in walkFiles(root / "tests" / directory / "test_*.nim"):
       let name = path.extractFilename
+      if databaseOnly and not (name.startsWith("test_migration_") or name in [
+          "test_db_cli.nim", "test_cli_options.nim", "test_project_context.nim",
+          "test_sqlite.nim", "test_split_process.nim"]): continue
       if not modelOnly or name.startsWith("test_model_") or name in [
           "test_core.nim", "test_lists.nim", "test_sqlite.nim", "test_scaffold.nim", "test_scaffold_model.nim"]:
         tests.add(path)

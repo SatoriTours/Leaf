@@ -5,20 +5,23 @@
 ```sh
 cargo build --locked -p leaf-gpui
 nim c -d:release --out:target/nim/leaf src/leaf_cli.nim
-target/nim/leaf --help
-target/nim/leaf init my-app
-target/nim/leaf --watch my-app
-# 完整应用模板与一键资源生成
-target/nim/leaf g scaffold business-app
-target/nim/leaf g scaffold Note title:string archived:bool --project business-app
-target/nim/leaf --watch business-app
+export PATH="$PWD/target/nim:$PATH"
+leaf --help
+leaf init my-app
+cd my-app
+# 将未修改的最小模板升级为完整应用。
+leaf g scaffold
+leaf g scaffold Note title:string archived:bool
+leaf db migrate --dry-run
+leaf db migrate
+leaf --watch
 ```
 
 `NIM` 指定 Nim 编译器，`CARGO` 指定 Cargo；`LEAF_LIBRARY` 指定包含 `leaf.nim` 的 Nim 源码目录；`LEAF_GPUI_ROOT` 指定包含桥接 Cargo workspace 的目录。`LEAF_GPUI_LIBRARY` 可以指定已编译桥接库；使用它时 CLI 直接复制该库。设置 `LEAF_GPUI_PROFILE=release` 可构建优化桥接库，默认使用 Cargo dev profile。
 
 项目配置 `leaf.json` 指定名称、入口、资源包含规则和平台二进制路径。`init` 创建多模块 Nim 项目和资源示例。资源根据程序位置解析，发布包可搬迁运行。
 
-`g scaffold` / `generate scaffold` 创建完整页面组应用；加 `--project` 则生成并注册一个业务资源。两种模式支持 `--dry-run`，已有文件或被修改的自动注册文件会报告冲突。页面组、独立路由、模型、服务与迁移文件的约定见[脚手架说明](scaffolding.md)。完整模板默认 SQLite 持久化并在启动时执行待应用迁移；可用 `LEAF_DATABASE_PATH` 指定测试数据库。目标平台需要 SQLite 动态库。`init` 提供简洁示例，业务应用使用 `g scaffold`。
+`g scaffold` / `generate scaffold` 在当前目录创建完整页面组应用；加模型名与字段则在最近的 Leaf 项目生成并注册业务资源。所有项目命令从 cwd 向上查找最近的 `leaf.json`；旧 PROJECT 位置参数与 `--project` 已移除。两种模式支持 `--dry-run`，已有文件或被修改的自动注册文件会报告冲突。页面组、独立路由、模型、服务与迁移文件的约定见[脚手架说明](scaffolding.md)。完整模板默认 SQLite 持久化并在启动时执行待应用迁移；可用 `LEAF_DATABASE_PATH` 指定测试数据库。目标平台需要 SQLite 动态库。`init` 提供简洁示例，业务应用使用 `g scaffold`。
 
 应用命令支持 `--check`、`--headless`、`--click KEY`、`--change KEY VALUE`、`--submit KEY VALUE`、`--toggle KEY true|false` 和 `--list KEY FIRST FINISH`。`--trace`、`--log-file`、`--dump-tree` 提供诊断。
 
@@ -29,6 +32,8 @@ cargo test --workspace --locked
 nim c -r --out:target/nim/test_runner scripts/test.nim
 # 仅执行 SDK 归档、安装与发布工具回归
 nim c -r --out:target/nim/test_runner scripts/test.nim --release-only
+# 数据库 CLI、DSL、并发锁与历史回归（无需图形库或 Rust）
+nim c -r --out:target/nim/test_runner scripts/test.nim --database-only
 nim c -r --out:target/nim/native_test scripts/native_test.nim
 nim c -d:release -r --out:target/nim/benchmark benchmarks/runtime.nim
 ```
@@ -43,7 +48,6 @@ Windows CLI 的 build/run/watch/pack 共用 `startBuild`，为主 EXE 嵌入 ID=
 
 ```powershell
 # 在已有 Windows Nim/MinGW/Rust 环境中，从项目根目录运行
-leaf --trace --log-file .\dpi-cli.jsonl .\tests\nim\windows_dpi_app.nim
 nim c --path:src --out:target\dpi-direct.exe tests\nim\windows_dpi_app.nim
 .\target\dpi-direct.exe --trace --log-file .\dpi-direct.jsonl
 ```
@@ -51,3 +55,5 @@ nim c --path:src --out:target\dpi-direct.exe tests\nim\windows_dpi_app.nim
 JSONL 的 `dpi` 记录包含 `awareness`、`status` 和 `error_code`。首帧 ready 的 `rendering` 记录包含 GPUI 当前窗口实测 `scale_factor` 和 `logical_size`；`device_size_calculated`、`dpi_from_scale_calculated` 为换算值，不是 Win32 DPI 或交换链实测。成功 ready 严格协商 `capabilities.rendering_diagnostics=true` 后，窗口 bounds 变化才继续记录当前比例/尺寸，并去重；不会再次 ready 或改写 watch receipt。旧 Nim 宿主未宣告能力时，新 DLL 禁发新 op，ABI 仍为 1。新 Nim 接受旧 DLL 的无 metadata ready；完整诊断需要重新编译框架/DLL 和应用。
 
 更新 SDK/框架后应重新编译主 EXE，已有 EXE 不会获得新 manifest。比例仍不符合系统设置时，先查应用属性中的 Windows 高 DPI 兼容性覆盖、启动宿主的 DPI 模式，再用[原生验证步骤](verification.md)核对实际 HWND DPI 和 GPUI 比例。当前 Linux 测试不能证明 Windows 清晰度已改善。
+
+数据库命令在 `target/leaf-db` 编译独立维护入口，不导入应用 UI，也不要求 Cargo 或 GPUI。`db init` 仅安装配置；自定义入口需显式调用 `openApplicationDatabase()`，完整脚手架自动接入。命令、DSL 与多分支规则见[数据库迁移](migrations.md)。

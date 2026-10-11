@@ -36,9 +36,11 @@ jobs:
         run: nim c -r --out:target/nim/native_test scripts/native_test.nim
       - name: 示例与发布包
         run: |
-          target/nim/leaf --headless --click add examples/counter.nim
-          target/nim/leaf --check example/main.nim
-          target/nim/leaf pack examples/project --target linux --output dist
+          nim c -r examples/counter.nim --headless --click add
+          nim c -r example/main.nim --check
+          export PATH="$PWD/target/nim:$PATH"
+          cd examples/project
+          leaf pack --target linux --output ../../dist
       - uses: actions/upload-artifact@v4
         with:
           name: Nim-GPUI-Linux发布包

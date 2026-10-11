@@ -61,7 +61,7 @@ withDatabase(db):
 db.close()
 ```
 
-应用通常只在入口打开和迁移一次。schema 2 脚手架的 createApplication 保留 Database 注入，render 与 `Application.executionScope` 绑定连接，事件、延迟列表行、验证器和准备器也进入同一作用域。页面代码因此无需传 db。
+应用通常只在入口打开和迁移一次。新脚手架（schema 3、model_schema 2）的 createApplication 保留 Database 注入，render 与 `Application.executionScope` 绑定连接，事件、延迟列表行、验证器和准备器也进入同一作用域。页面代码因此无需传 db。
 
 withDatabase 使用线程局部、同步的作用域；嵌套、异常及提前 return 均恢复前一个上下文。没有默认全局连接。未绑定、已关闭和跨线程连接明确报错；活动事务内不能切换数据库。后台任务自行打开连接并进入 withDatabase；作用域不能跨 await。
 
@@ -158,3 +158,5 @@ withDatabase(db):
 回滚恢复框架管理的 id、生命周期、时间和 baseline，保留业务输入与 errors。直接通过底层 SQL 修改记录后，需 reload 更新对象快照。afterCommit 到最外层提交后才执行；每次成功 SQL 写入保留独立事件，按操作顺序派发。提交后通知失败仍执行剩余通知，汇总成 PostCommitError，committed 为 true；数据库已提交，不再回滚；页面应完成成功保存后的草稿清理和跳转，再显示通知错误，避免把已提交创建当作未保存重试。afterRollback 在状态恢复后执行，其错误不掩盖原始失败。
 
 首版不包括关联、自动 schema 建表、连接池、异步 ORM、批量写入及乐观锁；后续可以在当前 Record/Query 接口上增量增加。
+
+迁移声明、自动发现、历史校验和维护命令见[数据库迁移](migrations.md)。Model 声明仍不自动建表。

@@ -1,0 +1,33 @@
+name: 数据库迁移三平台回归
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  database:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-14, windows-2022]
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.6'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: 无 GUI 数据库、CLI、文件锁与多分支测试
+        run: |
+          export NIM="$(command -v nim)"
+          nim c -r --out:target/nim/database_runner scripts/test.nim --database-only
+      - name: Linux 验证便携 POSIX 监督路径
+        if: runner.os == 'Linux'
+        run: nim c -r -d:leafPortableSplit --out:target/nim/test_portable_split tests/nim/test_split_process.nim
+      - name: Linux 验证实际系统调用错误清理
+        if: runner.os == 'Linux'
+        run: nim c -r -d:leafSplitFaultTest --out:target/nim/test_split_faults tests/nim/test_split_process.nim

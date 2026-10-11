@@ -5,12 +5,14 @@
 ## 创建完整应用
 
 ```sh
-leaf g scaffold my-app
-leaf --check my-app
-leaf --watch my-app
+mkdir my-app
+cd my-app
+leaf g scaffold
+leaf --check
+leaf --watch
 ```
 
-生成器创建一个可以运行的首页、搜索和设置示例，包含继承式模型、页面逻辑、View、独立路由、SQLite 迁移 SQL 和测试。
+生成器创建一个可以运行的首页、搜索和设置示例，包含继承式模型、页面逻辑、View、独立路由、Nim 数据库迁移 和测试。
 
 ```text
 my-app/
@@ -32,13 +34,13 @@ my-app/
 │   ├── models/task.nim
 │   ├── models/application_record.nim
 │   └── generated/
-│       ├── pages.nim
-│       └── migrations.nim
+│       └── pages.nim
 ├── config/
 │   ├── application.nim
 │   ├── database.nim
 │   ├── routes.nim
 │   └── generated/routes.nim
+├── db/catalog.nim
 ├── db/migrations/
 ├── assets/
 └── tests/
@@ -51,8 +53,8 @@ my-app/
 ## 在应用中生成业务资源
 
 ```sh
-leaf g scaffold Note title:string archived:bool --project my-app
-leaf generate scaffold Metric count:int amount:float --project my-app
+leaf g scaffold Note title:string archived:bool
+leaf generate scaffold Metric count:int amount:float
 ```
 
 资源命令一次生成：
@@ -60,7 +62,7 @@ leaf generate scaffold Metric count:int amount:float --project my-app
 - `app/models/note.nim`：继承 ApplicationRecord、只读 int64 id、校验及时间字段。
 - `app/pages/notes/logic.nim` 和 `views/`：列表、编辑器、详情及页面组状态。
 - `app/pages/notes/page.nim`：依赖预组装与页面工厂。
-- `db/migrations/<version>_create_notes.up.sql` 和 `.down.sql`。
+- `db/migrations/<version>_create_notes.nim`。
 - `tests/test_notes.nim`。
 
 生成器自动接入页面工厂、`/notes` 路由和主窗口导航，无需手动导入或修改 shell。
@@ -92,17 +94,17 @@ let content = router.renderPage(ctx)
 ## 预览与冲突保护
 
 ```sh
-leaf g scaffold my-app --dry-run
-leaf g scaffold Contact name:string active:bool --project my-app --dry-run
+leaf g scaffold --dry-run
+leaf g scaffold Contact name:string active:bool --dry-run
 ```
 
 预览只列出计划创建、更新的相对路径。生成前检查参数、字段、文件和注册冲突；已有项目目录不会被覆盖。写入路径及项目目录的祖先路径禁止符号链接。普通可捕获的写入失败会恢复原注册文件并清理本次新建文件；若系统同时阻止恢复，生成器会继续清理其余文件并报告未完成的恢复。不提供崩溃恢复或并发写入事务。
 
-`app/generated/pages.nim`、`app/generated/migrations.nim`、`config/generated/routes.nim` 和 `.leaf/scaffold.json` 由生成器维护，应一起提交版本控制。注册文件与清单不一致时，生成器拒绝覆盖。人工配置、已有模型、服务和 View 不会被重写。
+`app/generated/pages.nim`、`db/catalog.nim`、`config/generated/routes.nim` 和 `.leaf/scaffold.json` 由生成器维护，应一起提交版本控制。注册文件与清单不一致时，生成器拒绝覆盖。人工配置、已有模型、服务和 View 不会被重写。
 
 清单保存模型名称、规范化的单数文件名、字段和迁移编号；单数文件名用于再次生成时恢复页面路径，例如 `A_B` 保持 `a_b`，不会被重新解释为 `ab`。
 
-资源模式适用于本命令创建的应用。原有 `leaf init` 小型示例和任意手工项目没有注册协议，命令会拒绝自动改造它们。
+资源模式适用于完整脚手架应用。未修改的 `leaf init` 最小模板可先运行无参数 `leaf g scaffold` 升级；编辑过的模板不会被覆盖。自定义项目可用 `leaf db init` 安装配置，并按输出示例手动接入启动函数。
 
 ## 数据与项目配置
 
@@ -112,7 +114,7 @@ leaf g scaffold Contact name:string active:bool --project my-app --dry-run
 
 可以设置 `LEAF_DATABASE_PATH=/absolute/path/application.sqlite3` 覆盖路径；测试使用 `openApplicationDatabase(":memory:")` 获得隔离的 SQLite 数据库，再传给 `createApplication(connection)`。schema 1 也保留 service 构造函数。`--check` 也会初始化数据库，检查时请使用独立测试路径。
 
-`app/generated/migrations.nim` 在编译时读取并嵌入 `.up.sql`，应用启动时按版本执行待应用的迁移。`leaf_schema_migrations` 记录已应用版本、名称和 SQL；重复启动不重复执行，已应用迁移被修改或从应用移除时会报错。每个版本在事务中执行，失败会回滚该版本。迁移文件不要自行写 BEGIN、COMMIT、ROLLBACK 或 SAVEPOINT；事务由执行器管理。新增资源后重新构建/启动即可建表，生成命令本身不打开数据库。`.down.sql` 可用于人工维护，不会在启动时自动回滚，也没有独立的 `leaf db migrate` 命令。
+`db/catalog.nim` 在编译时自动发现直接位于 `db/migrations/` 的 Nim 和兼容 SQL 迁移；新增迁移不修改共享注册表。应用启动按版本执行所有未应用项，每条迁移及其历史写入在同一事务提交。`leaf db status` 检查状态，`leaf db migrate --dry-run` 预览，`leaf db rollback --steps 1` 显式回滚；启动只执行正向迁移。已应用迁移被修改或缺失时拒绝执行，历史指纹包括源文件及反向定义。详见[数据库迁移](migrations.md)。
 
 Leaf 提供显式的 `leaf/sqlite` 模块，依赖目标系统 SQLite 动态库：Linux `libsqlite3.so.0`、macOS `libsqlite3.dylib`、Windows 系统 `winsqlite3.dll`。Windows 应用使用系统 SQLite。没有导入存储模块的原有应用不增加此依赖。
 
@@ -127,9 +129,9 @@ nim c -r --path:/path/to/leaf/src --nimcache:target/test-cache --out:target/test
 nim c -r --path:/path/to/leaf/src --nimcache:target/test-cache --out:target/test_notes tests/test_notes.nim
 ```
 
-## schema 2 的 Model 与连接作用域
+## Model 与连接作用域
 
-新应用清单为 `schema: 2, model_api: 1, timestamps: true`。`ApplicationRecord` 继承 `TimestampedRecord`；每个具体模型用 `defineModel` 声明表名、校验和回调，共享保存、查询、删除、dirty tracking 与事务能力。常规 CRUD 不生成 service。
+新应用清单为 `schema: 3, model_schema: 2, model_api: 1, timestamps: true`，迁移编号保存为十进制字符串。`ApplicationRecord` 继承 `TimestampedRecord`；每个具体模型用 `defineModel` 声明表名、校验和回调，共享保存、查询、删除、dirty tracking 与事务能力。常规 CRUD 不生成 service。
 
 ```nim
 import leaf/model
@@ -172,6 +174,6 @@ UPDATE tasks SET
   updated_at = CAST(strftime('%s', 'now') AS REAL);
 ```
 
-将新迁移加入应用迁移序列；模型使用 Option[DateTime] 接收时间值，未来写入由框架补齐 UTC 时间。schema 2 新表的时间字段为 REAL NOT NULL。如需对旧表补 NOT NULL 约束，另建迁移重建表。新表用 INTEGER PRIMARY KEY，删除后的 id 可能重用；原 schema 1 AUTOINCREMENT 语义保持不变。
+将新迁移放入 `db/migrations/`，catalog 自动发现；模型使用 Option[DateTime] 接收时间值，未来写入由框架补齐 UTC 时间。schema 2 新表的时间字段为 REAL NOT NULL。如需对旧表补 NOT NULL 约束，另建迁移重建表。新表用 INTEGER PRIMARY KEY，删除后的 id 可能重用；原 schema 1 AUTOINCREMENT 语义保持不变。
 
 完整 API 与事务失败语义见 [Model 文档](models.md)。

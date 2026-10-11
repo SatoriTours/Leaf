@@ -6,6 +6,7 @@ when defined(windows): import ./windows_process
 
 const SplitOutputCap* = 262_144
 const SplitDrainBudget* = 65_536
+const SplitSubreaper = defined(linux) and not defined(leafPortableSplit)
 
 type SplitProcess* = ref object
   ## A two-channel owned child: stdout and stderr stay separate on every
@@ -61,27 +62,44 @@ when defined(posix):
         for item in keep:
           if item == fd: found = true
         found)
-    when defined(linux):
+    block:
       try:
-        for entry in walkDir("/proc/self/fd"):
+        let fdDirectory = when defined(linux): "/proc/self/fd" else: "/dev/fd"
+        if not dirExists(fdDirectory):
+          raise newException(OSError, "descriptor directory unavailable")
+        var unrelated: seq[cint]
+        for entry in walkDir(fdDirectory):
           let name = entry.path.extractFilename
           if name.len == 0 or name[0] notin {'0'..'9'}: continue
           var fd = 0
           try: fd = parseInt(name)
           except ValueError: continue
-          if fd > 2 and not wanted(cint(fd)): discard close(cint(fd))
+          if fd > 2 and not wanted(cint(fd)): unrelated.add cint(fd)
+        # Finish directory iteration before closing its own enumeration fd.
+        for fd in unrelated: discard close(fd)
         return
       except CatchableError:
         discard
-    for fd in 3 .. 1023:
+    var limit: RLimit
+    if getrlimit(RLIMIT_NOFILE, limit) != 0 or limit.rlim_max <= 0 or
+        limit.rlim_max > int(high(cint)):
+      raise newException(OSError, "cannot determine inherited descriptor bounds")
+    for fd in 3 ..< max(limit.rlim_cur, limit.rlim_max):
       if not wanted(cint(fd)): discard close(cint(fd))
 
-  proc drainChannel(fd: cint, text: var string, budget: int) =
+  proc drainChannel(fd: cint, text: var string, budget: int): bool =
     var buffer: array[8192, char]
     var total = 0
-    while total < budget:
+    result = true
+    let deadline = getMonoTime() + initDuration(milliseconds = 10)
+    while total < budget and getMonoTime() < deadline:
       let count = posix.read(fd, addr buffer[0], buffer.len)
-      if count <= 0: break
+      if count == 0: break
+      if count < 0:
+        if errno == EINTR: continue
+        if errno in [EAGAIN, EWOULDBLOCK]: break
+        result = false
+        break
       let start = text.len
       text.setLen(start + count)
       copyMem(addr text[start], addr buffer[0], count)
@@ -102,27 +120,27 @@ when defined(posix):
     true
 
   proc guardianChildren(self: int): seq[int] =
-    ## Every live descendant is a direct child of the subreaper, so one scan is
-    ## authoritative; no ancestry guessing and no polling of the original pid.
-    result = @[]
-    try:
-      for entry in walkDir("/proc"):
-        let name = entry.path.extractFilename
-        if name.len == 0 or name[0] notin {'0'..'9'}: continue
-        var pid = 0
-        try: pid = parseInt(name)
-        except ValueError: continue
-        if pid == self: continue
-        try:
-          let raw = readFile("/proc/" & $pid & "/stat")
-          let close = raw.rfind(')')
-          if close < 0: continue
-          let rest = strutils.splitWhitespace(raw[close + 1 .. ^1].strip())
-          if rest.len > 1 and rest[1] == $self: result.add pid
-        except CatchableError:
-          discard
-    except CatchableError:
-      discard
+    ## Read the kernel's direct-child list. Descendants become direct children
+    ## after their parents exit. Failure is an ownership error, never an empty
+    ## tree. These pids cannot be recycled until this guardian reaps them.
+    when SplitSubreaper:
+      for raw in strutils.splitWhitespace(readFile("/proc/" & $self &
+          "/task/" & $self & "/children")):
+        result.add parseInt(raw)
+
+  var waitPidKind {.importc: "P_PID", header: "<sys/wait.h>".}: cint
+  var childExited {.importc: "CLD_EXITED", header: "<signal.h>".}: cint
+
+  proc peekCommand(child: Pid): int =
+    ## Keep the exited command waitable until group cleanup; its pid pins the
+    ## group identity on POSIX systems without Linux's subreaper facility.
+    var info: SigInfo
+    if waitid(waitPidKind, Id(child), info, WEXITED or WNOHANG or WNOWAIT) != 0:
+      if errno == EINTR: return -1
+      raise newException(OSError, "cannot inspect the owned command")
+    if info.si_pid == 0: return -1
+    if info.si_code == childExited: int(info.si_status)
+    else: 128 + int(info.si_status)
 
   proc guardianExitCode(status: cint): int =
     if (status and 0x7f) == 0: (status shr 8) and 0xff
@@ -143,13 +161,15 @@ when defined(posix):
     while true:
       var status: cint
       var reapedAny = false
-      while true:
+      while getMonoTime() <= deadline:
         let waited = waitpid(-1, status, WNOHANG)
         if waited > 0:
           reapedAny = true
           if waited == child and code < 0: code = guardianExitCode(status)
           continue
         if waited < 0 and errno == EINTR: continue
+        if waited < 0 and errno != ECHILD:
+          raise newException(OSError, "guardian cleanup waitpid failed")
         break
       let remaining = guardianChildren(self)
       if remaining.len == 0:
@@ -175,11 +195,13 @@ when defined(posix):
     try:
       discard posix.signal(SIGPIPE, SIG_IGN)
       var failure = int32(0)
-      when defined(linux):
+      when SplitSubreaper:
         if prctl(PR_SET_CHILD_SUBREAPER, clong(1)) != 0:
           failure = -2'i32
       else:
-        failure = -3'i32   # no kernel ownership primitive on this platform
+        # A guardian lives outside its command's group, including when nested.
+        # Closing its parent's control pipe still triggers its own cleanup.
+        if setpgid(0, 0) != 0: failure = -3'i32
       if failure != 0:
         discard guardianWriteFrame(statusWrite, failure)
         splitExit(125)
@@ -220,40 +242,76 @@ when defined(posix):
       if not guardianWriteFrame(statusWrite, int32(child)):
         raise newException(IOError, "guardian could not publish the command pid")
       while true:
-        var status: cint
-        while true:
-          let waited = waitpid(-1, status, WNOHANG)
-          if waited <= 0: break
-          if waited == child and code < 0:
-            code = guardianExitCode(status)
-            if not reported:
-              reported = guardianWriteFrame(statusWrite, int32(code))
+        when SplitSubreaper:
+          var status: cint
+          let reapDeadline = getMonoTime() + initDuration(milliseconds = 50)
+          while getMonoTime() < reapDeadline:
+            let waited = waitpid(-1, status, WNOHANG)
+            if waited < 0 and errno == EINTR: continue
+            if waited < 0 and errno != ECHILD:
+              raise newException(OSError, "guardian waitpid failed")
+            if waited <= 0: break
+            if waited == child and code < 0:
+              code = guardianExitCode(status)
+        else:
+          if code < 0: code = peekCommand(child)
+        if code >= 0 and not reported:
+          reported = guardianWriteFrame(statusWrite, int32(code))
         if not eof:
           var buffer: array[1, char]
           let count = posix.read(controlRead, addr buffer[0], 1)
           if count == 0: eof = true
           elif count < 0 and errno notin [EAGAIN, EWOULDBLOCK, EINTR]: eof = true
         if eof:
-          guardianKillTree(self)
-          guardianCleanup(self, int(child), code)
-          if guardianChildren(self).len == 0: break
+          when SplitSubreaper:
+            guardianKillTree(self)
+            guardianCleanup(self, int(child), code)
+            if guardianChildren(self).len == 0: break
+          else:
+            # The unreaped leader still pins this process group, even if it
+            # exited before close. Never signal the group after reaping it.
+            discard kill(Pid(-child), SIGKILL)
+            discard kill(child, SIGKILL) # also covers a pre-setpgid child
+            var status: cint
+            let cleanupDeadline = getMonoTime() + initDuration(seconds = 5)
+            while true:
+              let waited = waitpid(child, status, WNOHANG)
+              if waited == child:
+                if code < 0: code = guardianExitCode(status)
+                break
+              if waited < 0 and errno != EINTR:
+                raise newException(OSError, "guardian cleanup waitpid failed")
+              if getMonoTime() >= cleanupDeadline:
+                raise newException(OSError, "guardian cleanup timed out")
+              sleep(5)
+            break
         sleep(5)
       if code < 0: code = 0
       if not reported:
         reported = guardianWriteFrame(statusWrite, int32(code))
       splitExit(0)
     except CatchableError:
-      # The owner must never die unhandled after a command exists: kill and reap
-      # the gated command, report a framework error, then exit.
+      # Keep responsibility for all descendants on lifecycle errors as well.
+      # A nonzero guardian exit is independently checked by the parent, even
+      # when the command's successful status was already published.
       if child > 0:
-        discard kill(child, SIGKILL)
-        let deadline = getMonoTime() + initDuration(seconds = 5)
-        var status: cint
-        while getMonoTime() < deadline:
-          let waited = waitpid(child, status, WNOHANG)
-          if waited == child: break
-          if waited < 0 and errno != EINTR: break
-          sleep(5)
+        when SplitSubreaper:
+          var clean = false
+          while not clean:
+            try:
+              guardianKillTree(self)
+              guardianCleanup(self, int(child), code)
+              clean = guardianChildren(self).len == 0
+            except CatchableError:
+              sleep(5)
+        else:
+          discard kill(Pid(-child), SIGKILL)
+          discard kill(child, SIGKILL)
+          var status: cint
+          while true:
+            let waited = waitpid(child, status, WNOHANG)
+            if waited == child or (waited < 0 and errno == ECHILD): break
+            sleep(5)
       if not reported:
         reported = guardianWriteFrame(statusWrite, -4'i32)
       splitExit(125)
@@ -267,17 +325,11 @@ when defined(posix):
     while true:
       let waited = waitpid(guardian, status, WNOHANG)
       if waited == guardian: break
+      if getMonoTime() > deadline: break
       if waited < 0 and errno == EINTR: continue
-      if waited < 0: break
-      if getMonoTime() > deadline:
-        discard kill(guardian, SIGKILL)
-        let forcedDeadline = getMonoTime() + initDuration(seconds = 3)
-        while getMonoTime() < forcedDeadline:
-          let forced = waitpid(guardian, status, WNOHANG)
-          if forced == guardian: break
-          if forced < 0 and errno != EINTR: break
-          sleep(5)
-        break
+      if waited < 0 and errno == ECHILD: break
+      # Closing control requests tree cleanup. Do not kill its lifecycle owner
+      # on a handshake error; it must keep responsibility for any descendants.
       sleep(5)
     if outFd >= 0: discard close(outFd)
     if errFd >= 0: discard close(errFd)
@@ -373,14 +425,17 @@ when defined(posix):
 
   proc drainSplit*(p: SplitProcess) =
     if p == nil or p.closed: return
-    drainChannel(p.outFd, p.stdoutText, SplitDrainBudget)
-    drainChannel(p.errFd, p.stderrText, SplitDrainBudget)
+    if not drainChannel(p.outFd, p.stdoutText, SplitDrainBudget):
+      p.protocolError = true
+    if not drainChannel(p.errFd, p.stderrText, SplitDrainBudget):
+      p.protocolError = true
 
   proc readChildStatus(p: SplitProcess) =
     ## Buffers the whole status frame across partial reads; a value outside the
     ## exit domain 0..255 is a framework error, never an exit status.
     if p.code >= 0 or p.protocolError or p.statusEof or p.statusError: return
-    while p.statusRead < 4:
+    let deadline = getMonoTime() + initDuration(milliseconds = 10)
+    while p.statusRead < 4 and getMonoTime() < deadline:
       let count = posix.read(p.statusFd, addr p.statusBuffer[p.statusRead],
         4 - p.statusRead)
       if count > 0:
@@ -416,6 +471,9 @@ when defined(posix):
       p.code = 125
       return true
     p.drainSplit()
+    if p.protocolError:
+      if p.code < 0: p.code = 125
+      return true
     if p.code < 0: p.readChildStatus()
     p.code >= 0
 
@@ -425,27 +483,36 @@ when defined(posix):
     discard close(p.controlFd)
     p.controlFd = -1
     # The guardian cleans the tree then exits. The wait is bounded and never
-    # unbounded: if the guardian cannot confirm cleanup in time we force it and
-    # record that cleanup was NOT confirmed instead of claiming a clean reap.
+    # unbounded: if cleanup cannot be confirmed, retain the owner and endpoints
+    # for a retry and report that cleanup was NOT confirmed.
     let deadline = getMonoTime() + initDuration(seconds = 15)
     var status: cint
     while true:
       let waited = waitpid(p.pid, status, WNOHANG)
-      if waited == p.pid: break
-      if waited < 0 and errno == EINTR: continue
-      if waited < 0: break
-      if getMonoTime() > deadline:
-        # Never kill a lifecycle owner that still owns a live tree: preserve
-        # ownership and report the unconfirmed state truthfully.
-        p.cleanupUnconfirmed = true
+      if waited == p.pid:
+        p.reaped = true
+        if guardianExitCode(status) != 0: p.cleanupUnconfirmed = true
         break
+      if getMonoTime() > deadline:
+        p.cleanupUnconfirmed = true
+        return # leave the live owner and endpoints available for a later close
+      if waited < 0 and errno == EINTR: continue
+      if waited < 0:
+        p.cleanupUnconfirmed = true
+        if errno == ECHILD: break
+        # Transient wait failures must not abandon a still-waitable owner.
+        sleep(5)
+        continue
+      p.drainSplit()
       sleep(5)
-    p.reaped = true
     if p.code < 0 and not p.protocolError:
       p.readChildStatus()
       if p.code < 0: p.cleanupUnconfirmed = true
     p.readChildStatus()
-    p.drainSplit()
+    # Drain the final buffered tail, even if it spans several fair poll budgets.
+    # No producers remain after the guardian exits; each call is nonblocking.
+    for _ in 0 .. (SplitOutputCap div SplitDrainBudget + 1):
+      p.drainSplit()
     discard close(p.outFd)
     discard close(p.errFd)
     discard close(p.statusFd)

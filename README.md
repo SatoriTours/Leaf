@@ -23,9 +23,12 @@ curl -fsSL https://raw.githubusercontent.com/SatoriTours/Leaf/main/install.sh | 
 SDK 包含 CLI、Leaf 源码、Nim 编译器和预编译 GPUI 桥接库；Windows 安装器会自动安装 C 编译器。安装后打开新终端：
 
 ```sh
-leaf g scaffold my-app
-leaf g scaffold Note title:string archived:bool --project my-app
-leaf my-app
+mkdir my-app
+cd my-app
+leaf g scaffold
+leaf g scaffold Note title:string archived:bool
+leaf db migrate --dry-run
+leaf
 ```
 
 首次发布成功后下载命令才可用。Windows PowerShell 命令、自定义安装与系统依赖见[安装说明](docs/installation.md)。main 推送自动构建 beta，`vX.Y.Z` tag 自动构建正式版。
@@ -43,7 +46,7 @@ sudo apt-get install build-essential pkg-config cmake libssl-dev libclang-dev \
   libwayland-dev libvulkan-dev fonts-noto-cjk
 cargo build --locked -p leaf-gpui
 nim c -d:release --out:target/nim/leaf src/leaf_cli.nim
-./target/nim/leaf examples/counter.nim
+nim c -r examples/counter.nim
 ```
 
 CLI 会增量构建 GPUI 桥接库，并将它复制到应用可执行文件旁。也可以直接执行 `nim c -r examples/counter.nim`；此时先运行上面的 Cargo 构建。
@@ -51,8 +54,8 @@ CLI 会增量构建 GPUI 桥接库，并将它复制到应用可执行文件旁�
 无窗口验证和回调测试：
 
 ```sh
-./target/nim/leaf --check examples/counter.nim
-./target/nim/leaf --headless --click add --click add examples/counter.nim
+nim c -r examples/counter.nim --check
+nim c -r examples/counter.nim --headless --click add --click add
 ```
 
 发布后的应用包含 GPUI 桥接库，运行者无需安装 Nim 或 Rust。窗口仍需要系统图形驱动、字体以及可用图形会话。
@@ -83,18 +86,22 @@ when isMainModule: quit(run(app))
 ## 开发与发布
 
 ```sh
-./target/nim/leaf init my-app
-./target/nim/leaf g scaffold business-app
-./target/nim/leaf g scaffold Note title:string archived:bool --project business-app
-./target/nim/leaf my-app
-./target/nim/leaf --watch my-app
-./target/nim/leaf doctor --json
-./target/nim/leaf pack my-app --target linux --output dist
+# 将源码构建的 CLI 加入当前终端 PATH。
+export PATH="$PWD/target/nim:$PATH"
+leaf init my-app
+cd my-app
+leaf g scaffold
+leaf g scaffold Note title:string archived:bool
+leaf db status
+leaf db migrate --dry-run
+leaf --watch
+leaf doctor --json
+leaf pack --target linux --output dist
 ```
 
 项目支持 Nim 模块、资源和 `leaf.json`。watch 编译成功且 GPUI 窗口就绪后才替换旧程序。打包生成 Linux tar.gz、macOS .app ZIP 或 Windows ZIP，包含可执行文件、GPUI 桥接库、资源、许可证和 SHA256。跨平台打包需要相应目标的应用和桥接库。[开发说明](docs/development.md) · [发布说明](docs/packaging.md)
 
-`g scaffold` 一键创建页面组应用，或在该应用中增加继承式模型、CRUD 页面、逻辑、独立路由与 SQLite 迁移 SQL。页面组预加载依赖，切换 View 保留状态，新增资源自动进入导航。生成前可用 `--dry-run` 预览。默认使用 SQLite 持久化，应用启动时自动执行尚未应用的迁移；`LEAF_DATABASE_PATH` 可指定数据库文件。[应用架构与脚手架](docs/scaffolding.md)
+`g scaffold` 一键创建页面组应用，或在该应用中增加继承式模型、CRUD 页面、逻辑、独立路由与 Nim 数据库迁移。页面组预加载依赖，切换 View 保留状态，新增资源自动进入导航。生成前可用 `--dry-run` 预览。默认使用 SQLite 持久化，应用启动时自动执行尚未应用的迁移；`LEAF_DATABASE_PATH` 可指定数据库文件。[应用架构与脚手架](docs/scaffolding.md) · [数据库迁移](docs/migrations.md)
 
 `examples/` 提供计数器、待办、子组件、错误恢复和 Kit 控件示例；`example/main.nim` 提供仪表盘、看板、行情、报表、聊天、注册与设置页面。页面数据与操作为本地模拟。
 
