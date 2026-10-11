@@ -12,7 +12,7 @@ proc gccFromBuildScript*(path:string):string =
     if name != "gcc" and name != "gcc.exe" and not name.endsWith("-gcc") and not name.endsWith("-gcc.exe"):
       raise newException(IOError,"DPI manifest requires MinGW GCC; incompatible Nim toolchain: " & argv[0])
     if isAbsolute(argv[0]):result=argv[0]
-    elif argv[0].parentDir.len>0:
+    elif argv[0].splitPath.head.len>0:
       result=absolutePath(argv[0],script.getOrDefault("currentDir").getStr(path.parentDir))
     else:result=findExe(argv[0])
     if result.len==0 or not fileExists(result):

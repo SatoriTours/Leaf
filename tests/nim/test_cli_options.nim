@@ -3,6 +3,21 @@ import std/[options, unittest]
 import leaf/[cli_options, core, migrations]
 
 suite "CLI option parsing":
+  test "backend selection retains current-directory command semantics":
+    let build = parseCli(@["build", "--target", "windows", "--backend", "native", "--output", "out"])
+    check build.kind == ccBuild
+    check build.target == "windows"
+    check build.backend == "native"
+    check build.output == "out"
+    check parseCli(@["run", "--backend", "native"]).kind == ccRun
+    check parseCli(@["doctor", "--json", "--backend", "native"]).jsonOutput
+    check parseCli(@["pack", "--target", "windows", "--backend", "native"]).backend == "native"
+    for args in [@["build", "--backend", "unknown"], @["run", "app"],
+        @["build", "--target", "android"], @["doctor", "--backend"],
+        @["build", "--backend", "native", "--backend", "gpui"],
+        @["run", "--output", "out"]]:
+      expect UiError: discard parseCli(args)
+
   test "current project commands reject selectors but preserve event values":
     check parseCli(@["build"]).kind == ccBuild
     check parseCli(@["g", "scaffold"]).kind == ccScaffoldApp

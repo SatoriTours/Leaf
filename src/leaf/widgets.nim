@@ -15,9 +15,13 @@ proc button*(label: string, onClick: Callback = nil, key = "", disabled = false,
      disabled = disabled, styles = styles, attributes = style({"variant": variant}))
 proc input*(value: string, onChange: Callback = nil, key = "", placeholder = "",
             onSubmit: Callback = nil, disabled = false,
-            styles: Styles = default(Styles)): Node =
+            styles: Styles = default(Styles), resetToken: uint64 = 0): Node =
+  var attributes = default(Styles)
+  if resetToken != 0:
+    attributes = style({"input_reset_token": $resetToken})
   ui(NodeKind.input, key = key, text = value, placeholder = placeholder,
-    onChange = onChange, onSubmit = onSubmit, disabled = disabled, styles = styles)
+    onChange = onChange, onSubmit = onSubmit, disabled = disabled, styles = styles,
+    attributes = attributes)
 proc checkbox*(label: string, checked: bool, onChange: Callback = nil, key = "",
                disabled = false, styles: Styles = default(Styles)): Node =
   ui(NodeKind.checkbox, key = key, text = label, onChange = onChange,

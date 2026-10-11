@@ -1,10 +1,10 @@
 ## Developer CLI: native Nim applications are compiled before execution.
 ## Commands always operate on the current directory's nearest Leaf project;
 ## the old PROJECT position argument and `--project` selector are gone.
-import std/[os, json, strutils, strtabs]
+import std/[os, json, strtabs, options]
 import leaf/[cli_options, core, project, project_context, build, doctor,
   developer_options, diagnostics, watch, process_io, pack, scaffold, sdk, db_cli,
-  migrations]
+  migrations, targets]
 export build
 
 const HelpText = """Leaf Nim developer tools
@@ -14,14 +14,18 @@ const HelpText = """Leaf Nim developer tools
                                    Add a resource with CRUD pages, routes and migrations
   leaf g migration NAME [--dry-run] Create a Nim migration in the current project
   leaf generate ...                Alias for leaf g ...
-  leaf build [--output EXE]        Compile the current project
-  leaf pack --target TARGET [--binary EXE] [--output DIR]
-  leaf doctor [--json]             Show the local build environment
+  leaf build [--output EXE] [--target TARGET] [--backend native|gpui]
+                                   Compile the current project
+  leaf run [--target TARGET] [--backend native|gpui]
+                                   Compile and open the current project
+  leaf pack --target TARGET [--binary EXE] [--output DIR] [--backend native|gpui]
+  leaf doctor [--json] [--target TARGET] [--backend native|gpui]
+                                   Show the local build environment
   leaf --version                   Show SDK version and channel
   leaf --check [DIAGNOSTICS]       Compile and validate the current application
   leaf --headless [EVENTS] [DIAGNOSTICS] [--stats]
                                    Compile and run ordered events
-  leaf                             Compile and open a GPUI + GPUI Kit desktop window
+  leaf                             Compile and open the configured desktop backend
   leaf --watch [DIAGNOSTICS]       Rebuild and replace ready desktop windows
   leaf db init [--dry-run]         Install database configuration and catalog
   leaf db migrate [--to VERSION] [--dry-run] [--json]
@@ -50,9 +54,11 @@ proc execute(exe: string, args: seq[string], workingDir: string): int =
     sleep(10)
   process.code
 
-proc launch(project: Project, runArgs: seq[string]): int =
+proc launch(project: Project, runArgs: seq[string], target = "", backend = ""): int =
   let options = parseDeveloperOptions(runArgs, project.root)
-  let binary = build(project)
+  let headless = "--headless" in options.remaining or "--check" in options.remaining
+  let binary = build(project, selection = some(resolveBuild(project.backend,
+    target, backend, headlessOnly = headless)))
   result = execute(binary, options.launchArgs(), project.root)
 
 proc main*(args: seq[string]): int =
@@ -86,17 +92,20 @@ proc main*(args: seq[string]): int =
         stdout.writeLine(action)
       return 0
     of ccBuild:
-      stdout.writeLine(build(requireCurrentProject(), command.output))
+      let project = requireCurrentProject()
+      stdout.writeLine(build(project, command.output,
+        some(resolveBuild(project.backend, command.target, command.backend))))
       return 0
     of ccPack:
       let project = requireCurrentProject()
       let binary = if command.binary.len > 0: absolutePath(command.binary) else: ""
       let output = if command.output.len > 0: command.output else: "dist"
-      for artifact in pack.pack(project, command.target, output, binary):
+      for artifact in pack.pack(project, command.target, output, binary, command.backend):
         stdout.writeLine(artifact)
       return 0
     of ccDoctor:
-      stdout.writeLine(doctorReport().pretty())
+      stdout.writeLine(doctorReport(some(resolveBuild(backendGpui,
+        command.target, command.backend))).pretty())
       return 0
     of ccDatabase:
       let project = requireCurrentProject()
@@ -105,6 +114,8 @@ proc main*(args: seq[string]): int =
         command.jsonOutput)
     of ccDeveloper:
       let project = requireCurrentProject()
+      if project.backend == backendNative:
+        fail("native --watch is not supported in this batch")
       let options = parseDeveloperOptions(command.runArgs, project.root)
       let diagnostics = options.diagnostics()
       defer: diagnostics.close()
@@ -115,8 +126,8 @@ proc main*(args: seq[string]): int =
         if found.isNone:
           stdout.write(HelpText)
           return 0
-        return launch(found.get(), command.runArgs)
-      return launch(requireCurrentProject(), command.runArgs)
+        return launch(found.get(), command.runArgs, command.target, command.backend)
+      return launch(requireCurrentProject(), command.runArgs, command.target, command.backend)
   except ProcessInterruptedError:
     result = 130
   except CatchableError as error:

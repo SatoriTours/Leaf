@@ -7,6 +7,7 @@ import ./core
 import ./scaffold
 import ./scaffold_types
 import ./migrations/types
+import ./targets
 
 type
   CliCommandKind* = enum
@@ -17,7 +18,7 @@ type
     scaffold*: ScaffoldOptions
     request*: MigrationRequest
     dryRun*, jsonOutput*: bool
-    output*, binary*, target*, initDirectory*, migrationName*: string
+    output*, binary*, target*, backend*, initDirectory*, migrationName*: string
     runArgs*, sdkArgs*: seq[string]
     ## `db init` is not a migration direction, so it is tracked separately.
     databaseInit*: bool
@@ -110,7 +111,7 @@ proc parsePack(args: seq[string]): CliCommand =
   var i = 1
   while i < args.len:
     let flag = args[i]
-    if flag notin ["--target", "--binary", "--output"] or flag in seen:
+    if flag notin ["--target", "--binary", "--output", "--backend"] or flag in seen:
       fail("unknown or duplicated pack option: " & flag)
     if i + 1 >= args.len or args[i + 1].len == 0 or args[i + 1].startsWith("--"):
       fail("missing value for " & flag)
@@ -118,11 +119,46 @@ proc parsePack(args: seq[string]): CliCommand =
     case flag
     of "--target": result.target = args[i + 1]
     of "--binary": result.binary = args[i + 1]
+    of "--backend":
+      discard parseBackend(args[i + 1])
+      result.backend = args[i + 1]
     else: result.output = args[i + 1]
     i += 2
   if result.target notin ["linux", "macos", "windows", "all"]:
     fail("--target must be linux, macos, windows or all")
   if result.target == "all" and result.binary.len > 0: fail("--binary requires a single target")
+
+proc parseBuildCommand(args: seq[string]): CliCommand =
+  let command = args[0]
+  result.kind = case command
+    of "build": ccBuild
+    of "doctor": ccDoctor
+    else: ccRun
+  var seen: seq[string]
+  var i = 1
+  while i < args.len:
+    let flag = args[i]
+    if flag in seen: fail("duplicated option: " & flag)
+    seen.add(flag)
+    if flag == "--json" and command == "doctor":
+      result.jsonOutput = true
+      inc i
+      continue
+    if flag notin ["--target", "--backend", "--output"] or
+        (flag == "--output" and command != "build"):
+      fail("unknown " & command & " option: " & flag)
+    if i + 1 >= args.len or args[i + 1].len == 0 or args[i + 1].startsWith("--"):
+      fail("missing value for " & flag)
+    case flag
+    of "--target":
+      if args[i + 1] notin ["windows", "linux", "macos"]:
+        fail("unsupported build target: " & args[i + 1])
+      result.target = args[i + 1]
+    of "--backend":
+      discard parseBackend(args[i + 1])
+      result.backend = args[i + 1]
+    else: result.output = args[i + 1]
+    i += 2
 
 proc parseDatabase(args: seq[string]): CliCommand =
   result.kind = ccDatabase
@@ -240,21 +276,10 @@ proc parseCli*(args: seq[string]): CliCommand =
       result.migrationName = args[2]
       result.dryRun = args.len == 4
     else: fail("usage: leaf g scaffold|migration ...")
-  of "build":
-    result.kind = ccBuild
-    if args.len == 1: discard
-    elif args.len == 3 and args[1] == "--output":
-      if args[2].len == 0: fail("--output must not be empty")
-      result.output = args[2]
-    else: fail("usage: leaf build [--output EXE]")
+  of "build", "run", "doctor":
+    result = parseBuildCommand(args)
   of "pack":
     result = parsePack(args)
-  of "doctor":
-    result.kind = ccDoctor
-    if args.len == 2:
-      if args[1] != "--json": fail("usage: leaf doctor [--json]")
-      result.jsonOutput = true
-    elif args.len != 1: fail("usage: leaf doctor [--json]")
   of "db":
     result = parseDatabase(args)
   of "--watch":

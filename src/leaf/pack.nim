@@ -65,7 +65,9 @@ proc checkApplication(binary, cwd: string) =
     sleep(10)
   if process.code != 0: fail("packaged application --check failed (exit " & $process.code & ")\n" & process.output.diagnosticText())
 
-proc pack*(project: Project, target, output: string, binaryOverride = ""): seq[string] =
+proc pack*(project: Project, target, output: string, binaryOverride = "", backend = ""): seq[string] =
+  let selected = if backend.len == 0: project.backend else: parseBackend(backend)
+  if selected == backendNative: fail("A3 native packaging not implemented")
   let targets = if target == "all": @["linux", "macos", "windows"] else: @[target]
   for item in targets:
     if item notin ["linux", "macos", "windows"]: fail("unknown release target: " & item)

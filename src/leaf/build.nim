@@ -1,5 +1,5 @@
 ## A build can be polled while the previous desktop process continues running.
-import std/[os, strutils]
+import std/[os, strutils, options]
 import ./[core, project, process_io, gpui_build, sdk]
 import ./orm_config
 when defined(windows): import ./[windows_paths, windows_manifest]
@@ -30,13 +30,17 @@ proc compilerBase(sources, cache, binary: string, isolatedConfig: bool): seq[str
   if isolatedConfig: result.add(@["--skipParentCfg:on", "--skipUserCfg:on"])
   for argument in ormCompilerArgs(sources): result.add(argument.replace("$", "$$"))
 
-proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedConfig = false): BuildJob =
+proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedConfig = false,
+                 selection: Option[BuildSelection] = none(BuildSelection)): BuildJob =
+  let selected = selection.get(resolveBuild(project.backend))
+  selected.validateHost()
   let directory = if cacheDirectory.len == 0: project.root / "target" / "nim" else: absolutePath(cacheDirectory)
   createDir(directory)
   result = BuildJob(binary: if output.len == 0: directory / "app".addFileExt(ExeExt)
     else: absolutePath(output.addFileExt(ExeExt)))
-  result.bridge = ensureGpui()
-  stageGpui(result.bridge, result.binary)
+  if not selected.headlessOnly and selected.backend == backendGpui:
+    result.bridge = ensureGpui()
+    stageGpui(result.bridge, result.binary)
   var executable = compiler()
   var sources = libraryPath()
   var cache = directory / "cache"
@@ -51,6 +55,8 @@ proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedCon
     entry = compilerPath(entry)
   # Nim expands dollar variables in path switches independently of the shell.
   var args = compilerBase(sources, cache, binary, isolatedConfig)
+  if selected.headlessOnly: args.add("-d:leafHeadlessOnly")
+  elif selected.backend == backendNative: args.add("-d:leafNativeWin32")
   when defined(windows):
     let bundledGcc = sdkGcc()
     var gcc=bundledGcc
@@ -72,7 +78,8 @@ proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedCon
         gcc=gccFromBuildScript(cache / binary.extractFilename.changeFileExt("json"))
       finally:discover.close()
     let objectPath = compileWindowsManifest(sources, cache, gcc)
-    args.add("--passL:" & quoteShell(compilerPath(objectPath)).replace("$", "$$"))
+    # --passL is opaque to Nim; unlike path switches it does not expand dollars.
+    args.add("--passL:" & quoteShell(compilerPath(objectPath)))
   args.add(entry)
   result.process = startManaged(executable, args, project.root)
 
@@ -110,10 +117,10 @@ proc output*(job: BuildJob): string = job.process.output.diagnosticText()
 proc close*(job: BuildJob) =
   if job != nil: job.process.close()
 
-proc build*(project: Project, output = ""): string =
+proc build*(project: Project, output = "", selection: Option[BuildSelection] = none(BuildSelection)): string =
   beginInterruptHandling()
   defer: endInterruptHandling()
-  let job = startBuild(project, output)
+  let job = startBuild(project, output, selection = selection)
   defer: job.close()
   while not job.pollBuild():
     if wasInterrupted(): raise newException(ProcessInterruptedError, "build interrupted")

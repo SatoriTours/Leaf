@@ -1,7 +1,7 @@
 ## Native application harness shared by examples and compiled user projects.
 ## Event commands execute in order, then emit the last successful snapshot.
 import std/[os, strutils, json]
-import ./[core, diagnostics, developer_options]
+import ./[core, diagnostics, developer_options, styles]
 
 proc helpText*(): string =
   """Leaf Nim application
@@ -28,7 +28,9 @@ proc runHeadless*(app: Application, args: seq[string]): int =
     var i = 0
     var includeStats = false
     var checkOnly = false
-    let runtime = newRuntime(app, diagnostics = diagnostics)
+    let runtime = newRuntime(app,
+      validator = proc(snapshot: Snapshot) = validateProps(snapshot.root),
+      diagnostics = diagnostics)
     proc next(): string =
       inc i
       if i >= args.len: fail("missing argument for " & args[i - 1])

@@ -47,6 +47,19 @@ suite "Main EXE DPI resource":
     writeFile(script, $(%*{"compile":[["main.c",quoteShell(gcc) & " -c main.c"]],"linkcmd":"cl.exe /Fe:app main.obj"}))
     expect CatchableError:discard gccFromBuildScript(script)
 
+  test "bare GCC command is found on PATH rather than relative to build JSON":
+    let tools = base / "bare command tools"
+    createDir(tools)
+    let gcc = tools / "gcc.exe"
+    writeFile(gcc, "fixture compiler")
+    let previous = getEnv("PATH")
+    putEnv("PATH", tools & PathSep & previous)
+    defer: putEnv("PATH", previous)
+    let script = base / "bare-command.json"
+    writeFile(script, $(%*{"compile":[["main.c","gcc.exe -c main.c"]],
+      "linkcmd":"gcc.exe -o app main.o", "currentDir":base}))
+    check gccFromBuildScript(script) == absolutePath(gcc)
+
   test "manifest declares PMv2 in correct namespaces":
     verifyManifest(readFile(templatePath))
   when not defined(windows):

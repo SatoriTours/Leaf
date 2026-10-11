@@ -17,10 +17,16 @@ type
     separator, spinner, virtualList
   EventKind* = enum
     click, change, submit
+  CompositionPhase* = enum
+    ## Additive native IME/editing phase metadata. `compositionNone` is the
+    ## default so existing events and JSON are unchanged.
+    compositionNone, compositionStart, compositionUpdate, compositionResult,
+    compositionEnd
   Event* = object
     kind*: EventKind
     value*: string
     checked*: bool
+    composition*: CompositionPhase
   Callback* = proc(event: Event) {.closure.}
   Styles* = Table[string, string]
   Node* = ref object
@@ -90,9 +96,30 @@ type
     rowClock: uint64
     validator: SnapshotValidator
     preparer: RuntimePreparer
+    committer: RuntimeCommitter
+    committerLifecycle: RuntimeInstallLifecycle
+    committerOwner: uint64
+    preparerOwner: uint64
+    hookCounter: uint64
+    revision: uint64
+    proposed: uint64
+    stagingChanged: bool
+    eventsFrozen: bool
+    frozenReason: string
+    isCandidate: bool
+    hookInstallation: bool
     descriptionBytes: int
     diagnostics: Diagnostics
   RuntimePreparer* = proc(candidate: Runtime) {.closure.}
+  RuntimeCommitter* = proc(accepted: Runtime, candidate: Runtime) {.closure.}
+  RuntimeInstallLifecycle* = object
+    ## Optional Native installation lifecycle, owned by the installed committer.
+    ## confirm publishes only framework metadata after successful scope exit.
+    ## abort(true) runs inside the application scope to restore Native state;
+    ## abort(false) may only fault/freeze metadata if that scope refused entry.
+    ## Neither callback renders or invokes business callbacks.
+    confirm*: proc() {.closure.}
+    abort*: proc(scoped: bool) {.closure.}
 
 proc fail*(message: string) {.noreturn.} =
   raise newException(UiError, message)
@@ -284,7 +311,86 @@ template inExecutionScope(runtime: Runtime, body: untyped) =
   else:
     runtime.app.executionScope(proc() = body)
 
+proc acceptedRevision*(runtime: Runtime): uint64 = runtime.revision
+
+proc installingUpdate*(runtime: Runtime): bool = runtime.inUpdate
+
+proc installingHook*(runtime: Runtime): bool = runtime.hookInstallation
+
+proc committerOwner*(runtime: Runtime): uint64 = runtime.committerOwner
+
+proc preparerOwner*(runtime: Runtime): uint64 = runtime.preparerOwner
+
+proc proposedRevision*(runtime: Runtime): uint64 = runtime.proposed
+
+proc stagingChanged*(runtime: Runtime): bool = runtime.stagingChanged
+
+proc eventsFrozen*(runtime: Runtime): bool = runtime.eventsFrozen
+
+proc freezeEvents*(runtime: Runtime, reason: string) =
+  ## Permanently freeze business dispatch after an unrecoverable backend
+  ## failure. A1 deliberately provides no automatic thaw.
+  runtime.eventsFrozen = true
+  runtime.frozenReason = reason
+
+proc safeDump(runtime: Runtime) =
+  if runtime.diagnostics == nil: return
+  try:
+    runtime.dump()
+  except CatchableError as error:
+    stderr.writeLine("leaf: post-commit dump failed: " & error.msg)
+
+proc candidateFrom(runtime: Runtime): Runtime =
+  ## Isolated staging copy of the currently accepted description. The mount
+  ## structure is shared read-only; list preparation rebuilds changed paths
+  ## instead of mutating shared MountedNodes. The candidate carries no
+  ## committer, so nested preparation never recurses into the outer gate.
+  Runtime(app: runtime.app, current: runtime.current, index: runtime.index,
+    keys: runtime.keys, rowCaches: runtime.rowCaches, counters: runtime.counters,
+    rowClock: runtime.rowClock, validator: runtime.validator,
+    revision: runtime.revision, descriptionBytes: runtime.descriptionBytes,
+    isCandidate: true)
+
+proc markStaged(runtime: Runtime) =
+  ## Record that an isolated staging runtime produced an actual prepared
+  ## result. The first visible change allocates the proposed revision; any
+  ## later preparation during the same staging never advances it again.
+  runtime.stagingChanged = true
+  if runtime.proposed == 0:
+    runtime.proposed = runtime.revision + 1
+
+proc publishCandidate(runtime: Runtime, candidate: Runtime, proposed: uint64) =
+  ## Move accepted state only. The external callback has already run exactly
+  ## once; this never renders or re-invokes the committer.
+  runtime.current = candidate.current
+  runtime.index = move(candidate.index)
+  runtime.keys = move(candidate.keys)
+  runtime.rowCaches = move(candidate.rowCaches)
+  runtime.rowClock = candidate.rowClock
+  runtime.counters = candidate.counters
+  runtime.descriptionBytes = candidate.descriptionBytes
+  runtime.revision = proposed
+
+proc gateAndPublish(runtime: Runtime, candidate: Runtime) =
+  ## The single publish boundary. The proposed revision is allocated before
+  ## the external callback and stays stable for the whole staging, so nested
+  ## candidate preparation cannot advance it. A successful publication
+  ## advances the accepted revision by exactly one.
+  let proposed = runtime.revision + 1
+  candidate.proposed = proposed
+  if runtime.committer != nil:
+    runtime.committer(runtime, candidate)
+  runtime.publishCandidate(candidate, proposed)
+
+proc postCommitDiagnostics(runtime: Runtime) =
+  ## Diagnostics run after acceptance. Their failure must never look like a
+  ## rejected commit; Diagnostics reports IO errors on stderr itself.
+  if runtime.diagnostics == nil: return
+  runtime.diagnostics.record("render", "ok", %*{"nodes": runtime.counters.mountedNodes})
+  runtime.safeDump()
+
 proc refreshImpl(runtime: Runtime): bool =
+  if runtime.isCandidate: fail("candidate runtime cannot render")
   if runtime.inUpdate: fail("reentrant runtime update")
   runtime.inUpdate = true
   let ctx = runtime.context
@@ -314,41 +420,25 @@ proc refreshImpl(runtime: Runtime): bool =
     if runtime.validator != nil: runtime.validator(snapshot)
     # Stage lazy renderer content in an isolated candidate. Preparation may
     # materialize lists and fail without changing the published event index.
-    if runtime.preparer != nil:
-      let candidate = Runtime(app: runtime.app, current: snapshot,
-        index: move(index), keys: move(keys), rowCaches: move(rowCaches),
-        counters: runtime.counters, rowClock: runtime.rowClock, validator: runtime.validator,
-        descriptionBytes: descriptionBytes)
-      candidate.counters.cachedItems = cachedItems
-      candidate.counters.cachedRowBytes = cachedBytes
-      candidate.counters.mountedNodes = count
-      candidate.counters.treeBytes = bytes
-      runtime.preparer(candidate)
-      runtime.current = candidate.current
-      runtime.index = move(candidate.index)
-      runtime.keys = move(candidate.keys)
-      runtime.rowCaches = move(candidate.rowCaches)
-      runtime.rowClock = candidate.rowClock
-      runtime.counters = candidate.counters
-    else:
-      runtime.current = snapshot
-      runtime.index = move(index)
-      runtime.keys = move(keys)
-      runtime.rowCaches = move(rowCaches)
-      runtime.counters.cachedItems = cachedItems
-      runtime.counters.cachedRowBytes = cachedBytes
-      runtime.counters.mountedNodes = count
-      runtime.counters.treeBytes = bytes
-    runtime.descriptionBytes = descriptionBytes
+    # The backend gate runs after preparation and before publication; a
+    # rejected candidate leaves snapshot, index, caches and revision untouched.
+    var candidate = Runtime(app: runtime.app, current: snapshot,
+      index: move(index), keys: move(keys), rowCaches: move(rowCaches),
+      counters: runtime.counters, rowClock: runtime.rowClock, validator: runtime.validator,
+      revision: runtime.revision, descriptionBytes: descriptionBytes, isCandidate: true)
+    candidate.counters.cachedItems = cachedItems
+    candidate.counters.cachedRowBytes = cachedBytes
+    candidate.counters.mountedNodes = count
+    candidate.counters.treeBytes = bytes
+    if runtime.preparer != nil: runtime.preparer(candidate)
+    runtime.gateAndPublish(candidate)
     ctx.previous = move(ctx.candidate)
     inc runtime.counters.renders
     runtime.counters.builtNodes += uint64(count)
     runtime.counters.cacheHits += uint64(ctx.hits)
     runtime.counters.cacheMisses += uint64(ctx.misses)
     runtime.counters.cachedSubtrees = ctx.previous.len
-    if runtime.diagnostics != nil:
-      runtime.diagnostics.record("render", "ok", %*{"nodes": runtime.counters.mountedNodes})
-      runtime.dump()
+    runtime.postCommitDiagnostics()
     result = true
   except CatchableError as error:
     if runtime.diagnostics != nil: runtime.diagnostics.record("render", "error", %*{"message": error.msg})
@@ -395,24 +485,106 @@ proc setValidatorImpl(runtime: Runtime, validator: SnapshotValidator) =
 proc setValidator*(runtime: Runtime, validator: SnapshotValidator) =
   inExecutionScope(runtime): runtime.setValidatorImpl(validator)
 
-proc prepareSnapshotImpl(runtime: Runtime, preparer: RuntimePreparer) =
-  if runtime.inUpdate: fail("cannot replace preparer during update")
-  if preparer != nil:
-    let candidate = Runtime(app: runtime.app, current: runtime.current,
-      index: runtime.index, keys: runtime.keys, rowCaches: runtime.rowCaches,
-      counters: runtime.counters, rowClock: runtime.rowClock, validator: runtime.validator,
-      descriptionBytes: runtime.descriptionBytes)
-    runtime.inUpdate = true
+proc abortInstallation(runtime: Runtime, lifecycle: RuntimeInstallLifecycle,
+                       primary: ref CatchableError) =
+  if lifecycle.abort == nil: return
+  var entered = false
+  try:
+    inExecutionScope(runtime):
+      entered = true
+      lifecycle.abort(true)
+  except CatchableError as secondary:
+    primary.msg.add("; installation abort failed: " & secondary.msg)
+    if not entered:
+      # No Native operations or hook removal may bypass a refused scope.
+      try: lifecycle.abort(false)
+      except CatchableError as failure:
+        primary.msg.add("; installation fault notification failed: " & failure.msg)
+
+proc installCommitter*(runtime: Runtime, committer: RuntimeCommitter,
+                      lifecycle = default(RuntimeInstallLifecycle)): uint64 =
+  ## Stage the accepted description and call the backend inside the application
+  ## execution scope, without rendering business state. Publish prepared rows
+  ## and the hook only after the scope has successfully exited. Holding the
+  ## update guard through scope exit prevents reentrant installation/publication.
+  ## A failed install leaves description, revision and hook ownership unchanged.
+  if runtime.isCandidate: fail("candidate runtime cannot install a committer")
+  if runtime.inUpdate: fail("cannot replace committer during update")
+  if committer != nil and runtime.committer != nil:
+    fail("committer already installed; unload the existing session first")
+  if (lifecycle.confirm == nil) != (lifecycle.abort == nil):
+    fail("installation lifecycle requires both confirm and abort")
+  var candidate: Runtime
+  if committer != nil:
+    candidate = runtime.candidateFrom()
+    candidate.hookInstallation = true
+  var committed = false
+  runtime.inUpdate = true
+  try:
     try:
-      preparer(candidate)
-      runtime.current = candidate.current
-      runtime.index = move(candidate.index)
-      runtime.keys = move(candidate.keys)
-      runtime.rowCaches = move(candidate.rowCaches)
-      runtime.counters = candidate.counters
-      runtime.rowClock = candidate.rowClock
-      runtime.dump()
-    finally: runtime.inUpdate = false
+      inExecutionScope(runtime):
+        if committer != nil:
+          committer(nil, candidate)
+          committed = true
+      if committed and lifecycle.confirm != nil: lifecycle.confirm()
+    except CatchableError as error:
+      if committed: runtime.abortInstallation(lifecycle, error)
+      raise error
+    # Framework confirmation has completed; publication invokes no business
+    # callback and remains protected by the same update guard.
+    if committer == nil:
+      runtime.committer = nil
+      runtime.committerOwner = 0
+      runtime.committerLifecycle = default(RuntimeInstallLifecycle)
+      return 0
+    if candidate.stagingChanged:
+      runtime.publishCandidate(candidate, candidate.proposed)
+      runtime.safeDump()
+    runtime.committer = committer
+    inc runtime.hookCounter
+    runtime.committerOwner = runtime.hookCounter
+    runtime.committerLifecycle = lifecycle
+    result = runtime.committerOwner
+  finally:
+    runtime.inUpdate = false
+
+proc setCommitter*(runtime: Runtime, committer: RuntimeCommitter) =
+  ## Backward-compatible entry point. Use `installCommitter` when the caller
+  ## must later uninstall only its own hook.
+  discard runtime.installCommitter(committer)
+
+proc clearCommitterImpl(runtime: Runtime, owner: uint64): bool =
+  if owner == 0 or runtime.committerOwner != owner: return false
+  if runtime.isCandidate: fail("candidate runtime cannot uninstall a committer")
+  if runtime.inUpdate: fail("cannot uninstall committer during update")
+  runtime.committer = nil
+  runtime.committerOwner = 0
+  runtime.committerLifecycle = default(RuntimeInstallLifecycle)
+  true
+
+proc clearCommitter*(runtime: Runtime, owner: uint64) =
+  ## Uninstall the committer only when it is still the one identified by
+  ## `owner`. A stale session can never remove another session's hook. The
+  ## actual uninstall runs inside the application execution scope and is
+  ## rejected during an update or on a candidate, exactly like installation.
+  if owner == 0 or runtime.committerOwner != owner: return
+  var cleared: bool
+  inExecutionScope(runtime): cleared = runtime.clearCommitterImpl(owner)
+  discard cleared
+
+proc prepareSnapshotImpl(runtime: Runtime, preparer: RuntimePreparer) =
+  if runtime.isCandidate: fail("candidate runtime cannot prepare")
+  if runtime.inUpdate: fail("cannot replace preparer during update")
+  if preparer == nil: return
+  var candidate = runtime.candidateFrom()
+  runtime.inUpdate = true
+  try:
+    preparer(candidate)
+    # A no-op preparer must not invoke the backend gate or advance revision.
+    if candidate.stagingChanged:
+      runtime.gateAndPublish(candidate)
+      runtime.safeDump()
+  finally: runtime.inUpdate = false
 
 proc prepareSnapshot(runtime: Runtime, preparer: RuntimePreparer) =
   inExecutionScope(runtime): runtime.prepareSnapshotImpl(preparer)
@@ -421,11 +593,63 @@ proc prepare*(runtime: Runtime) =
   ## Reprepare a viewport without rendering business state, atomically.
   runtime.prepareSnapshot(runtime.preparer)
 
+proc installPreparer*(runtime: Runtime, preparer: RuntimePreparer): uint64 =
+  ## Prepare and confirm an isolated candidate in the application execution
+  ## scope; publish the candidate and hook only after successful scope exit.
+  ## A failing replacement retains the previous preparer and accepted state.
+  if runtime.isCandidate: fail("candidate runtime cannot prepare")
+  if runtime.inUpdate: fail("cannot replace preparer during update")
+  var candidate = runtime.candidateFrom()
+  candidate.hookInstallation = true
+  # Capture this owner's lifecycle; stale clears cannot detach a successor's.
+  let lifecycle = runtime.committerLifecycle
+  var committed = false
+  runtime.inUpdate = true
+  try:
+    try:
+      inExecutionScope(runtime):
+        if preparer != nil: preparer(candidate)
+        if candidate.stagingChanged:
+          candidate.proposed = runtime.revision + 1
+          if runtime.committer != nil:
+            runtime.committer(runtime, candidate)
+            committed = true
+      if committed and lifecycle.confirm != nil: lifecycle.confirm()
+    except CatchableError as error:
+      if committed: runtime.abortInstallation(lifecycle, error)
+      raise error
+    if candidate.stagingChanged:
+      runtime.publishCandidate(candidate, candidate.proposed)
+      runtime.safeDump()
+    runtime.preparer = preparer
+    inc runtime.hookCounter
+    runtime.preparerOwner = runtime.hookCounter
+    result = runtime.preparerOwner
+  finally:
+    runtime.inUpdate = false
+
 proc setPreparer*(runtime: Runtime, preparer: RuntimePreparer) =
   ## Prepare lazy content before publication. Never mutate visible controls
   ## or business state; temporary measurement controls may be constructed.
-  runtime.prepareSnapshot(preparer)
-  runtime.preparer = preparer
+  ## Backward-compatible entry point.
+  discard runtime.installPreparer(preparer)
+
+proc clearPreparerImpl(runtime: Runtime, owner: uint64): bool =
+  if owner == 0 or runtime.preparerOwner != owner: return false
+  if runtime.isCandidate: fail("candidate runtime cannot uninstall a preparer")
+  if runtime.inUpdate: fail("cannot uninstall preparer during update")
+  runtime.preparer = nil
+  runtime.preparerOwner = 0
+  true
+
+proc clearPreparer*(runtime: Runtime, owner: uint64) =
+  ## Uninstall the preparer only when it is still the one identified by
+  ## `owner`. The actual uninstall runs inside the application execution scope
+  ## and is rejected during an update or on a candidate.
+  if owner == 0 or runtime.preparerOwner != owner: return
+  var cleared: bool
+  inExecutionScope(runtime): cleared = runtime.clearPreparerImpl(owner)
+  discard cleared
 
 proc find*(runtime: Runtime, key: string): MountedNode =
   if key in runtime.index: return runtime.index[key]
@@ -434,6 +658,9 @@ proc find*(runtime: Runtime, key: string): MountedNode =
   runtime.keys[key][0]
 
 proc dispatchImpl(runtime: Runtime, key: string, event: Event): bool =
+  if runtime.eventsFrozen:
+    fail("business events are frozen: " & runtime.frozenReason)
+  if runtime.isCandidate: fail("candidate runtime cannot dispatch business events")
   if runtime.inUpdate: fail("reentrant event dispatch")
   let n = runtime.find(key).description
   if n.inactive: return false
@@ -459,9 +686,9 @@ proc dispatch*(runtime: Runtime, key: string, event: Event): bool =
   inExecutionScope(runtime): completed = runtime.dispatchImpl(key, event)
   completed
 
-proc materializeImpl(runtime: Runtime, key: string, first, finish: int,
-                  protected: seq[int] = @[]): seq[MountedNode] =
-  ## A complete list viewport is committed atomically. Only visible/protected
+proc materializeInto(runtime: Runtime, key: string, first, finish: int,
+                  protected: seq[int]): seq[MountedNode] =
+  ## Apply a complete list viewport to a staging runtime. Only visible/protected
   ## rows are mounted; up to 128 rows stay warm, without live event handlers.
   if runtime.inUpdate: fail("reentrant list request")
   let target = runtime.find(key)
@@ -579,6 +806,25 @@ proc materializeImpl(runtime: Runtime, key: string, first, finish: int,
     for mounted in descendants:
       if mounted.itemIndex >= first and mounted.itemIndex < finish: result.add(mounted)
     runtime.dump()
+  finally:
+    runtime.inUpdate = false
+
+proc materializeImpl(runtime: Runtime, key: string, first, finish: int,
+                  protected: seq[int] = @[]): seq[MountedNode] =
+  ## The accepted viewport travels through the same commit gate as refresh and
+  ## prepare; a rejected list candidate leaves accepted rows and stats intact.
+  ## Preparing an isolated candidate is allowed and only stages its own state.
+  if runtime.inUpdate: fail("reentrant list request")
+  if runtime.isCandidate:
+    result = materializeInto(runtime, key, first, finish, protected)
+    runtime.markStaged()
+    return
+  var candidate = runtime.candidateFrom()
+  runtime.inUpdate = true
+  try:
+    result = materializeInto(candidate, key, first, finish, protected)
+    runtime.gateAndPublish(candidate)
+    runtime.safeDump()
   finally:
     runtime.inUpdate = false
 
