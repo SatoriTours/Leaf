@@ -129,6 +129,7 @@ impl HostStore {
     pub fn root(&self) -> u64 {
         self.root
     }
+    pub fn nodes(&self) -> impl Iterator<Item=&HostNode> { self.nodes.values() }
     pub fn node(&self, id: u64) -> Option<&HostNode> {
         self.nodes.get(&id)
     }

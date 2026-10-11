@@ -495,6 +495,7 @@ pub unsafe fn decode_batch(batch: &LeafBatch) -> Result<DecodedBatch<'_>, AbiErr
                 .and_then(|c| n.checked_add(c))
         })
         .and_then(|n| n.checked_add(batch.strings_len))
+        .and_then(|n| n.checked_add(size_of::<LeafBatch>() as u64))
         .ok_or_else(|| invalid("wire size overflow"))?;
     if total > LEAF_V2_MAX_WIRE_BYTES {
         return Err(invalid("wire budget exceeded"));
@@ -518,7 +519,7 @@ pub unsafe fn decode_batch(batch: &LeafBatch) -> Result<DecodedBatch<'_>, AbiErr
         }
         match op.tag {
             1 | 2 => {
-                if op.kind > 12 || op.handle == 0 {
+                if op.kind > 11 || op.handle == 0 {
                     return Err(invalid("invalid host kind/handle"));
                 }
                 validate_props(&op.props)?;

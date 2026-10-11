@@ -1,6 +1,12 @@
 use crate::model::{Response, Snapshot};
 use serde_json::{Value, json};
 use std::ffi::{CStr, c_char, c_void};
+#[cfg(test)]
+thread_local! { static JSON_BRIDGE_CALLS: std::cell::Cell<u64> = const {std::cell::Cell::new(0)}; }
+#[cfg(test)]
+pub(crate) fn json_bridge_calls() -> u64 {
+    JSON_BRIDGE_CALLS.get()
+}
 pub type Callback = unsafe extern "C" fn(*mut c_void, *const u8, usize) -> *const c_char;
 #[derive(Clone, Copy)]
 pub struct Bridge {
@@ -9,6 +15,8 @@ pub struct Bridge {
 }
 impl Bridge {
     fn request_value(&self, value: Value) -> Result<Value, String> {
+        #[cfg(test)]
+        JSON_BRIDGE_CALLS.set(JSON_BRIDGE_CALLS.get() + 1);
         let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
         let pointer = unsafe { (self.callback)(self.context, bytes.as_ptr(), bytes.len()) };
         if pointer.is_null() {

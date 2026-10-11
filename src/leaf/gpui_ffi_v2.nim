@@ -59,14 +59,14 @@ const
   LEAF_REQUEST_RENDERING* = 6'u64
   LEAF_REQUEST_FRAME* = 7'u64
 type
-  LeafPrepareFn* = proc(ctx: pointer, batch: ptr LeafBatch, error: ptr LeafError): int32 {.cdecl.}
-  LeafApplyFn* = proc(ctx: pointer, error: ptr LeafError): int32 {.cdecl.}
-  LeafAcceptFn* = proc(ctx: pointer, revision: uint64) {.cdecl.}
-  LeafDiscardFn* = proc(ctx: pointer) {.cdecl.}
-  LeafAttachFn* = proc(ctx: pointer, api: ptr LeafRendererApi, renderer_ctx: pointer, error: ptr LeafError): int32 {.cdecl.}
-  LeafRequestFn* = proc(ctx: pointer, request: ptr LeafRequest, reply: ptr LeafReply, error: ptr LeafError): int32 {.cdecl.}
-  LeafDetachFn* = proc(ctx: pointer) {.cdecl.}
-  LeafRunFn* = proc(config: ptr LeafConfig, callbacks: ptr LeafHostCallbacks, ctx: pointer, error: ptr LeafError): int32 {.cdecl.}
+  LeafPrepareFn* = proc(ctx: pointer, batch: ptr LeafBatch, error: ptr LeafError): int32 {.cdecl, raises: [].}
+  LeafApplyFn* = proc(ctx: pointer, error: ptr LeafError): int32 {.cdecl, raises: [].}
+  LeafAcceptFn* = proc(ctx: pointer, revision: uint64) {.cdecl, raises: [].}
+  LeafDiscardFn* = proc(ctx: pointer) {.cdecl, raises: [].}
+  LeafAttachFn* = proc(ctx: pointer, api: ptr LeafRendererApi, renderer_ctx: pointer, error: ptr LeafError): int32 {.cdecl, raises: [].}
+  LeafRequestFn* = proc(ctx: pointer, request: ptr LeafRequest, reply: ptr LeafReply, error: ptr LeafError): int32 {.cdecl, raises: [].}
+  LeafDetachFn* = proc(ctx: pointer) {.cdecl, raises: [].}
+  LeafRunFn* = proc(config: ptr LeafConfig, callbacks: ptr LeafHostCallbacks, ctx: pointer, error: ptr LeafError): int32 {.cdecl, raises: [].}
   LeafBytes* {.bycopy.} = object
     `ptr`*: ptr uint8
     len*: uint64

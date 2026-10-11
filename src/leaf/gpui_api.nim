@@ -1,10 +1,11 @@
 ## GPUI Kit bridge is loaded only when a desktop window is requested.
-import std/[dynlib,os,strutils]
-import ./[core,native_library,sdk]
+import std/[dynlib,os,strutils,options]
+import ./[core,native_library,sdk,gpui_ffi_v2]
 type
   GpuiCallback* = proc(context:pointer,data:ptr uint8,len:csize_t):cstring {.cdecl.}
   GpuiApi* = ref object
     library:LibHandle
+    v2*:Option[LeafGpuiApiV2]
     abi*:proc():cuint {.cdecl.}
     frames*:proc(data:ptr uint8,len:csize_t,callback:GpuiCallback,context:pointer):cint {.cdecl.}
     run*:proc(data:ptr uint8,len:csize_t,callback:GpuiCallback,context:pointer):cint {.cdecl.}
@@ -14,8 +15,11 @@ const GpuiLibraryName* = when defined(windows):"leaf_gpui.dll"
 const FrameworkRoot* = currentSourcePath().parentDir.parentDir.parentDir
 var cachedApi:GpuiApi
 var cachedOverride:string
+var cachedSelection:string
 proc loadGpui*(path=""):GpuiApi =
-  if cachedApi!=nil and path.len==0 and cachedOverride==getEnv("LEAF_GPUI_LIBRARY"):return cachedApi
+  let selection=getEnv("LEAF_GPUI_ABI","auto")
+  if selection notin ["auto","1","2"]:fail("LEAF_GPUI_ABI must be auto, 1 or 2")
+  if cachedApi!=nil and path.len==0 and cachedOverride==getEnv("LEAF_GPUI_LIBRARY") and cachedSelection==selection:return cachedApi
   let override=if path.len>0:path else:getEnv("LEAF_GPUI_LIBRARY")
   let installed = sdkRoot()
   let candidates=if override.len>0: @[override] else: @[
@@ -36,9 +40,26 @@ proc loadGpui*(path=""):GpuiApi =
       unloadLib(library)
       fail("incompatible GPUI bridge: " & name)
     result=GpuiApi(library:library,abi:abi,run:run,frames:frames)
+    if selection!="1":
+      type QueryV2=proc(abi:uint32,api:ptr LeafGpuiApiV2,size:uint64,error:ptr LeafError):int32 {.cdecl.}
+      let query=cast[QueryV2](symAddr(library,"leaf_gpui_query_v2"))
+      if query==nil:
+        if selection=="2":
+          unloadLib(library)
+          fail("GPUI ABI 2 entry is missing: " & name)
+      else:
+        var table:LeafGpuiApiV2
+        var bytes:array[1024,uint8]
+        var error=LeafError(`ptr`:addr bytes[0],capacity:uint64(bytes.len))
+        let status=query(2,addr table,uint64(sizeof(table)),addr error)
+        if status!=0 or table.struct_size!=uint32(sizeof(table)) or table.abi!=2 or table.run==nil:
+          unloadLib(library)
+          fail("incompatible GPUI ABI 2 contract: " & name)
+        result.v2=some(table)
     if path.len==0:
       cachedApi=result
       cachedOverride=getEnv("LEAF_GPUI_LIBRARY")
+      cachedSelection=selection
     return
   fail("GPUI bridge could not be loaded: " & failures.join(", ") &
     "; run cargo build -p leaf-gpui or set LEAF_GPUI_LIBRARY")

@@ -150,12 +150,12 @@ HostChanges 的 upserts 为 seq[HostRecord]，removals 为 seq[NodeHandle]，chi
 
 **Interfaces:** `openGpuiSession(runtime: Runtime, api: GpuiApi): GpuiSession`；`attachHostSession(runtime: Runtime, consumer: HostConsumer): HostSession`；`close(session)`；`HostConsumer` 使用 prepare/apply/accept/discard 以及 session/owner，接受只发布元数据。新 `GpuiApi.v2` 可选；测试选择器 `LEAF_GPUI_ABI=auto|1|2`，2 缺入口时失败，auto 仅缺入口时退回。Rust query 输出任务 2 的函数表；run 创建空 HostStore，再经 attach 安装初始批次，随后启动窗口。detach 必须在 run 返回前清理 Nim hooks，关闭后不使用 rendererCtx。
 
-- [ ] **5.1 写失败测试**：C fixture 分别提供 old-only、valid-v2、incompatible-v2；auto/1/2 选择准确，旧 ABI 查询恒为 1。初始 attach 失败不启动窗口/ready；成功安装接受版本与 Runtime 一致；scope 收尾拒绝安装时 discard 并移除未安装 token；旧 owner 关闭不得卸载新 session。
+- [x] **5.1 写失败测试**：C fixture 分别提供 old-only、valid-v2、incompatible-v2；auto/1/2 选择准确，旧 ABI 查询恒为 1。初始 attach 失败不启动窗口/ready；成功安装接受版本与 Runtime 一致；scope 收尾拒绝安装时 discard 并移除未安装 token；旧 owner 关闭不得卸载新 session。
   各 fixture 均断言 `check api.abi() == 1`；初始安装失败的回调计数断言 `check readyCalls == 0`。
-- [ ] **5.2 运行**：`nim c -r --path:src --out:target/nim/test_gpui_v2_session tests/nim/test_gpui_v2_session.nim`；`cargo test -p leaf-gpui --locked bridge_v2::tests`，预期新增合同 FAIL。
-- [ ] **5.3 实现** 协商、Nim cdecl trampoline 与错误捕获、HostConsumer 事务适配；先 validate Nim candidate，再后端 prepare/apply，接受路径只执行无失败发布。request 返回实际 accepted revision 与拒绝/已接受后 scope 错误状态；event 用句柄/来源代数/序列，viewport 用 source generation/key；status/ready/locate/frame 不返回树。
-- [ ] **5.4 验证**：重复 5.2；`tests/nim/test_native_commit.nim` 原例 PASS，Rust 验证 callback/context 在 detach 后不可访问。请求/回调不持有 HostStore 借用跨 FFI。
-- [ ] **5.5 提交**：message `feat: negotiate typed GPUI sessions and commit ownership`。
+- [x] **5.2 运行**：`nim c -r --path:src --out:target/nim/test_gpui_v2_session tests/nim/test_gpui_v2_session.nim`；`cargo test -p leaf-gpui --locked bridge_v2::tests`，预期新增合同 FAIL。
+- [x] **5.3 实现** 协商、Nim cdecl trampoline 与错误捕获、HostConsumer 事务适配；先 validate Nim candidate，再后端 prepare/apply，接受路径只执行无失败发布。request 返回实际 accepted revision 与拒绝/已接受后 scope 错误状态；event 用句柄/来源代数/序列，viewport 用 source generation/key；status/ready/locate/frame 不返回树。
+- [x] **5.4 验证**：重复 5.2；`tests/nim/test_native_commit.nim` 原例 PASS，Rust 验证 callback/context 在 detach 后不可访问。请求/回调不持有 HostStore 借用跨 FFI。
+- [x] **5.5 提交**：message `feat: negotiate typed GPUI sessions and commit ownership`。
 
 ### Task 6: GPUI 从宿主记录渲染并接通旧应用 ABI 2
 
@@ -163,12 +163,12 @@ HostChanges 的 upserts 为 seq[HostRecord]，removals 为 seq[NodeHandle]，chi
 
 **Interfaces:** `HostView::new(store: Rc<RefCell<HostStore>>, boundary_id: u64, bridge: TypedBridge)`；`TypedBridge::request(&self, request: &LeafRequest) -> Result<HostReply, BridgeError>`；`apply_host_styles(element, props: &HostProps)`（按现有 GPUI element 类型返回）。Desktop 持有 legacy 或 typed renderer，typed 不访问 `model::Snapshot`；保留旧 Bridge/Node 给 ABI 1。InputSlot 按宿主句柄保存，事件内容在 Nim 同步调用期间有效；列表先复用当前行为但请求改成范围批量。
 
-- [ ] **6.1 写失败测试**：两种 ABI 同一计数器点击结果一致；中文输入/Enter/disabled、同值不重置选区、resetToken=7、拒绝后编辑恢复。100000 行仅请求 first=5000/finish=5050；首屏行失败不能 ready；status/ready/locate/rendering/frame 不 render/export Snapshot。测试计数器保证 typed 路径未调用 JSON parser/serializer。
+- [x] **6.1 写失败测试**：两种 ABI 同一计数器点击结果一致；中文输入/Enter/disabled、同值不重置选区、resetToken=7、拒绝后编辑恢复。100000 行仅请求 first=5000/finish=5050；首屏行失败不能 ready；status/ready/locate/rendering/frame 不 render/export Snapshot。测试计数器保证 typed 路径未调用 JSON parser/serializer。
   typed 请求测试安装编码/解析探针并断言 `check jsonCalls == 0`、`check statusSnapshotExports == 0`；这些探针不计入性能样本。
-- [ ] **6.2 运行**：`cargo test -p leaf-gpui --locked host_ui_tests`；`nim c -r --path:src --out:target/nim/test_gpui_v2_requests tests/nim/test_gpui_v2_requests.nim`，FAIL。
-- [ ] **6.3 实现** typed renderer 和控件同步安全点；属性不转回 string Styles；在 FFI 返回后创建/sync GPUI entities。暂不开 cached，先用持久句柄保证行为正确；ABI 1 继续原实现，ABI 2 支持旧 Application.render。
-- [ ] **6.4 验证**：重复 6.2；`cargo build --locked -p leaf-gpui`；分别设 ABI=1/2 运行 `nim c -r --out:target/nim/native_test scripts/native_test.nim`。两次真实窗口均 PASS 才通过批次 A；缺窗口工具明确 NotRun。
-- [ ] **6.5 提交**：message `feat: render GPUI from typed host updates`。批次 A 报告只宣称桥接增量，旧根刷新仍可能全树计算。
+- [x] **6.2 运行**：`cargo test -p leaf-gpui --locked host_ui_tests`；`nim c -r --path:src --out:target/nim/test_gpui_v2_requests tests/nim/test_gpui_v2_requests.nim`，FAIL。
+- [x] **6.3 实现** typed renderer 和控件同步安全点；属性不转回 string Styles；在 FFI 返回后创建/sync GPUI entities。暂不开 cached，先用持久句柄保证行为正确；ABI 1 继续原实现，ABI 2 支持旧 Application.render。
+- [x] **6.4 验证**：重复 6.2；`cargo build --locked -p leaf-gpui`；分别设 ABI=1/2 运行 `nim c -r --out:target/nim/native_test scripts/native_test.nim`。两次真实窗口均 PASS 才通过批次 A；缺窗口工具明确 NotRun。
+- [x] **6.5 提交**：message `feat: render GPUI from typed host updates`。批次 A 报告只宣称桥接增量，旧根刷新仍可能全树计算。
 
 ## 批次 B：托管组件、State 与局部协调
 

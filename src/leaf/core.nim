@@ -572,6 +572,14 @@ proc clearCommitter*(runtime: Runtime, owner: uint64) =
   inExecutionScope(runtime): cleared = runtime.clearCommitterImpl(owner)
   discard cleared
 
+proc retireCommitterOwner*(runtime:Runtime,owner:uint64) {.raises:[].} =
+  ## Internal terminal FFI teardown: metadata only, after the external run has
+  ## ended. Never calls a scope, native operation, or business callback.
+  if owner!=0 and runtime.committerOwner==owner:
+    runtime.committer=nil
+    runtime.committerOwner=0
+    runtime.committerLifecycle=default(RuntimeInstallLifecycle)
+
 proc prepareSnapshotImpl(runtime: Runtime, preparer: RuntimePreparer) =
   if runtime.isCandidate: fail("candidate runtime cannot prepare")
   if runtime.inUpdate: fail("cannot replace preparer during update")
@@ -650,6 +658,12 @@ proc clearPreparer*(runtime: Runtime, owner: uint64) =
   var cleared: bool
   inExecutionScope(runtime): cleared = runtime.clearPreparerImpl(owner)
   discard cleared
+
+proc retirePreparerOwner*(runtime:Runtime,owner:uint64) {.raises:[].} =
+  ## Terminal FFI metadata cleanup, paired with retireCommitterOwner.
+  if owner!=0 and runtime.preparerOwner==owner:
+    runtime.preparer=nil
+    runtime.preparerOwner=0
 
 proc find*(runtime: Runtime, key: string): MountedNode =
   if key in runtime.index: return runtime.index[key]
@@ -862,6 +876,10 @@ proc toJson*(root: MountedNode): JsonNode =
     result["list"] = %*{"generation": n.source.generation, "count": n.source.len, "row_height": n.source.uniformHeight,
       "estimated_height": n.source.estimate, "overscan": n.source.extraRows}
 
+when defined(leafProtocolProbes):
+  var snapshotJsonCalls*:uint64
+
 proc toJson*(snapshot: Snapshot): JsonNode =
+  when defined(leafProtocolProbes):inc snapshotJsonCalls
   %*{"title": snapshot.title, "width": snapshot.width, "height": snapshot.height,
      "root": snapshot.root.toJson()}
