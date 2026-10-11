@@ -137,12 +137,12 @@ HostChanges 的 upserts 为 seq[HostRecord]，removals 为 seq[NodeHandle]，chi
 后者只发布已校验且被 Runtime 重入守卫保护的候选；accept 是验证+发布的测试/独立调用便利入口。
 后端已经接受后不能再调用一个可能报 stale 的发布函数。
 
-- [ ] **4.1 写失败测试**：同身份 update 保留句柄；换宿主祖先 kind 重建后代；丢弃 candidate 后旧 plan 不可复用；foreign/stale 拒绝；属性删除恢复默认；5000 key 逆序输出一个父级 setChildren，不输出 4999 次模拟 seq 搬移；受影响计数正确。
+- [x] **4.1 写失败测试**：同身份 update 保留句柄；换宿主祖先 kind 重建后代；丢弃 candidate 后旧 plan 不可复用；foreign/stale 拒绝；属性删除恢复默认；5000 key 逆序输出一个父级 setChildren，不输出 4999 次模拟 seq 搬移；受影响计数正确。
   逆序 fixture 导入 sequtils，断言 `check candidate.batch.ops.countIt(it.kind == HostOpKind.setChildren) == 1`；全体句柄前后集合相等。
-- [ ] **4.2 运行**：`nim c -r --path:src --out:target/nim/test_host_reconcile tests/nim/test_host_reconcile.nim`，FAIL。
-- [ ] **4.3 实现** 持久宿主记录与增量索引，legacy planSnapshot 允许全树访问；planDelta 仅访问变化记录/关系，接受前预留索引容量。两种入口共享同一身份账本，不平行维护两套句柄。
-- [ ] **4.4 验证**：重复 4.2，加跑 `tests/nim/test_native_reconcile.nim`；所有用例 PASS。记录 snapshot 路径仍全树，不误报局部计算完成。
-- [ ] **4.5 提交**：message `feat: reconcile host changes without quadratic reordering`。
+- [x] **4.2 运行**：`nim c -r --path:src --out:target/nim/test_host_reconcile tests/nim/test_host_reconcile.nim`，FAIL。
+- [x] **4.3 实现** 持久宿主记录与增量索引，legacy planSnapshot 允许全树访问；planDelta 仅访问变化记录/关系，接受前预留索引容量。两种入口共享同一身份账本，不平行维护两套句柄。
+- [x] **4.4 验证**：重复 4.2，加跑 `tests/nim/test_native_reconcile.nim`；所有用例 PASS。记录 snapshot 路径仍全树，不误报局部计算完成。
+- [x] **4.5 提交**：message `feat: reconcile host changes without quadratic reordering`。
 
 ### Task 5: 版本协商、会话生命周期与类型化请求
 
