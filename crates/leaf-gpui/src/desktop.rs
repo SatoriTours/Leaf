@@ -1,4 +1,6 @@
 use gpui_kit as gpui;
+#[cfg(feature = "native-test-support")]
+use gpui_kit::test::TestSupportExt;
 #[path = "lists.rs"]
 mod lists;
 #[path = "styles.rs"]
@@ -493,13 +495,15 @@ impl Desktop {
             }
             NodeKind::Input => {
                 if let Some(slot) = self.inputs.get(&node.id) {
-                    styles::apply(
-                        div()
+                    {
+                        let widget = div()
                             .id(id)
                             .min_w_0()
-                            .child(Input::new(&slot.state).disabled(node.disabled)),
-                        &node.styles,
-                    )
+                            .child(Input::new(&slot.state).disabled(node.disabled));
+                        #[cfg(feature = "native-test-support")]
+                        let widget = widget.test_support();
+                        styles::apply(widget, &node.styles)
+                    }
                     .into_any_element()
                 } else {
                     div().into_any_element()
@@ -510,6 +514,21 @@ impl Desktop {
 }
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "native-test-support")]
+        if std::env::var_os("LEAF_TEST_GEOMETRY").is_some() {
+            let weak = cx.entity().downgrade();
+            window.on_next_frame(move |window, app| {
+                let _ = weak.update(app, |view, cx| {
+                    let mut nodes = Vec::new();
+                    view.snapshot.root.walk(&mut nodes);
+                    let targets = nodes
+                        .into_iter()
+                        .map(|n| (n.id.clone(), n.id.clone()))
+                        .collect::<Vec<_>>();
+                    crate::native_probe::write(window, cx, targets.into_iter());
+                });
+            });
+        }
         self.sync_lists();
         self.sync_inputs(window, cx);
         let tree = self.render_node(&self.snapshot.root, cx);

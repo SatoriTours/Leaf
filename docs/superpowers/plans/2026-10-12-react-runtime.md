@@ -281,12 +281,12 @@ HostChanges 的 upserts 为 seq[HostRecord]，removals 为 seq[NodeHandle]，chi
 
 **Interfaces:** `BoundaryState { root_handle, layout_style, revision, dirty_reason }`，`DirtyReason` 明确区分内容/子项/外部布局/继承样式/全局刷新。`take_dirty_boundaries` 输出待通知边界；边界存在对应持久 Entity；边界内普通叶节点无独立 Entity。GPUI cached 仅使用可明确提供外部布局样式的边界，其他边界保守 render。
 
-- [ ] **12.1 写失败测试**：Counter 改变不执行静态 sibling HostView render；尺寸由 9→10 变宽时父布局正确；祖先尺寸、窗口 scale、主题/继承 text style 改变使相关 cached 失效；内容测量边界保守路径与无缓存结果相同。隐藏后显示、全局 refresh 不显示过期帧。
+- [x] **12.1 写失败测试**：Counter 改变不执行静态 sibling HostView render；尺寸由 9→10 变宽时父布局正确；祖先尺寸、窗口 scale、主题/继承 text style 改变使相关 cached 失效；内容测量边界保守路径与无缓存结果相同。隐藏后显示、全局 refresh 不显示过期帧。
   固定外部布局的 sibling fixture 断言 `assert_eq!(sibling_render_count, before_sibling_render_count)`；内容自动测量 fixture 不要求该计数不变，要求缓存开关两边的 bounds 相等。
-- [ ] **12.2 运行**：`cargo test -p leaf-gpui --locked host_ui_tests`，新增失效断言 FAIL。
-- [ ] **12.3 实现** Entity/AnyView.cached 边界、通知去重及 GPUI 安全点；直接读取 HostStore，不能为渲染临时重建完整嵌套 Node。保留可关闭缓存的测试开关 `LEAF_GPUI_CACHE=0|1` 用于行为对照。
-- [ ] **12.4 验证**：重复 12.2；真实窗口分别 CACHE=0/1 执行脚本，交互和几何结果一致。报告 HostView render/layout/frame 三类成本，缓存不可证明安全时不默认开启该类边界。
-- [ ] **12.5 提交**：message `perf: cache GPUI component host boundaries safely`。
+- [x] **12.2 运行**：`cargo test -p leaf-gpui --locked host_ui_tests`，新增失效断言 FAIL。
+- [x] **12.3 实现** Entity/AnyView.cached 边界、通知去重及 GPUI 安全点；直接读取 HostStore，不能为渲染临时重建完整嵌套 Node。保留可关闭缓存的测试开关 `LEAF_GPUI_CACHE=0|1` 用于行为对照。
+- [x] **12.4 验证**：重复 12.2；真实窗口分别 CACHE=0/1 执行脚本，交互和几何结果一致。报告 HostView render/layout/frame 三类成本，缓存不可证明安全时不默认开启该类边界。
+- [x] **12.5 提交**：message `perf: cache GPUI component host boundaries safely`。
 
 ### Task 13: 跨语言故障和真实平台回归
 

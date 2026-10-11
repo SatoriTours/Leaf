@@ -93,3 +93,30 @@ pub fn apply_host_styles<E: Styled>(mut element: E, props: &HostProps) -> E {
     }
     element
 }
+
+/// Only pixel-sized roots have a definite external layout. Content-sized and
+/// percentage-sized boundaries keep GPUI's normal measurement path.
+pub fn boundary_cache_style(props: &HostProps) -> Option<gpui_kit::StyleRefinement> {
+    let p = &props.values;
+    if p.present & (LEAF_P_WIDTH | LEAF_P_HEIGHT) != (LEAF_P_WIDTH | LEAF_P_HEIGHT)
+        || p.width.tag != 1
+        || p.height.tag != 1
+    {
+        return None;
+    }
+    let mut external = gpui_kit::div()
+        .w(px(p.width.value as f32))
+        .h(px(p.height.value as f32));
+    if p.present & LEAF_P_FLEX_GROW != 0 {
+        external.style().flex_grow = Some(p.numbers[2] as f32);
+    }
+    if p.present & LEAF_P_FLEX_SHRINK != 0 {
+        external.style().flex_shrink = Some(p.numbers[3] as f32);
+    }
+    if p.present & (LEAF_P_MIN_WIDTH | LEAF_P_MAX_WIDTH | LEAF_P_MIN_HEIGHT | LEAF_P_MAX_HEIGHT)
+        != 0
+    {
+        return None;
+    }
+    Some(external.style().clone())
+}

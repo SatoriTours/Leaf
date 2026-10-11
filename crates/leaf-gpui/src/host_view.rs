@@ -2,8 +2,8 @@
 use crate::{
     abi_v2::*,
     bridge_v2::{HostReply, TypedBridge},
-    host_store::{HostNode, HostStore},
-    host_styles::apply_host_styles,
+    host_store::{DirtyReason, HostNode, HostStore},
+    host_styles::{apply_host_styles, boundary_cache_style},
 };
 use gpui::component::{
     self as component, Disableable,
@@ -18,10 +18,13 @@ use gpui::component::{
 };
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, Focusable, KeyBinding, ListAlignment, ListOffset,
-    ListState, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, Window,
-    WindowBounds, WindowOptions, actions, div, list, prelude::*, px, rgb, size, uniform_list,
+    ListState, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, WeakEntity,
+    Window, WindowBounds, WindowOptions, actions, div, list, prelude::*, px, rgb, size,
+    uniform_list,
 };
 use gpui_kit as gpui;
+#[cfg(feature = "native-test-support")]
+use gpui_kit::test::TestSupportExt;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -55,14 +58,26 @@ struct ListSlot {
     failed: bool,
 }
 impl ListSlot {
-    fn accept_rows(&mut self,generation:u64,current:u64,rows:Vec<crate::bridge_v2::HostRow>)->bool {
-        if generation!=current || generation!=self.generation { return false; }
-        self.rows=rows.into_iter().map(|r|(r.index as usize,(r.handle,r.key))).collect();
+    fn accept_rows(
+        &mut self,
+        generation: u64,
+        current: u64,
+        rows: Vec<crate::bridge_v2::HostRow>,
+    ) -> bool {
+        if generation != current || generation != self.generation {
+            return false;
+        }
+        self.rows = rows
+            .into_iter()
+            .map(|r| (r.index as usize, (r.handle, r.key)))
+            .collect();
         true
     }
-    fn begin_finish(&mut self,generation:u64)->bool {
-        if generation!=self.generation {return false;}
-        self.scheduled=false;
+    fn begin_finish(&mut self, generation: u64) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        self.scheduled = false;
         true
     }
     fn new(p: &LeafProps) -> Self {
@@ -91,15 +106,26 @@ impl ListSlot {
         }
     }
 }
+#[derive(Default)]
+struct BoundaryCoordinator {
+    views: RefCell<HashMap<u64, WeakEntity<HostView>>>,
+    renders: RefCell<HashMap<u64, u64>>,
+}
 pub struct HostView {
     store: Rc<RefCell<HostStore>>,
     boundary_id: u64,
     bridge: TypedBridge,
-    inputs: HashMap<u64, InputSlot>,
-    lists: RefCell<HashMap<u64, ListSlot>>,
+    inputs: Rc<RefCell<HashMap<u64, InputSlot>>>,
+    lists: Rc<RefCell<HashMap<u64, ListSlot>>>,
+    coordinator: Rc<BoundaryCoordinator>,
+    boundaries: RefCell<HashMap<u64, Entity<HostView>>>,
+    cache_enabled: bool,
+    _theme_subscription: Option<Subscription>,
+    _quit_subscription: Option<Subscription>,
     error: Option<String>,
     settling: Option<u64>,
     ready_sent: bool,
+    closing: bool,
     _bounds_subscription: Option<Subscription>,
 }
 impl HostView {
@@ -108,11 +134,17 @@ impl HostView {
             store,
             boundary_id,
             bridge,
-            inputs: HashMap::new(),
-            lists: RefCell::new(HashMap::new()),
+            inputs: Rc::new(RefCell::new(HashMap::new())),
+            lists: Rc::new(RefCell::new(HashMap::new())),
+            coordinator: Rc::new(BoundaryCoordinator::default()),
+            boundaries: RefCell::new(HashMap::new()),
+            cache_enabled: std::env::var("LEAF_GPUI_CACHE").as_deref() != Ok("0"),
+            _theme_subscription: None,
+            _quit_subscription: None,
             error: None,
             settling: None,
             ready_sent: false,
+            closing: false,
             _bounds_subscription: None,
         }
     }
@@ -124,11 +156,91 @@ impl HostView {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self::new(store, boundary_id, bridge);
-        view._bounds_subscription = Some(cx.observe_window_bounds(window, |view, window, _| {
+        view._bounds_subscription = Some(cx.observe_window_bounds(window, |view, window, cx| {
             view.sample_rendering(window, LEAF_REQUEST_RENDERING);
+            view.refresh_boundaries(DirtyReason::ExternalLayout, cx);
+        }));
+        view._theme_subscription = Some(cx.observe_global::<component::Theme>(|view, cx| {
+            view.refresh_boundaries(DirtyReason::InheritedStyle, cx)
+        }));
+        view._quit_subscription = Some(cx.on_app_quit(|view, _| {
+            view.inputs.borrow_mut().clear();
+            view.lists.borrow_mut().clear();
+            view.boundaries.borrow_mut().clear();
+            view.coordinator.views.borrow_mut().clear();
+            async {}
         }));
         view.sync_inputs(window, cx);
         view
+    }
+    fn boundary_element(
+        &self,
+        id: u64,
+        props: &crate::host_store::HostProps,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let entity = {
+            let mut boundaries = self.boundaries.borrow_mut();
+            boundaries
+                .entry(id)
+                .or_insert_with(|| {
+                    let store = self.store.clone();
+                    let bridge = self.bridge.clone();
+                    let inputs = self.inputs.clone();
+                    let lists = self.lists.clone();
+                    let coordinator = self.coordinator.clone();
+                    let cache_enabled = self.cache_enabled;
+                    cx.new(|cx| {
+                        let mut view = HostView::new(store, id, bridge);
+                        view.inputs = inputs;
+                        view.lists = lists;
+                        view.coordinator = coordinator;
+                        view.cache_enabled = cache_enabled;
+                        view.coordinator
+                            .views
+                            .borrow_mut()
+                            .insert(id, cx.entity().downgrade());
+                        view
+                    })
+                })
+                .clone()
+        };
+        if self.cache_enabled {
+            if let Some(style) = boundary_cache_style(props) {
+                return entity.cached(style).into_any_element();
+            }
+        }
+        entity.into_any_element()
+    }
+    fn notify_dirty(&self, cx: &mut Context<Self>) {
+        let dirty = self.store.borrow_mut().take_dirty_boundaries();
+        if dirty.is_empty() {
+            return;
+        }
+        let mut views = Vec::new();
+        let registry = self.coordinator.views.borrow();
+        for id in dirty.into_iter().chain(std::iter::once(0)) {
+            if id == self.boundary_id {
+                cx.notify();
+                continue;
+            }
+            if let Some(view) = registry.get(&id) {
+                views.push(view.clone());
+            }
+        }
+        drop(registry);
+        for view in views {
+            let _ = view.update(cx, |_, cx| cx.notify());
+        }
+    }
+    fn refresh_boundaries(&self, reason: DirtyReason, cx: &mut Context<Self>) {
+        self.store.borrow_mut().invalidate_all(reason);
+        self.notify_dirty(cx);
+        cx.notify();
+    }
+    #[cfg(test)]
+    fn boundary_renders(&self, id: u64) -> u64 {
+        *self.coordinator.renders.borrow().get(&id).unwrap_or(&0)
     }
     fn accept(
         &mut self,
@@ -193,20 +305,16 @@ impl HostView {
         self.settling = Some(handle);
         self.sync_inputs(window, cx);
         self.settling = None;
+        self.notify_dirty(cx);
         cx.notify();
     }
     fn sync_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let nodes: Vec<HostNode> = self
-            .store
-            .borrow()
-            .nodes()
-            .filter(|node| node.kind == 4)
-            .cloned()
-            .collect();
+        let nodes: Vec<HostNode> = self.store.borrow().input_nodes().cloned().collect();
         let live: HashSet<u64> = nodes.iter().map(|node| node.handle).collect();
+        let mut inputs = self.inputs.borrow_mut();
         for node in nodes {
             let reset = node.props.values.reset_token;
-            if let Some(slot) = self.inputs.get_mut(&node.handle) {
+            if let Some(slot) = inputs.get_mut(&node.handle) {
                 let force = slot.reset != reset;
                 let change = force
                     || slot.model != node.props.text
@@ -241,7 +349,8 @@ impl HostView {
                 let subscription =
                     cx.subscribe_in(&state, window, move |view, input, event, window, cx| {
                         let text = input.read(cx).value().to_string();
-                        let Some(slot) = view.inputs.get_mut(&id) else {
+                        let mut inputs = view.inputs.borrow_mut();
+                        let Some(slot) = inputs.get_mut(&id) else {
                             return;
                         };
                         let kind = match event {
@@ -255,9 +364,10 @@ impl HostView {
                             InputEvent::PressEnter { .. } => 2,
                             _ => return,
                         };
+                        drop(inputs);
                         view.dispatch(id, kind, &text, false, window, cx);
                     });
-                self.inputs.insert(
+                inputs.insert(
                     id,
                     InputSlot {
                         state,
@@ -270,16 +380,10 @@ impl HostView {
                 );
             }
         }
-        self.inputs.retain(|id, slot| {
+        inputs.retain(|id, slot| {
             live.contains(id) || slot.state.read(cx).focus_handle(cx).is_focused(window)
         });
-        let live_lists: HashSet<u64> = self
-            .store
-            .borrow()
-            .nodes()
-            .filter(|n| n.kind == 11)
-            .map(|n| n.handle)
-            .collect();
+        let live_lists: HashSet<u64> = self.store.borrow().list_nodes().map(|n| n.handle).collect();
         self.lists
             .borrow_mut()
             .retain(|id, _| live_lists.contains(id));
@@ -296,7 +400,7 @@ impl HostView {
         let Some(list) = slots.get(&list_id) else {
             return keys;
         };
-        for (id, slot) in &self.inputs {
+        for (id, slot) in self.inputs.borrow().iter() {
             if !slot.state.read(cx).focus_handle(cx).is_focused(window) {
                 continue;
             }
@@ -323,6 +427,7 @@ impl HostView {
         id: u64,
         range: Range<usize>,
         protected: Vec<(usize, String)>,
+        cx: &mut Context<Self>,
     ) -> bool {
         let generation = {
             let store = self.store.borrow();
@@ -351,10 +456,16 @@ impl HostView {
         let result = self.bridge.request(&request);
         let mut success = result.is_ok();
         let rows = self.accept(result);
-        let current=self.store.borrow().node(id).map(|n|n.props.values.list_generation).unwrap_or(0);
+        self.notify_dirty(cx);
+        let current = self
+            .store
+            .borrow()
+            .node(id)
+            .map(|n| n.props.values.list_generation)
+            .unwrap_or(0);
         if let Some(slot) = self.lists.borrow_mut().get_mut(&id) {
             if success {
-                success=slot.accept_rows(generation,current,rows);
+                success = slot.accept_rows(generation, current, rows);
             }
             slot.failed = !success;
         }
@@ -381,15 +492,15 @@ impl HostView {
                 .union(&slot.painting)
                 .filter_map(|index| slot.rows.get(index).map(|(_, key)| (*index, key.clone())))
                 .collect::<Vec<_>>();
-            (schedule, keys,slot.generation)
+            (schedule, keys, slot.generation)
         };
         protected.extend(self.protected_rows(id, window, cx));
-        self.request_rows(id, range.clone(), protected);
+        self.request_rows(id, range.clone(), protected, cx);
         self.sync_inputs(window, cx);
         if schedule {
             let weak = cx.entity().downgrade();
             window.on_next_frame(move |window, app| {
-                let _ = weak.update(app, |view, cx| view.finish_list(id,generation,window,cx));
+                let _ = weak.update(app, |view, cx| view.finish_list(id, generation, window, cx));
             });
         }
         let handles = {
@@ -413,13 +524,21 @@ impl HostView {
             })
             .collect()
     }
-    fn finish_list(&mut self, id: u64,generation:u64, window: &mut Window, cx: &mut Context<Self>) {
+    fn finish_list(
+        &mut self,
+        id: u64,
+        generation: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let mut protected = {
             let mut lists = self.lists.borrow_mut();
             let Some(slot) = lists.get_mut(&id) else {
                 return;
             };
-            if !slot.begin_finish(generation) {return;}
+            if !slot.begin_finish(generation) {
+                return;
+            }
             if slot.failed {
                 slot.painting.clear();
                 return;
@@ -431,7 +550,7 @@ impl HostView {
                 .collect::<Vec<_>>()
         };
         protected.extend(self.protected_rows(id, window, cx));
-        self.request_rows(id, 0..0, protected);
+        self.request_rows(id, 0..0, protected, cx);
         self.sync_inputs(window, cx);
     }
     fn render_list(&self, node: &HostNode, cx: &mut Context<Self>) -> AnyElement {
@@ -548,6 +667,10 @@ impl HostView {
         let Some(node) = node else {
             return div().into_any_element();
         };
+        let boundary = self.store.borrow().child_boundary(handle, self.boundary_id);
+        if let Some(boundary) = boundary {
+            return self.boundary_element(boundary, &node.props, cx);
+        }
         let id = SharedString::from(format!("host-{handle}"));
         let p = &node.props;
         let disabled = p.values.present & LEAF_P_ENABLED != 0 && p.values.enabled == 0;
@@ -585,16 +708,18 @@ impl HostView {
                 };
                 apply_host_styles(button, p).into_any_element()
             }
-            4 => self.inputs.get(&handle).map_or_else(
+            4 => self.inputs.borrow().get(&handle).map_or_else(
                 || div().into_any_element(),
                 |slot| {
-                    apply_host_styles(
-                        div()
+                    {
+                        let widget = div()
                             .id(id)
                             .min_w_0()
-                            .child(Input::new(&slot.state).disabled(disabled)),
-                        p,
-                    )
+                            .child(Input::new(&slot.state).disabled(disabled));
+                        #[cfg(feature = "native-test-support")]
+                        let widget = widget.test_support();
+                        apply_host_styles(widget, p)
+                    }
                     .into_any_element()
                 },
             ),
@@ -689,6 +814,23 @@ impl HostView {
 }
 impl Render for HostView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.closing {
+            return div().into_any_element();
+        }
+        self.coordinator
+            .views
+            .borrow_mut()
+            .insert(self.boundary_id, cx.entity().downgrade());
+        *self
+            .coordinator
+            .renders
+            .borrow_mut()
+            .entry(self.boundary_id)
+            .or_default() += 1;
+        self.notify_dirty(cx);
+        self.boundaries
+            .borrow_mut()
+            .retain(|id, _| self.store.borrow().boundary(*id).is_some());
         self.sync_inputs(window, cx);
         let root = {
             let store = self.store.borrow();
@@ -700,8 +842,43 @@ impl Render for HostView {
                     .map_or(0, |b| b.root_handle)
             }
         };
+        if self.boundary_id != 0 {
+            return self.render_node(root, cx);
+        }
+        #[cfg(feature = "native-test-support")]
+        if std::env::var_os("LEAF_TEST_GEOMETRY").is_some() {
+            let weak = cx.entity().downgrade();
+            window.on_next_frame(move |window, app| {
+                let _ = weak.update(app, |view, cx| {
+                    let targets = view
+                        .store
+                        .borrow()
+                        .nodes()
+                        .map(|n| (n.node_id.clone(), format!("host-{}", n.handle)))
+                        .collect::<Vec<_>>();
+                    crate::native_probe::write(window, cx, targets.into_iter());
+                });
+            });
+        }
         div()
             .id("leaf-window")
+            .on_action(cx.listener(|view, _: &Quit, window, cx| {
+                cx.stop_propagation();
+                view.closing = true;
+                view.inputs.borrow_mut().clear();
+                view.lists.borrow_mut().clear();
+                view.boundaries.borrow_mut().clear();
+                view.coordinator.views.borrow_mut().clear();
+                window.blur(cx);
+                window.on_next_frame(|window, cx| {
+                    // Retire the platform IME handler after the current key
+                    // dispatch has returned; the active window is borrowed then.
+                    window.draw(cx).clear(cx);
+                    window.remove_window();
+                    cx.defer(|cx| cx.quit());
+                });
+                cx.notify();
+            }))
             .flex()
             .flex_col()
             .size_full()
@@ -725,6 +902,7 @@ impl Render for HostView {
                         .child(error),
                 )
             })
+            .into_any_element()
     }
 }
 pub fn run(store: Rc<RefCell<HostStore>>, bridge: TypedBridge, frames: bool) -> Result<(), String> {
@@ -792,15 +970,29 @@ mod typed_list_tests {
     use super::*;
     #[test]
     fn obsolete_rows_and_frame_cannot_replace_new_source() {
-        let props=LeafProps {list_generation:2,list_count:100,height_mode:0,row_height:24.0,..Default::default()};
-        let mut slot=ListSlot::new(&props);
-        slot.rows.insert(9,(90,"accepted".into()));
-        assert!(!slot.accept_rows(1,2,vec![]));
-        assert_eq!(slot.rows[&9].1,"accepted");
-        slot.scheduled=true;
+        let props = LeafProps {
+            list_generation: 2,
+            list_count: 100,
+            height_mode: 0,
+            row_height: 24.0,
+            ..Default::default()
+        };
+        let mut slot = ListSlot::new(&props);
+        slot.rows.insert(9, (90, "accepted".into()));
+        assert!(!slot.accept_rows(1, 2, vec![]));
+        assert_eq!(slot.rows[&9].1, "accepted");
+        slot.scheduled = true;
         assert!(!slot.begin_finish(1));
         assert!(slot.scheduled);
-        assert!(slot.accept_rows(2,2,vec![crate::bridge_v2::HostRow{handle:10,index:1,key:"new".into()}]));
-        assert_eq!(slot.rows[&1].1,"new");
+        assert!(slot.accept_rows(
+            2,
+            2,
+            vec![crate::bridge_v2::HostRow {
+                handle: 10,
+                index: 1,
+                key: "new".into()
+            }]
+        ));
+        assert_eq!(slot.rows[&1].1, "new");
     }
 }

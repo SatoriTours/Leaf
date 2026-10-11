@@ -49,6 +49,7 @@ type
     root:uint64
     count,bytes:int
     measurements:UpdateStats
+    globalRefresh:bool
 var nextManagedId:uint64
 proc current(d:ManagedDriver,id:uint64):Instance=
   if d.edits.hasKey(id):d.edits.getOrDefault(id) else:d.data.instances.getOrDefault(id)
@@ -94,6 +95,7 @@ proc allocate(d:ManagedDriver):uint64=
 proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
     parentHost:NodeHandle,path:string,depth:int):uint64=
   if desc==nil:fail("nil UI description")
+  if path.len>MaxStringBytes:fail("managed node ID exceeds 1 MiB")
   if depth>MaxDepth:fail("managed description exceeds depth 64")
   var old=d.current(oldId)
   let same=old!=nil and old.description.kind==desc.kind and old.description.key==desc.key and
@@ -131,9 +133,9 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
         proc(owner:uint64)=data.invalid.incl(owner)),item.model)
     finally:d.data.states.setPhase(StatePhase.idle)
     let previous=if old==nil or old.children.len==0:0'u64 else:old.children[0]
-    item.children= @[d.reconcile(output,previous,id,id,parentHost,path & "/r",depth+1)]
+    item.children= @[d.reconcile(output,previous,id,id,parentHost,path & "/r/" & segment(output,0),depth+1)]
     let root=d.hostRoot(id)
-    if old==nil or root!=oldRoot:
+    if old==nil or root!=oldRoot or d.globalRefresh:
       d.changes.boundaries.add(HostBoundary(id:id,root:root,parent:owner))
   else:
     item.handle=if old==nil or old.handle==NoHandle:d.data.reconciler.reserveHandle() else:old.handle
@@ -280,13 +282,14 @@ method stage*(base:ManagedDriver,forceRoot:bool):RuntimeDriver=
   data.forceRoot=false
   let queued=data.states.pendingOwners()
   if not forceRoot and queued.len==0 and data.invalid.len==0:return nil
-  let d=ManagedDriver(data:data,count:data.count,bytes:data.bytes,root:data.root)
+  let d=ManagedDriver(data:data,count:data.count,bytes:data.bytes,root:data.root,globalRefresh:forceRoot)
   try:
     d.attempt=data.states.beginAttempt()
     d.dirty=data.invalid
     data.invalid.clear()
     for owner in d.attempt.dirtyOwners:d.dirty.incl(owner)
     if forceRoot or data.root==0:
+      d.dirty.incl(data.root)
       d.root=d.reconcile(data.rootDescription,data.root,0,0,NoHandle,"root",0)
     var dirty:seq[uint64]
     for id in d.dirty:dirty.add(id)

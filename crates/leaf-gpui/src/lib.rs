@@ -1,10 +1,10 @@
-mod host_styles;
-mod host_view;
-mod bridge_v2;
-mod host_store;
 mod abi_v2;
 mod bridge;
+mod bridge_v2;
 mod desktop;
+mod host_store;
+mod host_styles;
+mod host_view;
 mod model;
 pub use bridge::{leaf_gpui_abi_version, leaf_gpui_run};
 #[cfg(test)]
@@ -29,3 +29,6 @@ mod tests {
         assert_eq!(leaf_gpui_abi_version(), 1);
     }
 }
+
+#[cfg(feature = "native-test-support")]
+mod native_probe;

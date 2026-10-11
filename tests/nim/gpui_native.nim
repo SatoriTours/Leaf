@@ -21,9 +21,10 @@ proc main():int =
   defer:removeDir(directory)
   let xdotool=getEnv("LEAF_TEST_XDOTOOL",findExe("xdotool"))
   require(xdotool.len>0,"xdotool is required")
-  let binary=build(readProject(root/"tests/nim/gpui_native_app.nim"),directory/"native-app")
+  let binary=build(readProject(root/getEnv("LEAF_TEST_APP","tests/nim/gpui_native_app.nim")),directory/"native-app")
   var env=newStringTable(modeCaseSensitive)
   for key,value in envPairs():env[key]=value
+  env["LEAF_TEST_GEOMETRY"]=directory/"geometry.json"
   env["LEAF_WATCH_READY"]=directory/"ready.json"
   env["LEAF_WATCH_TOKEN"]="native-smoke"
   block:
@@ -50,7 +51,20 @@ proc main():int =
     sleep(20)
   let window=command(xdotool,@["search","--name","^Leaf GPUI native smoke$"],root).splitLines()[0]
   discard command(xdotool,@["windowfocus",window],root)
-  discard command(xdotool,@["mousemove","--window",window,"110","90","click","1"],root)
+  proc clickTarget(key:string) =
+    let deadline=getMonoTime()+initDuration(seconds=5)
+    while true:
+      if fileExists(directory/"geometry.json"):
+        let nodes=parseFile(directory/"geometry.json")["nodes"]
+        for id,bounds in nodes:
+          if id==key or id.endsWith(":" & key) or id.endsWith(":" & key & "/r"):
+            let x=int(bounds["x"].getFloat+bounds["width"].getFloat/2)
+            let y=int(bounds["y"].getFloat+bounds["height"].getFloat/2)
+            discard command(xdotool,@["mousemove","--window",window,$x,$y,"click","1"],root)
+            return
+      require(getMonoTime()<deadline,"geometry target not found: " & key)
+      sleep(20)
+  clickTarget("add")
   proc status():string =
     try:return parseFile(dump)["root"]["children"][2]["text"].getStr
     except CatchableError:return ""
@@ -61,7 +75,8 @@ proc main():int =
       require(not child.poll(),"GPUI test application exited")
       sleep(20)
   awaitStatus("1:中文输入:0")
-  discard command(xdotool,@["mousemove","--window",window,"110","42","click","1","key","ctrl+a"],root)
+  clickTarget("entry")
+  discard command(xdotool,@["key","ctrl+a"],root)
   discard command(xdotool,@["type","--clearmodifiers","--delay","1","nim gpui"],root)
   awaitStatus("1:nim gpui:0")
   discard command(xdotool,@["key","Return"],root)

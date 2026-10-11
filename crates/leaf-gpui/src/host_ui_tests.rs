@@ -10,6 +10,8 @@ struct Fixture {
     reject: bool,
     value: String,
     reset: u64,
+    boundaries: bool,
+    text_layout: bool,
 }
 impl Fixture {
     fn new() -> Self {
@@ -21,6 +23,8 @@ impl Fixture {
             reject: false,
             value: "中文abc".into(),
             reset: 0,
+            boundaries: false,
+            text_layout: false,
         }
     }
     fn publish(&mut self, initial: bool) {
@@ -35,6 +39,19 @@ impl Fixture {
             },
             ..Default::default()
         };
+        if self.boundaries {
+            props.present |= LEAF_P_WIDTH | LEAF_P_HEIGHT;
+            props.width = LeafDimension {
+                tag: 1,
+                value: 200.0,
+                ..Default::default()
+            };
+            props.height = LeafDimension {
+                tag: 1,
+                value: 40.0,
+                ..Default::default()
+            };
+        }
         let mut ops = if initial {
             vec![
                 LeafOp {
@@ -84,6 +101,29 @@ impl Fixture {
         if initial {
             props.text = LeafSpan::default();
             ops[0].props = props;
+        }
+        if self.text_layout {
+            if initial {
+                ops[0].kind = 1;
+                ops[1].kind = 2;
+            } else {
+                ops[0].kind = 2;
+            }
+        }
+        if initial && (self.boundaries || self.text_layout) {
+            if self.boundaries {
+                ops[2].props.width = props.width;
+                ops[2].props.height = props.height;
+                ops[2].props.present |= LEAF_P_WIDTH | LEAF_P_HEIGHT;
+            }
+            for (id, root) in [(1, 2), (2, 3)] {
+                ops.push(LeafOp {
+                    tag: 5,
+                    boundary_id: id,
+                    handle: root,
+                    ..Default::default()
+                });
+            }
         }
         let children = [2, 3];
         let batch = LeafBatch {
@@ -193,7 +233,7 @@ fn form<'a>(
 fn typed_input_selection_unicode_and_rejection(cx: &mut gpui::TestAppContext) {
     let mut f = Fixture::new();
     let (_host, view, cx) = form(&mut f, cx);
-    let input = view.read_with(cx, |v, _| v.inputs[&2].state.clone());
+    let input = view.read_with(cx, |v, _| v.inputs.borrow()[&2].state.clone());
     cx.update(|w, cx| input.update(cx, |input, cx| input.focus(w, cx)));
     cx.simulate_keystrokes(if cfg!(target_os = "macos") {
         "cmd-a"
@@ -203,7 +243,7 @@ fn typed_input_selection_unicode_and_rejection(cx: &mut gpui::TestAppContext) {
     cx.update(|w, cx| view.update(cx, |view, cx| view.dispatch(3, 0, "", false, w, cx)));
     cx.run_until_parked();
     assert_eq!(
-        view.read_with(cx, |v, _| v.inputs[&2].state.entity_id()),
+        view.read_with(cx, |v, _| v.inputs.borrow()[&2].state.entity_id()),
         input.entity_id()
     );
     cx.update(|w, cx| {
@@ -229,7 +269,7 @@ fn typed_input_selection_unicode_and_rejection(cx: &mut gpui::TestAppContext) {
 fn typed_reset_reuses_entity_and_click_dispatches(cx: &mut gpui::TestAppContext) {
     let mut f = Fixture::new();
     let (_host, view, cx) = form(&mut f, cx);
-    let input = view.read_with(cx, |v, _| v.inputs[&2].state.clone());
+    let input = view.read_with(cx, |v, _| v.inputs.borrow()[&2].state.clone());
     cx.update(|w, cx| {
         w.render_frame(cx);
         w.click("host-3", cx);
@@ -247,7 +287,7 @@ fn typed_reset_reuses_entity_and_click_dispatches(cx: &mut gpui::TestAppContext)
     });
     cx.run_until_parked();
     assert_eq!(
-        view.read_with(cx, |v, _| v.inputs[&2].state.entity_id()),
+        view.read_with(cx, |v, _| v.inputs.borrow()[&2].state.entity_id()),
         input.entity_id()
     );
     assert_eq!(input.read_with(cx, |i, _| i.value().to_string()), "新值");
@@ -258,10 +298,77 @@ fn typed_enter_and_event_transport_use_no_json(cx: &mut gpui::TestAppContext) {
     let before = crate::bridge::json_bridge_calls();
     let mut f = Fixture::new();
     let (_host, view, cx) = form(&mut f, cx);
-    let input = view.read_with(cx, |v, _| v.inputs[&2].state.clone());
+    let input = view.read_with(cx, |v, _| v.inputs.borrow()[&2].state.clone());
     cx.update(|w, cx| input.update(cx, |input, cx| input.focus(w, cx)));
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(f.events, 1);
     assert_eq!(crate::bridge::json_bridge_calls(), before);
+}
+
+#[gpui::test]
+fn fixed_sibling_boundary_skips_render_on_counter_update(cx: &mut gpui::TestAppContext) {
+    let mut f = Fixture::new();
+    f.boundaries = true;
+    let (_host, view, cx) = form(&mut f, cx);
+    cx.update(|w, cx| w.render_frame(cx));
+    let before = view.read_with(cx, |v, _| v.boundary_renders(2));
+    assert!(before > 0);
+    cx.update(|w, cx| view.update(cx, |v, cx| v.dispatch(3, 0, "", false, w, cx)));
+    cx.run_until_parked();
+    cx.update(|w, cx| w.draw(cx).clear(cx));
+    assert_eq!(view.read_with(cx, |v, _| v.boundary_renders(2)), before);
+    cx.update(|w, cx| w.render_frame(cx));
+    assert!(view.read_with(cx, |v, _| v.boundary_renders(2)) > before);
+}
+
+#[gpui::test]
+fn measured_content_keeps_parent_geometry_with_cache_on_and_off(cx: &mut gpui::TestAppContext) {
+    let mut results = Vec::new();
+    for enabled in [false, true] {
+        let mut f = Fixture::new();
+        f.text_layout = true;
+        f.value = "9".into();
+        let (_host, view, cx) = form(&mut f, cx);
+        cx.update(|w, cx| {
+            view.update(cx, |v, _| v.cache_enabled = enabled);
+            w.render_frame(cx);
+        });
+        let before = cx.update(|w, _| w.find("host-3").bounds().origin.x);
+        f.value = "10".into();
+        f.publish(false);
+        cx.update(|w, cx| {
+            view.update(cx, |v, cx| {
+                v.notify_dirty(cx);
+                cx.notify();
+            });
+            w.draw(cx).clear(cx);
+        });
+        let after = cx.update(|w, _| w.find("host-3").bounds().origin.x);
+        assert!(
+            after > before,
+            "content width must move the following sibling"
+        );
+        results.push((before, after));
+    }
+    assert_eq!(results[0], results[1]);
+}
+#[gpui::test]
+fn inherited_and_external_invalidations_repaint_fixed_boundaries(cx: &mut gpui::TestAppContext) {
+    let mut f = Fixture::new();
+    f.boundaries = true;
+    let (_host, view, cx) = form(&mut f, cx);
+    cx.update(|w, cx| w.render_frame(cx));
+    for reason in [
+        DirtyReason::InheritedStyle,
+        DirtyReason::ExternalLayout,
+        DirtyReason::GlobalRefresh,
+    ] {
+        let before = view.read_with(cx, |v, _| v.boundary_renders(2));
+        cx.update(|w, cx| {
+            view.update(cx, |v, cx| v.refresh_boundaries(reason, cx));
+            w.draw(cx).clear(cx);
+        });
+        assert!(view.read_with(cx, |v, _| v.boundary_renders(2)) > before);
+    }
 }

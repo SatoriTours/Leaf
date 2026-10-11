@@ -29,12 +29,21 @@ impl HostNode {
             + self.children.len() * 8
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DirtyReason {
+    Content,
+    Children,
+    ExternalLayout,
+    InheritedStyle,
+    GlobalRefresh,
+}
 #[derive(Clone, Debug)]
 pub struct BoundaryState {
     pub root_handle: u64,
     pub parent: u64,
     pub layout_style: LeafProps,
     pub revision: u64,
+    pub dirty_reason: DirtyReason,
 }
 #[derive(Clone, Debug)]
 pub struct HostWindow {
@@ -53,6 +62,7 @@ struct Prepared {
     window: Option<HostWindow>,
     boundary_roots: HashMap<u64, Rc<[u64]>>,
     dirty: Vec<u64>,
+    dirty_reasons: HashMap<u64, DirtyReason>,
     root: u64,
     count: usize,
     bytes: usize,
@@ -67,6 +77,8 @@ pub struct HostStore {
     epoch: u64,
     disposed: bool,
     nodes: HashMap<u64, HostNode>,
+    inputs: HashSet<u64>,
+    lists: HashSet<u64>,
     boundaries: HashMap<u64, BoundaryState>,
     boundary_roots: HashMap<u64, Rc<[u64]>>,
     dirty: Vec<u64>,
@@ -108,6 +120,8 @@ impl HostStore {
             epoch: 1,
             disposed: false,
             nodes: HashMap::new(),
+            inputs: HashSet::new(),
+            lists: HashSet::new(),
             boundaries: HashMap::new(),
             boundary_roots: HashMap::new(),
             dirty: Vec::new(),
@@ -129,9 +143,32 @@ impl HostStore {
     pub fn root(&self) -> u64 {
         self.root
     }
-    pub fn nodes(&self) -> impl Iterator<Item=&HostNode> { self.nodes.values() }
+    pub fn nodes(&self) -> impl Iterator<Item = &HostNode> {
+        self.nodes.values()
+    }
     pub fn node(&self, id: u64) -> Option<&HostNode> {
         self.nodes.get(&id)
+    }
+    pub fn input_nodes(&self) -> impl Iterator<Item = &HostNode> {
+        self.inputs.iter().filter_map(|id| self.nodes.get(id))
+    }
+    pub fn list_nodes(&self) -> impl Iterator<Item = &HostNode> {
+        self.lists.iter().filter_map(|id| self.nodes.get(id))
+    }
+    pub fn child_boundary(&self, handle: u64, parent: u64) -> Option<u64> {
+        self.boundary_roots
+            .get(&handle)?
+            .iter()
+            .copied()
+            .find(|id| self.boundaries.get(id).is_some_and(|b| b.parent == parent))
+    }
+    pub fn invalidate_all(&mut self, reason: DirtyReason) {
+        for (id, boundary) in &mut self.boundaries {
+            boundary.dirty_reason = reason;
+            self.dirty.push(*id);
+        }
+        self.dirty.sort_unstable();
+        self.dirty.dedup();
     }
     pub fn window(&self) -> Option<&HostWindow> {
         self.window.as_ref()
@@ -252,6 +289,7 @@ impl HostStore {
                                 parent: op.boundary_parent,
                                 layout_style: op.props,
                                 revision: data.header.next_revision,
+                                dirty_reason: DirtyReason::GlobalRefresh,
                             })
                         },
                     );
@@ -482,6 +520,107 @@ impl HostStore {
                     .map_or(0, |node| node.parent);
             }
         }
+        let mut dirty_reasons = HashMap::new();
+        for id in &dirty {
+            dirty_reasons.insert(*id, DirtyReason::Content);
+        }
+        for (id, new) in &boundaries {
+            dirty_reasons.insert(*id, DirtyReason::GlobalRefresh);
+            if let (Some(old), Some(new)) = (self.boundaries.get(id), new) {
+                if old.root_handle == new.root_handle {
+                    // Explicit refresh of a retained root invalidates descendants.
+                    for child in self.boundaries.keys() {
+                        let mut ancestor = *child;
+                        for _ in 0..LEAF_V2_MAX_DEPTH {
+                            if ancestor == *id {
+                                dirty.insert(*child);
+                                dirty_reasons.insert(*child, DirtyReason::GlobalRefresh);
+                                break;
+                            }
+                            ancestor = boundary_lookup(&ancestor).map_or(0, |b| b.parent);
+                            if ancestor == 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (handle, new) in &nodes {
+            let Some(new) = new else {
+                continue;
+            };
+            let Some(old) = self.nodes.get(handle) else {
+                continue;
+            };
+            let a = &old.props.values;
+            let b = &new.props.values;
+            let inherited_mask = LEAF_P_COLOR | LEAF_P_FONT_SIZE | LEAF_P_WEIGHT | LEAF_P_OPACITY;
+            let layout_mask = LEAF_P_WIDTH
+                | LEAF_P_HEIGHT
+                | LEAF_P_GAP
+                | LEAF_P_PADDING
+                | LEAF_P_FLEX_GROW
+                | LEAF_P_FLEX_SHRINK
+                | LEAF_P_MIN_WIDTH
+                | LEAF_P_MIN_HEIGHT
+                | LEAF_P_MAX_WIDTH
+                | LEAF_P_MAX_HEIGHT
+                | LEAF_P_ALIGN
+                | LEAF_P_JUSTIFY
+                | LEAF_P_OVERFLOW;
+            let inherited = (a.present & inherited_mask) != (b.present & inherited_mask)
+                || a.colors[0] != b.colors[0]
+                || a.numbers[10..12] != b.numbers[10..12]
+                || a.weight != b.weight;
+            let layout = (a.present & layout_mask) != (b.present & layout_mask)
+                || a.width != b.width
+                || a.height != b.height
+                || a.numbers[..8] != b.numbers[..8]
+                || a.align != b.align
+                || a.justify != b.justify
+                || a.overflow != b.overflow;
+            let reason = if inherited {
+                DirtyReason::InheritedStyle
+            } else if layout {
+                DirtyReason::ExternalLayout
+            } else if old.children != new.children {
+                DirtyReason::Children
+            } else {
+                DirtyReason::Content
+            };
+            if inherited || layout {
+                for (id, boundary) in &self.boundaries {
+                    let mut ancestor = boundary.root_handle;
+                    for _ in 0..LEAF_V2_MAX_DEPTH {
+                        if ancestor == *handle {
+                            dirty.insert(*id);
+                            dirty_reasons
+                                .entry(*id)
+                                .and_modify(|r| *r = (*r).max(reason))
+                                .or_insert(reason);
+                            break;
+                        }
+                        ancestor = lookup(&self.nodes, &nodes, ancestor).map_or(0, |n| n.parent);
+                        if ancestor == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+            for id in &dirty {
+                dirty_reasons
+                    .entry(*id)
+                    .and_modify(|r| *r = (*r).max(reason))
+                    .or_insert(reason);
+            }
+        }
+        self.inputs
+            .try_reserve(nodes.len())
+            .map_err(|_| bad("input index reservation failed"))?;
+        self.lists
+            .try_reserve(nodes.len())
+            .map_err(|_| bad("list index reservation failed"))?;
         let boundary_roots = root_edits
             .into_iter()
             .map(|(id, ids)| (id, Rc::from(ids)))
@@ -502,6 +641,7 @@ impl HostStore {
             window,
             boundary_roots,
             dirty: dirty.into_iter().collect(),
+            dirty_reasons,
             root: roots.iter().next().copied().unwrap_or(0),
             count,
             bytes,
@@ -540,10 +680,18 @@ impl HostStore {
         for (id, node) in prepared.nodes {
             match node {
                 Some(node) => {
+                    if node.kind == 4 {
+                        self.inputs.insert(id);
+                    }
+                    if node.kind == 11 {
+                        self.lists.insert(id);
+                    }
                     self.nodes.insert(id, node);
                 }
                 None => {
                     self.nodes.remove(&id);
+                    self.inputs.remove(&id);
+                    self.lists.remove(&id);
                 }
             }
         }
@@ -562,6 +710,15 @@ impl HostStore {
                 self.boundary_roots.remove(&root);
             } else {
                 self.boundary_roots.insert(root, ids);
+            }
+        }
+        for (id, reason) in prepared.dirty_reasons {
+            if let Some(boundary) = self.boundaries.get_mut(&id) {
+                boundary.revision = revision;
+                boundary.dirty_reason = reason;
+                if let Some(node) = self.nodes.get(&boundary.root_handle) {
+                    boundary.layout_style = node.props.values;
+                }
             }
         }
         self.dirty = prepared.dirty;

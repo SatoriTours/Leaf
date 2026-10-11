@@ -12,3 +12,6 @@ serde.workspace = true
 serde_json.workspace = true
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+
+[features]
+native-test-support = ["gpui-kit/test-support"]
