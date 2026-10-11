@@ -123,6 +123,7 @@ int main(void) {
   printf("LeafReply.y=%zu\n", offsetof(LeafReply,y));
   printf("LeafReply.width=%zu\n", offsetof(LeafReply,width));
   printf("LeafReply.height=%zu\n", offsetof(LeafReply,height));
+  printf("LeafReply.value=%zu\n", offsetof(LeafReply,value));
   printf("LeafConfig.sizeof=%zu\n", sizeof(LeafConfig));
   printf("LeafConfig.align=%zu\n", _Alignof(LeafConfig));
   printf("LeafConfig.stride=%zu\n", sizeof(LeafConfig[2])/2);

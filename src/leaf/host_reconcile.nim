@@ -170,7 +170,7 @@ proc planDelta*(r: HostReconciler, changes: HostChanges, nextRevision: uint64): 
       let current=r.lookup(c,ancestor)
       if current == nil: fail("unknown host ancestor")
       inc depth
-      if depth > MaxDepth: fail("host cycle or depth exceeded")
+      if depth > MaxDepth+1: fail("host cycle or depth exceeded")
       ancestor=current.record.parent
     # Moving an ancestor must not bypass depth budgets for unchanged children.
     let old=r.records.getOrDefault(id)
@@ -178,7 +178,7 @@ proc planDelta*(r: HostReconciler, changes: HostChanges, nextRevision: uint64): 
       var pending = @[(id,depth)]
       while pending.len>0:
         let item=pending.pop()
-        if item[1]>MaxDepth: fail("host depth exceeded")
+        if item[1]>MaxDepth+1: fail("host depth exceeded")
         for child in r.lookup(c,item[0]).children: pending.add((child,item[1]+1))
     let duplicate=r.ids.getOrDefault(stored.record.nodeId,NoHandle)
     if duplicate != NoHandle and duplicate != id:

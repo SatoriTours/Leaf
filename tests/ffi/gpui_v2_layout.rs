@@ -124,6 +124,7 @@ println!("LeafReply.x={}", std::mem::offset_of!(LeafReply,x));
 println!("LeafReply.y={}", std::mem::offset_of!(LeafReply,y));
 println!("LeafReply.width={}", std::mem::offset_of!(LeafReply,width));
 println!("LeafReply.height={}", std::mem::offset_of!(LeafReply,height));
+println!("LeafReply.value={}", std::mem::offset_of!(LeafReply,value));
 println!("LeafConfig.sizeof={}", std::mem::size_of::<LeafConfig>());
 println!("LeafConfig.align={}", std::mem::align_of::<LeafConfig>());
 println!("LeafConfig.stride={}", std::mem::size_of::<[LeafConfig;2]>()/2);

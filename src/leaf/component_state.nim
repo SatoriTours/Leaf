@@ -58,6 +58,8 @@ proc setPhase*(store:StateStore,phase:StatePhase)=
 proc phase*(store:StateStore):StatePhase=store.phase
 proc requireIdle*(store:StateStore)=
   store.uiThread()
+  if executionRuntimeIdentity()!=0 and executionRuntimeIdentity()!=store.runtimeId:
+    fail("State belongs to another executing Runtime")
   if store.phase!=StatePhase.idle or store.active!=nil:fail("cannot queue during component computation or commit")
 proc dirtyOwners*(attempt:StateAttempt):seq[uint64]=attempt.dirty
 proc pendingOwners*(store:StateStore):seq[uint64]=
@@ -134,6 +136,8 @@ proc cellFor[T](state:State[T]):StateCell[T]=
 proc writable[T](state:State[T]):StateCell[T]=
   result=state.cellFor()
   if result==nil:return
+  if executionRuntimeIdentity()!=0 and executionRuntimeIdentity()!=state.store.runtimeId:
+    fail("State belongs to another executing Runtime")
   if state.store.phase!=StatePhase.idle or state.store.active!=nil:
     fail("State writes are forbidden during initialization, render, updater or commit")
 proc markQueued[T](state:State[T])=

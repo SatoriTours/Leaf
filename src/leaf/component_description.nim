@@ -131,10 +131,10 @@ proc toDescription*(node:Node):UiDescription=host(node)
 proc toDescription*(description:UiDescription):UiDescription=description
 
 proc componentList*(key:string,keys:seq[string],builder:proc(index:int):UiDescription {.closure.},
-    rowHeight=0.0,estimatedHeight=40.0,overscan=2):UiDescription=
+    rowHeight=0.0,estimatedHeight=40.0,overscan=2,styles:Styles=default(Styles)):UiDescription=
   if builder==nil:fail("component list needs a builder")
-  let node=core.virtualList(key,keys,proc(index:int):Node=fail("managed rows require a Runtime viewport"),
-    rowHeight,estimatedHeight,overscan)
+  let node=virtualList(key,keys,proc(index:int):Node=fail("managed rows require a Runtime viewport"),
+    rowHeight,estimatedHeight,overscan,styles)
   result=hostShell(node,@[])
   result.rowFactory=builder
 proc buildDescriptionRow*(description:UiDescription,index:int):UiDescription=

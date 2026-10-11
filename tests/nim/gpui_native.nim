@@ -1,5 +1,5 @@
 ## Real X11 input and mouse dispatch into a Nim application using GPUI Kit.
-import std/[os,json,monotimes,times,strtabs,tempfiles,strutils]
+import std/[os,json,monotimes,times,strtabs,tempfiles,strutils,algorithm]
 import leaf/[build,project,process_io,watch_ipc]
 proc require(value:bool,message:string) =
   if not value:raise newException(IOError,message)
@@ -29,8 +29,13 @@ proc main():int =
   env["LEAF_TEST_GEOMETRY"]=directory/"geometry.json"
   env["LEAF_WATCH_READY"]=directory/"ready.json"
   env["LEAF_WATCH_TOKEN"]="native-smoke"
+  let lists=getEnv("LEAF_TEST_LISTS")=="1"
+  let watch=getEnv("LEAF_TEST_WATCH_STATUS")=="1"
+  if watch:
+    env["LEAF_WATCH_STATUS"]=directory/"status.json"
+    writeStatus(env["LEAF_WATCH_STATUS"],0,"")
   let example=getEnv("LEAF_TEST_EXAMPLE")=="1"
-  if not example:
+  if not example and getEnv("LEAF_TEST_SKIP_FAIL")!="1":
     block:
       env["LEAF_TEST_FAIL_LIST"]="1"
       let failedLog=directory/"failed-events.jsonl"
@@ -47,7 +52,10 @@ proc main():int =
       env.del("LEAF_TEST_FAIL_LIST")
   let dump=directory/"tree.json"
   let child=startManaged(binary,@["--dump-tree",dump,"--log-file",directory/"events.jsonl"],root,env)
-  defer:child.close()
+  defer:
+    discard child.poll()
+    if getEnv("LEAF_KEEP_NATIVE_TEST")=="1":echo child.output
+    child.close()
   let deadline=getMonoTime()+initDuration(seconds=20)
   while not isReady(directory/"ready.json","native-smoke",child.pid):
     require(not child.poll(),"GPUI window exited before readiness: " & child.output)
@@ -69,7 +77,58 @@ proc main():int =
             return
       require(getMonoTime()<deadline,"geometry target not found: " & key)
       sleep(20)
-  clickTarget("add")
+  if lists:
+    proc requests():int=parseFile(directory/"geometry.json")["viewport_requests"].getInt
+    proc caption(node:JsonNode,key:string):string=
+      if node.kind!=JObject:return ""
+      let id=node{"id"}.getStr
+      if id.endsWith(":" & key):return node{"text"}.getStr
+      if node.hasKey("children"):
+        for child in node["children"]:
+          result=caption(child,key)
+          if result.len>0:return
+    proc awaitCaption(key,expected:string)=
+      let until=getMonoTime()+initDuration(seconds=5)
+      while caption(parseFile(dump)["root"],key)!=expected:
+        require(getMonoTime()<until,"caption did not update: " & key)
+        sleep(20)
+    proc visibleRows():seq[int]=
+      for id,b in parseFile(directory/"geometry.json")["nodes"]:
+        let start=id.rfind(":row-")
+        let y=b["y"].getFloat+b["height"].getFloat/2
+        if start>=0 and y>36 and y<475:result.add(parseInt(id[start+5..^1]))
+      result.sort()
+    sleep(200)
+    echo "Initial variable-list viewport requests: ",requests()
+    require(requests()<=5,"variable-height list used per-row FFI requests")
+    let before=requests()
+    clickTarget("add")
+    awaitCaption("add","counter:1")
+    sleep(200)
+    require(requests()==before,"unrelated Counter repeated the viewport request")
+    let visible=visibleRows()
+    require(visible.len>5,"visible list rows missing")
+    for index in visible:
+      clickTarget("row-" & $index)
+      awaitCaption("row-" & $index,$index & ":1")
+    require(requests()==before,"row State update repeated the viewport request")
+    discard command(xdotool,@["mousemove","--window",window,"150","250","click","--repeat","8","--delay","20","5"],root)
+    let until=getMonoTime()+initDuration(seconds=5)
+    while visibleRows().len==0 or visibleRows()[^1]<=visible[^1]:
+      require(getMonoTime()<until,"list did not scroll")
+      sleep(20)
+    sleep(200)
+    require(requests()-before<=16,"scroll used per-row FFI requests")
+    let idle=requests()
+    sleep(200)
+    require(requests()==idle,"idle list keeps requesting frames")
+    for index in visibleRows():
+      if index notin visible:
+        clickTarget("row-" & $index)
+        awaitCaption("row-" & $index,$index & ":1")
+    echo "Passed batched variable-height viewport, independent Counter, visible row State and scrolling"
+  else:
+    clickTarget("add")
   proc status():string =
     try:return parseFile(dump)["root"]["children"][(if example:1 else:2)]["text"].getStr
     except CatchableError:return ""
@@ -79,7 +138,8 @@ proc main():int =
       require(getMonoTime()<deadline,"expected " & expected & "; got " & status())
       require(not child.poll(),"GPUI test application exited")
       sleep(20)
-  if example:
+  if lists:discard
+  elif example:
     awaitStatus("1")
     clickTarget("reset")
     awaitStatus("0")
@@ -107,13 +167,22 @@ proc main():int =
     discard command(xdotool,@["windowmap",window,"windowfocus",window],root)
     clickTarget("add")
     awaitStatus("2:中文输X:1")
+  if watch:
+    for revision in 1..2:
+      writeStatus(env["LEAF_WATCH_STATUS"],revision,(if revision==1:"watch 编译失败" else:""))
+      let until=getMonoTime()+initDuration(seconds=5)
+      while parseFile(directory/"geometry.json")["nodes"].hasKey("watch-error")!=(revision==1):
+        require(getMonoTime()<until,"watch error did not show/clear at revision " & $revision)
+        sleep(20)
+    echo "Passed native watch error show and clear"
   discard command(xdotool,@["key","ctrl+q"],root)
   let closing=getMonoTime()+initDuration(seconds=5)
   while not child.poll():
     require(getMonoTime()<closing,"GPUI close timeout")
     sleep(20)
   require(child.code==0,"GPUI close failed: " & child.output)
-  if example:echo "Passed real component example window, increment, reset, ready and close"
+  if lists:echo "Passed real variable-height list window and close"
+  elif example:echo "Passed real component example window, increment, reset, ready and close"
   else:echo "Passed real Nim + GPUI + GPUI Kit window, click, input, Enter, ready, failed viewport and close"
 when isMainModule:
   try:quit(main())

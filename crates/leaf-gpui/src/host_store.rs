@@ -189,8 +189,11 @@ impl HostStore {
         if data.header.session_id != self.session {
             return Err(bad("foreign host session"));
         }
+        // A fresh renderer synchronizes an already accepted Runtime revision.
+        // After that installation every ordinary delta remains consecutive.
+        let initial = self.revision == 0 && self.nodes.is_empty() && data.header.next_revision > 0;
         if data.header.base_revision != self.revision
-            || self.revision.checked_add(1) != Some(data.header.next_revision)
+            || (!initial && self.revision.checked_add(1) != Some(data.header.next_revision))
         {
             return Err(bad("stale host revision"));
         }
@@ -398,7 +401,7 @@ impl HostStore {
             while let Some(node) = lookup(&self.nodes, &nodes, current) {
                 stats.visited_nodes += 1;
                 depth += 1;
-                if depth > LEAF_V2_MAX_DEPTH {
+                if depth > LEAF_V2_MAX_DEPTH + 1 {
                     return Err(bad("host cycle or depth exceeded"));
                 }
                 if node.parent == 0 {
@@ -426,7 +429,7 @@ impl HostStore {
                     ancestor = node.parent;
                 }
                 while let Some((id, below)) = pending.pop() {
-                    if base + below > LEAF_V2_MAX_DEPTH {
+                    if base + below > LEAF_V2_MAX_DEPTH + 1 {
                         return Err(bad("host depth exceeded"));
                     }
                     if let Some(node) = lookup(&self.nodes, &nodes, id) {
@@ -455,7 +458,7 @@ impl HostStore {
                 let mut depth = 0;
                 while let Some(boundary) = boundary_lookup(&current) {
                     depth += 1;
-                    if depth > LEAF_V2_MAX_DEPTH {
+                    if depth > LEAF_V2_MAX_DEPTH + 1 {
                         return Err(bad("boundary cycle or depth exceeded"));
                     }
                     if boundary.parent == 0 {
@@ -742,6 +745,87 @@ impl HostStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fresh_host_installs_current_runtime_revision_then_requires_consecutive_updates() {
+        let ops = [create(1, 0)];
+        let initial = LeafBatch {
+            struct_size: size_of::<LeafBatch>() as u32,
+            abi: 2,
+            session_id: 9,
+            base_revision: 0,
+            next_revision: 7,
+            ops: ops.as_ptr(),
+            ops_len: ops.len() as u64,
+            ..Default::default()
+        };
+        let mut store = HostStore::new(9);
+        store
+            .prepare(&unsafe { decode_batch(&initial) }.unwrap())
+            .unwrap();
+        store.apply().unwrap();
+        assert!(store.accept(7));
+        let skipped = LeafBatch {
+            base_revision: 7,
+            next_revision: 9,
+            ops: std::ptr::null(),
+            ops_len: 0,
+            ..initial
+        };
+        assert!(
+            store
+                .prepare(&unsafe { decode_batch(&skipped) }.unwrap())
+                .is_err()
+        );
+        let next = LeafBatch {
+            next_revision: 8,
+            ..skipped
+        };
+        store
+            .prepare(&unsafe { decode_batch(&next) }.unwrap())
+            .unwrap();
+        store.apply().unwrap();
+        assert!(store.accept(8));
+        let mut replacement = HostStore::new(10);
+        let initial = LeafBatch {
+            session_id: 10,
+            next_revision: 8,
+            ..initial
+        };
+        replacement
+            .prepare(&unsafe { decode_batch(&initial) }.unwrap())
+            .unwrap();
+        replacement.apply().unwrap();
+        assert!(replacement.accept(8));
+    }
+    #[test]
+    fn root_depth_zero_accepts_64_edges_but_not_65() {
+        for (count, accepted) in [(65usize, true), (66, false)] {
+            let mut store = HostStore::new(9);
+            let children: Vec<u64> = (2..=count as u64).collect();
+            let mut ops = Vec::new();
+            for id in 1..=count as u64 {
+                ops.push(LeafOp {
+                    tag: 1,
+                    kind: 0,
+                    handle: id,
+                    parent: if id == 1 { 0 } else { id - 1 },
+                    ..Default::default()
+                });
+                if id < count as u64 {
+                    ops.push(LeafOp {
+                        tag: 3,
+                        handle: id,
+                        children: LeafSpan {
+                            offset: id - 1,
+                            len: 1,
+                        },
+                        ..Default::default()
+                    });
+                }
+            }
+            assert_eq!(stage(&mut store, &ops, &children, "").is_ok(), accepted);
+        }
+    }
     fn stage(
         store: &mut HostStore,
         ops: &[LeafOp],
@@ -952,9 +1036,9 @@ mod tests {
         let mut deep = HostStore::new(9);
         let mut ops = vec![];
         let mut children = vec![];
-        for id in 1..=65 {
+        for id in 1..=66 {
             ops.push(create(id, if id == 1 { 0 } else { id - 1 }));
-            if id < 65 {
+            if id < 66 {
                 ops.push(LeafOp {
                     children: LeafSpan {
                         offset: children.len() as u64,

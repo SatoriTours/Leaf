@@ -121,6 +121,7 @@ echo "LeafReply.x=", offsetOf(LeafReply, x)
 echo "LeafReply.y=", offsetOf(LeafReply, y)
 echo "LeafReply.width=", offsetOf(LeafReply, width)
 echo "LeafReply.height=", offsetOf(LeafReply, height)
+echo "LeafReply.value=", offsetOf(LeafReply, value)
 echo "LeafConfig.sizeof=", sizeof(LeafConfig)
 echo "LeafConfig.align=", alignof(LeafConfig)
 echo "LeafConfig.stride=", sizeof(array[2,LeafConfig]) div 2

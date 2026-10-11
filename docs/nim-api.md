@@ -84,10 +84,12 @@ let actions = views:
 
 显式 `import leaf/components`，通过 `defineComponent[Props,Model]` 定义 `MountContext` 初始化和 `ComponentContext` render，再用 `componentApplication(component(...),title)` 创建应用。完整可运行示例见 `examples/component_counter.nim`；原来的 `Application(render:...)` 保持兼容。
 
-`ctx.state(initial)` 在挂载时建立 State；render 用 `ctx.value(state)` 读取当前候选。`state.set(value)` / `state.update(proc(old):T=...)` 排队，事件结束、`runtime.uiTask` 或 `runtime.batch` 最外层结束统一提交；手动 `runtime.flush()` 也可结算。队列在尝试开始时封存，失败不会自动重放 updater。普通 Nim 变量的修改仍是普通副作用，不随提交拒绝回滚。引用或可变容器类型必须提供独立 snapshot 函数，避免候选修改接受值。
+`ctx.state(initial)` 在挂载时建立 State；render 用 `ctx.value(state)` 读取当前候选。`state.set(value)` / `state.update(proc(old):T=...)` 排队，事件结束、`runtime.uiTask` 或 `runtime.batch` 最外层结束统一提交；手动 `runtime.flush()` 也可结算。队列在尝试开始时封存，失败不会自动重放 updater。初始化、render、updater 和提交期间禁止写 State；在一个 Runtime 的 UI 任务中也不能写另一个 Runtime 的 State 或嵌套进入它。普通 Nim 变量的修改仍是普通副作用，不随提交拒绝回滚。引用或可变容器类型必须提供独立 snapshot 函数，避免候选修改接受值。
 
 组件默认在父 render 传入新描述时计算；`memo(def,equals)` 使用明确的 Props 比较，也可使用版本 token。memo 不阻止自身 State 更新或脏后代更新。稳定 key 只在相同父级、相同组件类型下保留身份；换父、换类型、换 key 会重挂载。无 key 使用位置身份。事件回调即使宿主属性未变也会更新到新接受版本。
 
-`componentView` 与原 `view` 共用控制流语法，可以混合宿主节点与组件。`componentList` 提供组件行；滚出视口后 State 暂存于有限暖缓存，淘汰或源 generation 更换后旧 State 写入返回 disposed。需要长期保存的行数据应放在上层模型。
+`componentView` 与原 `view` 共用控制流语法，可以混合宿主节点与组件。`componentList` 提供组件行，可用 `styles` 设置列表尺寸；变量行高在一次绘制结束后合并视口请求，不随每行重复跨 FFI。滚出视口后 State 暂存于有限暖缓存，淘汰或源 generation 更换后旧 State 写入返回 disposed。需要长期保存的行数据应放在上层模型。
 
 `runtime.snapshot` 和整树 validator 是显式完整导出；高频局部查询使用 `runtime.find(key)`，观察局部工作量使用 `runtime.updateStats()`。ABI2 默认自动选择；`LEAF_GPUI_ABI=1|2|auto` 可诊断协议选择，只有缺少 ABI2 查询符号才自动退回 ABI1，不会忽略不兼容查询结果。`LEAF_GPUI_CACHE=0` 可关闭组件缓存进行行为对照。
+
+托管节点的完整诊断 ID 是内部格式，包含组件类型身份；业务查找应使用稳定 `key`。普通组件类型替换或卸载再挂载会建立新输入 Entity；列表源 generation 变化时，仅同一列表、逻辑 key 和宿主祖先类型一致的输入可迁移编辑状态。

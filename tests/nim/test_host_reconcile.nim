@@ -70,3 +70,11 @@ suite "typed host reconciliation":
     expect UiError:
       discard r.planDelta(HostChanges(children: @[HostChildren(parent:parent,children: @[NodeHandle(999)])]),2)
     check r.revision == 1
+
+  test "typed root depth matches legal legacy depth64":
+    var node=text("leaf")
+    for i in 0..<64:node=column(@[node])
+    let r=newHostReconciler(22)
+    let accepted=r.planSnapshot(snap(node),1,gpuiCompatible)
+    r.accept(accepted)
+    check r.revision==1

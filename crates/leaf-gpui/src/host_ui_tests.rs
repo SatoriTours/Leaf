@@ -12,6 +12,8 @@ struct Fixture {
     reset: u64,
     boundaries: bool,
     text_layout: bool,
+    watch_message: Option<String>,
+    list_form: bool,
 }
 impl Fixture {
     fn new() -> Self {
@@ -25,6 +27,8 @@ impl Fixture {
             reset: 0,
             boundaries: false,
             text_layout: false,
+            watch_message: None,
+            list_form: false,
         }
     }
     fn publish(&mut self, initial: bool) {
@@ -101,6 +105,17 @@ impl Fixture {
         if initial {
             props.text = LeafSpan::default();
             ops[0].props = props;
+        }
+        if initial && self.list_form {
+            ops[0].kind = 11;
+            ops[0].props = LeafProps {
+                present: LEAF_P_LIST,
+                list_generation: 1,
+                list_count: 2,
+                row_height: 30.0,
+                estimate: 30.0,
+                ..Default::default()
+            };
         }
         if self.text_layout {
             if initial {
@@ -204,6 +219,17 @@ unsafe extern "C" fn request(
             .into();
         }
         f.publish(false);
+    }
+    if req.tag == LEAF_REQUEST_STATUS as u32
+        && let Some(message) = &f.watch_message
+    {
+        unsafe {
+            (*reply).flags = 2;
+            (*reply).value = LeafBytes {
+                ptr: message.as_ptr(),
+                len: message.len() as u64,
+            };
+        }
     }
     unsafe { (*reply).accepted_revision = f.revision };
     0
@@ -395,15 +421,15 @@ fn unmounted_boundary_retires_weak_registry_metadata(cx: &mut gpui::TestAppConte
     assert!(!coordinator.renders.borrow().contains_key(&99));
 }
 
-#[gpui::test]
-fn source_replacement_rebinds_focused_input_by_stable_node_id(cx: &mut gpui::TestAppContext) {
+fn check_replaced_editor(cx: &mut gpui::TestAppContext, in_list: bool) {
     let mut f = Fixture::new();
+    f.list_form = in_list;
     let (host, view, cx) = form(&mut f, cx);
     let input = view.read_with(cx, |v, _| v.inputs.borrow()[&2].state.clone());
     cx.update(|w, cx| input.update(cx, |i, cx| i.focus(w, cx)));
     // Give the accepted control a stable logical ID, then replace its native
     // handle as a new list source does while preserving the item's key.
-    let id = b"row/key/input";
+    let id: &[u8] = if in_list { b"items/k:1:a" } else { b"field" };
     let update = LeafOp {
         tag: 2,
         kind: 4,
@@ -445,36 +471,70 @@ fn source_replacement_rebinds_focused_input_by_stable_node_id(cx: &mut gpui::Tes
         );
         unsafe { (f.api.accept.unwrap())(f.ctx, revision) };
     };
-    stage(&[update], &[], 2);
+    let list_props = |generation| LeafProps {
+        present: LEAF_P_LIST,
+        list_generation: generation,
+        list_count: 2,
+        row_height: 30.0,
+        estimate: 30.0,
+        ..Default::default()
+    };
+    let root = LeafOp {
+        tag: 2,
+        kind: 11,
+        handle: 1,
+        node_id: LeafSpan { offset: 0, len: 5 },
+        props: list_props(1),
+        ..Default::default()
+    };
+    let mut initial = vec![update];
+    if in_list {
+        initial.push(root);
+    }
+    stage(&initial, &[], 2);
     cx.update(|w, cx| view.update(cx, |v, cx| v.sync_inputs(w, cx)));
     let mut create = update;
     create.tag = 1;
     create.handle = 4;
-    stage(
-        &[
-            create,
-            LeafOp {
-                tag: 3,
-                handle: 1,
-                children: LeafSpan { offset: 0, len: 2 },
-                ..Default::default()
-            },
-            LeafOp {
-                tag: 4,
-                handle: 2,
-                ..Default::default()
-            },
-        ],
-        &[4, 3],
-        3,
-    );
+    let mut replacement = vec![
+        create,
+        LeafOp {
+            tag: 3,
+            handle: 1,
+            children: LeafSpan { offset: 0, len: 2 },
+            ..Default::default()
+        },
+        LeafOp {
+            tag: 4,
+            handle: 2,
+            ..Default::default()
+        },
+    ];
+    if in_list {
+        replacement.push(LeafOp {
+            props: list_props(2),
+            ..root
+        });
+    }
+    stage(&replacement, &[4, 3], 3);
     cx.update(|w, cx| view.update(cx, |v, cx| v.sync_inputs(w, cx)));
-    assert_eq!(
-        view.read_with(cx, |v, _| v.inputs.borrow()[&4].state.entity_id()),
-        input.entity_id()
-    );
+    let replacement = view.read_with(cx, |v, _| v.inputs.borrow()[&4].state.entity_id());
+    if in_list {
+        assert_eq!(replacement, input.entity_id());
+    } else {
+        assert_ne!(replacement, input.entity_id());
+    }
     assert!(!view.read_with(cx, |v, _| v.inputs.borrow().contains_key(&2)));
     let _ = host;
+}
+
+#[gpui::test]
+fn source_replacement_rebinds_focused_input_by_stable_node_id(cx: &mut gpui::TestAppContext) {
+    check_replaced_editor(cx, true);
+}
+#[gpui::test]
+fn retired_non_list_editor_does_not_reuse_diagnostic_identity(cx: &mut gpui::TestAppContext) {
+    check_replaced_editor(cx, false);
 }
 
 #[gpui::test]
@@ -508,4 +568,34 @@ fn accepted_model_deferred_during_composition_applies_after_unmark(cx: &mut gpui
         input.read_with(cx, |i, _| i.value().to_string()),
         "accepted model"
     );
+}
+
+#[gpui::test]
+fn watch_status_clears_only_external_error_and_does_not_change_host_revision(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut f = Fixture::new();
+    let (_host, view, cx) = form(&mut f, cx);
+    let revision = f.revision;
+    view.update(cx, |v, _| v.error = Some("business rejection".into()));
+    f.watch_message = Some("编译失败".into());
+    view.update(cx, |v, cx| v.poll_watch_status(cx));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.external_error.clone()),
+        Some("编译失败".into())
+    );
+    f.watch_message = None;
+    view.update(cx, |v, cx| v.poll_watch_status(cx));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.external_error.clone()),
+        Some("编译失败".into())
+    );
+    f.watch_message = Some(String::new());
+    view.update(cx, |v, cx| v.poll_watch_status(cx));
+    assert!(view.read_with(cx, |v, _| v.external_error.is_none()));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.error.clone()),
+        Some("business rejection".into())
+    );
+    assert_eq!(f.revision, revision);
 }

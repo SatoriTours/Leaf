@@ -560,14 +560,15 @@ impl Render for Desktop {
             .text_size(px(15.0))
             .child(div().flex_1().min_h_0().overflow_hidden().child(tree))
             .when_some(self.error.clone(), |view, error| {
-                view.child(
-                    div()
-                        .id("leaf-error")
-                        .p(px(12.0))
-                        .bg(rgb(0x451a1a))
-                        .text_color(rgb(0xfecaca))
-                        .child(error),
-                )
+                let banner = div()
+                    .id("leaf-error")
+                    .p(px(12.0))
+                    .bg(rgb(0x451a1a))
+                    .text_color(rgb(0xfecaca))
+                    .child(error);
+                #[cfg(feature = "native-test-support")]
+                let banner = banner.test_support();
+                view.child(banner)
             })
             .into_any_element()
     }

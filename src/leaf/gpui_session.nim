@@ -11,7 +11,7 @@ type
     rendererCtx:pointer
     id:uint64
     running,detached:bool
-    lastError,viewportError:string
+    lastError,viewportError,externalError:string
     readyCalls*:int
     onFrame*:proc(sample:LeafFrameSample):bool {.closure.}
     preparerToken:uint64
@@ -60,24 +60,43 @@ proc attach(ctx:pointer,api:ptr LeafRendererApi,rendererCtx:pointer,error:ptr Le
     sink.accept=proc(revision:uint64) {.raises:[].}=session.renderer.accept(session.rendererCtx,revision)
     sink.discardPrepared=proc() {.raises:[].}=session.renderer.`discard`(session.rendererCtx)
     session.host=attachHostSession(session.runtime,sink)
-    session.preparerToken=session.runtime.installPreparer(proc(candidate:Runtime)=
-      for id,keys in session.viewports:
-        var target:MountedNode
-        try:target=candidate.find(id)
-        except UiError:continue
-        let source=target.node.listSource
-        if source==nil:continue
-        var indices:Table[string,int]
-        for index in 0..<source.len:indices[source.itemKey(index)]=index
-        var active:seq[int]
-        for key in keys:
-          if indices.hasKey(key):active.add(indices[key])
-        if active.len>0:discard candidate.materialize(id,0,0,active))
+    # Managed candidates retain accepted rows and restore changed sources
+    # transactionally in the driver. Only legacy root renders need replay.
+    if not session.runtime.managed:
+      session.preparerToken=session.runtime.installPreparer(proc(candidate:Runtime)=
+        for id,keys in session.viewports:
+          var target:MountedNode
+          try:target=candidate.find(id)
+          except UiError:continue
+          let source=target.node.listSource
+          if source==nil:continue
+          var indices:Table[string,int]
+          for index in 0..<source.len:indices[source.itemKey(index)]=index
+          var active:seq[int]
+          for key in keys:
+            if indices.hasKey(key):active.add(indices[key])
+          if active.len>0:discard candidate.materialize(id,0,0,active))
     0
   except Exception as failure:
     if session!=nil:session.lastError=failure.msg
     writeError(error,failure.msg)
     int32(LEAF_STATUS_REJECTED)
+proc viewportRows(session:GpuiSession,handle:NodeHandle,reply:ptr LeafReply)=
+  let record=session.host.record(handle)
+  if record.isNone:fail("unknown accepted list handle")
+  let accepted=session.runtime.find(record.get.nodeId)
+  let source=accepted.node.listSource
+  if source==nil:fail("accepted viewport target is not a list")
+  session.rows.setLen(0);session.rowKeys.setLen(0)
+  for child in accepted.children:session.rowKeys.add(source.itemKey(child.listIndex))
+  for i,child in accepted.children:
+    let key=session.rowKeys[i]
+    session.rows.add(LeafRow(handle:session.host.handleFor(child.id).raw,index:uint64(child.listIndex),
+      key:LeafBytes(`ptr`:(if key.len==0:nil else:cast[ptr uint8](unsafeAddr session.rowKeys[i][0])),len:uint64(key.len))))
+  session.viewports[record.get.nodeId]=session.rowKeys
+  reply.rows_len=uint64(session.rows.len)
+  reply.rows=if session.rows.len==0:nil else:addr session.rows[0]
+  session.viewportError=""
 proc request(ctx:pointer,raw:ptr LeafRequest,reply:ptr LeafReply,error:ptr LeafError):int32 {.cdecl,raises:[].}=
   let session=cast[GpuiSession](ctx)
   let before=if session==nil:0'u64 else:session.runtime.acceptedRevision
@@ -112,23 +131,19 @@ proc request(ctx:pointer,raw:ptr LeafRequest,reply:ptr LeafReply,error:ptr LeafE
           for index in 0..<source.len:
             if source.itemKey(index)==key:protected.add(index);break
       discard session.runtime.materialize(record.get.nodeId,int(raw.first),int(raw.finish),protected)
-      session.rows.setLen(0);session.rowKeys.setLen(0)
-      let accepted=session.runtime.find(record.get.nodeId)
-      for child in accepted.children:session.rowKeys.add(source.itemKey(child.listIndex))
-      for i,child in accepted.children:
-        let key=session.rowKeys[i]
-        session.rows.add(LeafRow(handle:session.host.handleFor(child.id).raw,index:uint64(child.listIndex),
-          key:LeafBytes(`ptr`:(if key.len==0:nil else:cast[ptr uint8](unsafeAddr session.rowKeys[i][0])),len:uint64(key.len))))
-      session.viewports[record.get.nodeId]=session.rowKeys
-      reply.rows_len=uint64(session.rows.len)
-      reply.rows=if session.rows.len==0:nil else:addr session.rows[0]
-      session.viewportError=""
+      session.viewportRows(NodeHandle(raw.handle),reply)
     of uint32(LEAF_REQUEST_READY):
       if session.lastError.len>0 or session.viewportError.len>0:fail("initial typed viewport failed")
       let path=getEnv("LEAF_WATCH_READY")
       if path.len>0:writeReady(path,getEnv("LEAF_WATCH_TOKEN"),getCurrentProcessId())
       inc session.readyCalls
-    of uint32(LEAF_REQUEST_STATUS):discard
+    of uint32(LEAF_REQUEST_STATUS):
+      let status=readStatus(getEnv("LEAF_WATCH_STATUS"))
+      if status.valid:
+        session.externalError=status.message
+        reply.flags=2
+        reply.value=LeafBytes(`ptr`:(if session.externalError.len==0:nil else:cast[ptr uint8](unsafeAddr session.externalError[0])),
+          len:uint64(session.externalError.len))
     of uint32(LEAF_REQUEST_LOCATE):
       let record=session.host.record(NodeHandle(raw.handle))
       if record.isNone:fail("unknown list handle")
@@ -161,7 +176,15 @@ proc request(ctx:pointer,raw:ptr LeafRequest,reply:ptr LeafReply,error:ptr LeafE
     if session!=nil:
       if raw!=nil and raw.tag==uint32(LEAF_REQUEST_VIEWPORT):session.viewportError=failure.msg
       else:session.lastError=failure.msg
-      if session.runtime.acceptedRevision>before:status=uint32(LEAF_STATUS_ACCEPTED_SCOPE_ERROR)
+      if session.runtime.acceptedRevision>before:
+        status=uint32(LEAF_STATUS_ACCEPTED_SCOPE_ERROR)
+        if raw!=nil and reply!=nil and raw.tag==uint32(LEAF_REQUEST_VIEWPORT):
+          # Acceptance already published; return those rows without replaying
+          # the builder when application scope cleanup reports an error.
+          try:
+            session.viewportRows(NodeHandle(raw.handle),reply)
+            session.viewportError=failure.msg
+          except Exception:discard
     if reply!=nil:
       reply.status=status
       if session!=nil:reply.accepted_revision=session.runtime.acceptedRevision

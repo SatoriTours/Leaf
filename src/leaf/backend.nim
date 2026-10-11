@@ -84,6 +84,7 @@ type
     upserts*:seq[MountedEntity]
     removals*:seq[NodeHandle]
     orders*:seq[HostChildOrder]
+    issues*:seq[CapabilityIssue]
   UpdateBatch* = object
     revision*: uint64
     ops*: seq[UpdateOp]

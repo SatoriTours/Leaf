@@ -27,6 +27,7 @@ pub struct HostRow {
 #[derive(Debug)]
 pub struct HostReply {
     pub scope_error: Option<String>,
+    pub external_status: Option<String>,
     pub status: u32,
     pub revision: u64,
     pub flags: u64,
@@ -149,8 +150,14 @@ impl TypedBridge {
                 key: unsafe { text(row.key) }?,
             });
         }
+        let external_status = if request.tag == LEAF_REQUEST_STATUS as u32 && reply.flags & 2 != 0 {
+            Some(unsafe { text(reply.value) }?)
+        } else {
+            None
+        };
         Ok(HostReply {
             scope_error,
+            external_status,
             status: reply.status,
             revision: reply.accepted_revision,
             flags: reply.flags,

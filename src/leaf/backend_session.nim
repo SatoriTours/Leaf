@@ -291,6 +291,7 @@ proc attachBackendImpl(runtime: Runtime, backend: Backend, host: HostContext,
     session.entities=initTable[NodeHandle,MountedEntity](MaxNodes*4)
     session.byNodeId=initTable[string,NodeHandle](MaxNodes*4)
     session.issues=runtime.useNativePolicy(backend.capabilities,mode)
+    for issue in session.issues:session.seenIssues.incl(issue.nodeId & "\x1f" & issue.property)
   else:session.collectIssues(runtime.snapshot.root)
   session.backendToken = backend.reserveSession()
 
@@ -302,8 +303,12 @@ proc attachBackendImpl(runtime: Runtime, backend: Backend, host: HostContext,
     if backend.rebind != nil:
       backend.rebind(session.sessionId, session.mountGeneration)
     if runtime.managed:
-      let consumer=nativeHostConsumer(backend,session.sessionId,
+      let consumer=nativeHostConsumer(backend,session.sessionId,mode=mode,
         onAccepted=proc(delta:HostAcceptedDelta) {.raises:[].}=
+          for issue in delta.issues:
+            let key=issue.nodeId & "\x1f" & issue.property
+            if key notin session.seenIssues:
+              session.seenIssues.incl(key);session.issues.add(issue)
           for handle in delta.removals:
             let old=session.entities.getOrDefault(handle)
             session.byNodeId.del(old.nodeId);session.entities.del(handle)

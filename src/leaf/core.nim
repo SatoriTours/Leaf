@@ -87,6 +87,7 @@ type
     source: ListSource
     rows: Table[int, RowEntry]
   Runtime* = ref object
+    executionId:uint64
     app: Application
     driver:RuntimeDriver
     current: Snapshot
@@ -124,6 +125,13 @@ type
     ## Neither callback renders or invokes business callbacks.
     confirm*: proc() {.closure.}
     abort*: proc(scoped: bool) {.closure.}
+
+# Runtime domains are UI-thread local. A nested operation cannot switch owners
+# while application code is executing in another runtime's scope.
+var nextRuntimeId {.threadvar.}:uint64
+var executingRuntimeId {.threadvar.}:uint64
+proc runtimeIdentity*(runtime:Runtime):uint64=runtime.executionId
+proc executionRuntimeIdentity*():uint64=executingRuntimeId
 
 # Internal driver seam: core owns scopes, revisions and backend gate ownership.
 method stage*(driver:RuntimeDriver,forceRoot:bool):RuntimeDriver {.base.}=nil
@@ -174,7 +182,11 @@ var listGeneration: uint64
 
 proc generation*(source: ListSource): uint64 = source.generation
 proc len*(source: ListSource): int = source.itemKeys.len
-proc itemKey*(source: ListSource, index: int): string = source.itemKeys[index]
+when defined(leafProtocolProbes):
+  var sourceKeyReadCalls*:uint64
+proc itemKey*(source: ListSource, index: int): string =
+  when defined(leafProtocolProbes):inc sourceKeyReadCalls
+  source.itemKeys[index]
 proc rowHeight*(source: ListSource): float64 = source.uniformHeight
 proc estimatedHeight*(source: ListSource): float64 = source.estimate
 proc overscan*(source: ListSource): int = source.extraRows
@@ -329,10 +341,17 @@ proc dump(runtime: Runtime) =
     runtime.diagnostics.snapshot(runtime.snapshot.toJson())
 
 template inExecutionScope(runtime: Runtime, body: untyped) =
-  if runtime.app.executionScope == nil:
-    body
-  else:
-    runtime.app.executionScope(proc() = body)
+  block:
+    let priorRuntime=executingRuntimeId
+    if priorRuntime!=0 and priorRuntime!=runtime.executionId:
+      fail("cannot enter another Runtime during an active UI task")
+    executingRuntimeId=runtime.executionId
+    try:
+      if runtime.app.executionScope == nil:
+        body
+      else:
+        runtime.app.executionScope(proc() = body)
+    finally:executingRuntimeId=priorRuntime
 
 proc acceptedRevision*(runtime: Runtime): uint64 = runtime.revision
 
@@ -368,7 +387,7 @@ proc candidateFrom(runtime: Runtime): Runtime =
   ## structure is shared read-only; list preparation rebuilds changed paths
   ## instead of mutating shared MountedNodes. The candidate carries no
   ## committer, so nested preparation never recurses into the outer gate.
-  Runtime(app: runtime.app, driver:runtime.driver, current: runtime.current, index: runtime.index,
+  Runtime(executionId:runtime.executionId,app: runtime.app, driver:runtime.driver, current: runtime.current, index: runtime.index,
     keys: runtime.keys, rowCaches: runtime.rowCaches, counters: runtime.counters,
     rowClock: runtime.rowClock, validator: runtime.validator,
     revision: runtime.revision, descriptionBytes: runtime.descriptionBytes,
@@ -448,7 +467,7 @@ proc refreshImpl(runtime: Runtime): bool =
     # materialize lists and fail without changing the published event index.
     # The backend gate runs after preparation and before publication; a
     # rejected candidate leaves snapshot, index, caches and revision untouched.
-    var candidate = Runtime(app: runtime.app, current: snapshot,
+    var candidate = Runtime(executionId:runtime.executionId,app: runtime.app, current: snapshot,
       index: move(index), keys: move(keys), rowCaches: move(rowCaches),
       counters: runtime.counters, rowClock: runtime.rowClock, validator: runtime.validator,
       revision: runtime.revision, descriptionBytes: descriptionBytes, isCandidate: true)
@@ -533,7 +552,9 @@ proc newRuntime*(app: Application, validator: SnapshotValidator = nil,
   if app.width notin 1..16_384 or app.height notin 1..16_384:
     fail("invalid window dimensions")
   validString(app.title)
-  result = Runtime(app: app, context: BuildContext(), validator: validator, diagnostics: diagnostics)
+  if nextRuntimeId==high(uint64):fail("Runtime identity exhausted")
+  inc nextRuntimeId
+  result = Runtime(executionId:nextRuntimeId,app: app, context: BuildContext(), validator: validator, diagnostics: diagnostics)
   if app.driverFactory!=nil:result.driver=app.driverFactory(result)
   discard result.refresh()
 

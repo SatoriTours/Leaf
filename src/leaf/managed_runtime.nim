@@ -27,7 +27,8 @@ type
     states:StateStore
     reconciler:HostReconciler
     rootDescription:UiDescription
-    root,nextId:uint64
+    root,nextId,nextTypeId:uint64
+    typeTokens:Table[string,uint64]
     instances:Table[uint64,Instance]
     index:Table[string,uint64]
     keys:Table[string,HashSet[uint64]]
@@ -93,6 +94,14 @@ proc allocate(d:ManagedDriver):uint64=
   if d.data.nextId==high(uint64):fail("component identity exhausted")
   result=d.data.nextId;inc d.data.nextId
   d.created.add(result)
+proc typeSegment(data:ManagedStore,definition:ErasedComponent):string=
+  let identity=definition.typeId
+  var token=data.typeTokens.getOrDefault(identity)
+  if token==0:
+    if data.nextTypeId==high(uint64):fail("component type identity exhausted")
+    inc data.nextTypeId
+    token=data.nextTypeId;data.typeTokens[identity]=token
+  "/t:" & $token
 proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
     parentHost:NodeHandle,path:string,depth:int):uint64=
   if desc==nil:fail("nil UI description")
@@ -136,7 +145,7 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
         proc(owner:uint64)=data.invalid.incl(owner)),item.model)
     finally:d.data.states.setPhase(StatePhase.idle)
     let previous=if old==nil or old.children.len==0:0'u64 else:old.children[0]
-    item.children= @[d.reconcile(output,previous,id,id,parentHost,path & "/r/" & segment(output,0),depth+1)]
+    item.children= @[d.reconcile(output,previous,id,id,parentHost,path & d.data.typeSegment(desc.erased) & "/r/" & segment(output,0),depth+1)]
     let root=d.hostRoot(id)
     if old==nil or root!=oldRoot or d.globalRefresh:
       d.changes.boundaries.add(HostBoundary(id:id,root:root,parent:owner))
@@ -434,7 +443,7 @@ proc componentApplication*(root:UiDescription,title:string,width=640,height=480,
   if root==nil:fail("component application needs a root")
   newDriverApplication(title,width,height,proc(owner:Runtime):RuntimeDriver=
     inc nextManagedId
-    let data=ManagedStore(owner:owner,states:newStateStore(nextManagedId),
+    let data=ManagedStore(owner:owner,states:newStateStore(owner.runtimeIdentity),
       reconciler:newHostReconciler(nextManagedId),rootDescription:root,nextId:1,
       instances:initTable[uint64,Instance](MaxNodes*4),index:initTable[string,uint64](MaxNodes*4),
       keys:initTable[string,HashSet[uint64]](MaxNodes*4))

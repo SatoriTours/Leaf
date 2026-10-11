@@ -132,3 +132,65 @@ suite "separate component and host budgets":
     check rt.stats.mountedNodes==10001
     expect UiError:discard rt.find("shared")
     check rt.snapshot.root.children.len==5000
+
+suite "runtime State execution isolation":
+  test "foreign State cannot escape init render updater event or commit rejection":
+    var foreign,local:State[int]
+    var phase=""
+    let B=defineComponent[int,State[int]]("IsolationB",
+      proc(ctx:MountContext,p:int):State[int]=
+        result=ctx.state(0);foreign=result,
+      proc(ctx:ComponentContext,p:int,s:State[int]):UiDescription=host(text($ctx.value(s))))
+    let b=newRuntime(componentApplication(component(B,0),"B"))
+    let A=defineComponent[int,State[int]]("IsolationA",
+      proc(ctx:MountContext,p:int):State[int]=
+        if phase=="init":foreign.set(99)
+        result=ctx.state(0);local=result,
+      proc(ctx:ComponentContext,p:int,s:State[int]):UiDescription=
+        if phase=="render":foreign.set(99)
+        let count=ctx.value(s)
+        let click=proc(e:Event)=
+          if phase=="event":foreign.set(99)
+          elif phase=="nested":b.uiTask(proc()=foreign.set(99))
+          else:s.update(proc(value:int):int=
+            if phase=="updater":foreign.set(99)
+            value+1)
+        host(button($count,key="go",onClick=click)))
+    for forbidden in ["init","render"]:
+      phase=forbidden
+      expect UiError:discard newRuntime(componentApplication(component(A,0),"A"))
+      discard b.flush()
+      check foreign.read()==0
+    phase=""
+    let a=newRuntime(componentApplication(component(A,0),"A"))
+    a.setCommitter(proc(accepted,candidate:Runtime)=
+      if phase=="commit":foreign.set(99))
+    for forbidden in ["render","updater","event","nested","commit"]:
+      phase=forbidden
+      expect UiError:discard a.dispatch("go",Event(kind:click))
+      discard b.flush()
+      check foreign.read()==0
+      check local.read()==0
+    phase=""
+    b.uiTask(proc()=foreign.set(4))
+    a.uiTask(proc()=local.set(5))
+    check foreign.read()==4
+    check local.read()==5
+
+suite "component editor identity":
+  test "type replacement changes descendant identity even with the same key":
+    var switched:State[bool]
+    let First=defineComponent[int,int]("EditorFirst",proc(ctx:MountContext,p:int):int=p,
+      proc(ctx:ComponentContext,p,m:int):UiDescription=host(input("first",key="field")))
+    let Second=defineComponent[int,int]("EditorSecond",proc(ctx:MountContext,p:int):int=p,
+      proc(ctx:ComponentContext,p,m:int):UiDescription=host(input("second",key="field")))
+    let Parent=defineComponent[int,State[bool]]("EditorParent",
+      proc(ctx:MountContext,p:int):State[bool]=
+        result=ctx.state(false);switched=result,
+      proc(ctx:ComponentContext,p:int,s:State[bool]):UiDescription=
+        let child=if ctx.value(s):component(Second,0,key="same") else:component(First,0,key="same")
+        hostShell(column(@[]),@[child,host(button("swap",key="swap",onClick=proc(e:Event)=s.set(true)))]))
+    let rt=newRuntime(componentApplication(component(Parent,0),"identity"))
+    let old=rt.find("field").id
+    discard rt.dispatch("swap",Event(kind:click))
+    check rt.find("field").id!=old

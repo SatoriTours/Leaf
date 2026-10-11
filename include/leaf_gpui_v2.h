@@ -59,6 +59,7 @@ typedef struct LeafFrameSample { double elapsed_ms, draw_ms, rust_prepare_ms, ru
 #define LEAF_REQUEST_EVENT UINT64_C(1)
 #define LEAF_REQUEST_VIEWPORT UINT64_C(2)
 #define LEAF_REQUEST_STATUS UINT64_C(3)
+#define LEAF_REPLY_STATUS_VALID UINT64_C(2)
 #define LEAF_REQUEST_READY UINT64_C(4)
 #define LEAF_REQUEST_LOCATE UINT64_C(5)
 #define LEAF_REQUEST_RENDERING UINT64_C(6)
@@ -198,6 +199,9 @@ struct LeafReply {
   double y;
   double width;
   double height;
+  /* STATUS only: flags & LEAF_REPLY_STATUS_VALID marks an owned-by-host UTF-8 value.
+     Rust copies it synchronously; an empty value clears the external watch error. */
+  LeafBytes value;
 };
 struct LeafConfig {
   uint32_t struct_size;

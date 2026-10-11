@@ -7,7 +7,8 @@ var nextNativeConsumer:uint64=1000
 proc nativeHostConsumer*(backend:Backend,sessionId=0'u64,
     onAccepted:proc(delta:HostAcceptedDelta) {.closure,raises:[].}=nil,
     onRecover:proc() {.closure.}=nil,
-    onFault:proc(reason:string) {.closure,raises:[].}=nil):HostConsumer=
+    onFault:proc(reason:string) {.closure,raises:[].}=nil,
+    mode=compatible):HostConsumer=
   if backend==nil or backend.prepare==nil or backend.apply==nil:fail("incomplete native consumer")
   var id=sessionId
   if id==0:inc nextNativeConsumer;id=nextNativeConsumer
@@ -15,19 +16,20 @@ proc nativeHostConsumer*(backend:Backend,sessionId=0'u64,
   var edits:Table[NodeHandle,MountedEntity]
   var removed:seq[NodeHandle]
   var orders:seq[HostChildOrder]
+  var pendingIssues:seq[CapabilityIssue]
   var batch:UpdateBatch
   var applied=false
   var faulted=false
   result=HostConsumer(sessionId:id)
   result.prepare=proc(wire:HostBatch)=
     if faulted:fail("native consumer is faulted")
-    edits.clear();removed.setLen(0);orders.setLen(0);applied=false
+    edits.clear();removed.setLen(0);orders.setLen(0);pendingIssues.setLen(0);applied=false
     batch=UpdateBatch(revision:wire.nextRevision,isDelta:true)
     var created:HashSet[NodeHandle]
     for op in wire.ops:
       case op.kind
       of HostOpKind.create,HostOpKind.update:
-        discard checkTypedCapabilities(op.nodeId,op.nodeKind,op.props.normalized,backend.capabilities)
+        pendingIssues.add(checkTypedCapabilities(op.nodeId,op.nodeKind,op.props.normalized,backend.capabilities,mode))
         var entity=entities.getOrDefault(op.handle)
         entity.handle=op.handle;entity.parent=op.parent;entity.nodeId=op.nodeId;entity.kind=op.nodeKind
         entity.props=effectiveProps(backend.capabilities,op.props.normalized)
@@ -84,13 +86,13 @@ proc nativeHostConsumer*(backend:Backend,sessionId=0'u64,
         primary.msg.add("; restore failed: " & secondary.msg)
       raise primary
   result.accept=proc(revision:uint64) {.raises:[].}=
-    var delta=HostAcceptedDelta(revision:revision,removals:removed,orders:orders)
+    var delta=HostAcceptedDelta(revision:revision,removals:removed,orders:orders,issues:move(pendingIssues))
     for handle in removed:entities.del(handle)
     for handle,entity in edits:entities[handle]=entity;delta.upserts.add(entity)
     if backend.acceptedDelta!=nil:backend.acceptedDelta(delta)
     elif backend.accepted!=nil:backend.accepted(entities,revision)
     if onAccepted!=nil:onAccepted(delta)
-    applied=false;edits.clear();removed.setLen(0);orders.setLen(0)
+    applied=false;edits.clear();removed.setLen(0);orders.setLen(0);pendingIssues.setLen(0)
   result.discardPrepared=proc() {.raises:[].}=
     try:
       if applied:
@@ -100,7 +102,7 @@ proc nativeHostConsumer*(backend:Backend,sessionId=0'u64,
     except Exception as error:
       faulted=true
       if onFault!=nil:onFault(error.msg)
-    applied=false;edits.clear();removed.setLen(0);orders.setLen(0)
+    applied=false;edits.clear();removed.setLen(0);orders.setLen(0);pendingIssues.setLen(0)
   result.faultPrepared=proc() {.raises:[].}=
     faulted=true
     if onFault!=nil:onFault("native installation rollback scope refused entry")

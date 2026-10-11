@@ -37,6 +37,16 @@ struct ListAddress {
     list: u64,
     key: String,
     index: usize,
+    generation: u64,
+    lineage: Vec<u32>,
+}
+impl ListAddress {
+    fn permits_migration_to(&self, next: &Self) -> bool {
+        self.list == next.list
+            && self.key == next.key
+            && self.lineage == next.lineage
+            && self.generation != next.generation
+    }
 }
 struct InputSlot {
     binding: Rc<Cell<u64>>,
@@ -55,6 +65,7 @@ enum Scroll {
     Uniform(UniformListScrollHandle),
     Variable(ListState),
 }
+type ViewportSignature = (Range<usize>, Vec<(usize, String)>);
 struct ListSlot {
     generation: u64,
     count: usize,
@@ -66,6 +77,8 @@ struct ListSlot {
     visible: HashSet<usize>,
     painting: HashSet<usize>,
     scheduled: bool,
+    placeholders: bool,
+    requested: Option<ViewportSignature>,
     failed: bool,
 }
 impl ListSlot {
@@ -89,7 +102,7 @@ impl ListSlot {
         true
     }
     fn begin_finish(&mut self, generation: u64) -> bool {
-        if generation != self.generation {
+        if generation != self.generation || !self.scheduled {
             return false;
         }
         self.scheduled = false;
@@ -118,6 +131,8 @@ impl ListSlot {
             visible: HashSet::new(),
             painting: HashSet::new(),
             scheduled: false,
+            placeholders: false,
+            requested: None,
             failed: false,
         }
     }
@@ -125,6 +140,8 @@ impl ListSlot {
 #[derive(Default)]
 struct BoundaryCoordinator {
     measure: Cell<bool>,
+    #[cfg(feature = "native-test-support")]
+    viewport_requests: Cell<u64>,
     views: RefCell<HashMap<u64, WeakEntity<HostView>>>,
     renders: RefCell<HashMap<u64, u64>>,
 }
@@ -140,6 +157,7 @@ pub struct HostView {
     _theme_subscription: Option<Subscription>,
     _quit_subscription: Option<Subscription>,
     error: Option<String>,
+    external_error: Option<String>,
     settling: Option<u64>,
     ready_sent: bool,
     frame_start: Option<std::time::Instant>,
@@ -160,6 +178,7 @@ impl HostView {
             _theme_subscription: None,
             _quit_subscription: None,
             error: None,
+            external_error: None,
             settling: None,
             ready_sent: false,
             frame_start: None,
@@ -190,7 +209,38 @@ impl HostView {
             async {}
         }));
         view.sync_inputs(window, cx);
+        if boundary_id == 0 && std::env::var_os("LEAF_WATCH_STATUS").is_some() {
+            cx.spawn_in(window, async move |view, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(200))
+                        .await;
+                    if view
+                        .update_in(cx, |view, _, cx| view.poll_watch_status(cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         view
+    }
+    fn poll_watch_status(&mut self, cx: &mut Context<Self>) {
+        if self.closing {
+            return;
+        }
+        let request = self.bridge.command(LEAF_REQUEST_STATUS);
+        if let Ok(reply) = self.bridge.request(&request)
+            && let Some(message) = reply.external_status
+        {
+            let next = (!message.is_empty()).then_some(message);
+            if self.external_error != next {
+                self.external_error = next;
+                cx.notify();
+            }
+        }
     }
     fn boundary_element(
         &self,
@@ -335,19 +385,40 @@ impl HostView {
         let store = self.store.borrow();
         let lists = self.lists.borrow();
         let mut current = handle;
+        let mut lineage = Vec::new();
         while let Some(node) = store.node(current) {
-            if let Some(list) = lists.get(&node.parent) {
-                return list
-                    .by_handle
-                    .get(&current)
-                    .map(|(index, key)| ListAddress {
-                        list: node.parent,
-                        key: key.clone(),
-                        index: *index,
-                    });
-            }
-            if node.parent == 0 {
-                break;
+            lineage.push(node.kind);
+            let parent = store.node(node.parent)?;
+            if parent.kind == 11 {
+                let known = lists
+                    .get(&parent.handle)
+                    .filter(|slot| slot.generation == parent.props.values.list_generation)
+                    .and_then(|slot| slot.by_handle.get(&current));
+                let (index, key) = if let Some((index, key)) = known {
+                    (*index, key.clone())
+                } else {
+                    // Rows are already in HostStore before the next row reply.
+                    // Decode only the length-prefixed logical key, never Nim types.
+                    let suffix = node.node_id.strip_prefix(&parent.node_id)?;
+                    let keyed = suffix
+                        .strip_prefix("/item/k:")
+                        .or_else(|| suffix.strip_prefix("/k:"))?;
+                    let (length, tail) = keyed.split_once(':')?;
+                    let length: usize = length.parse().ok()?;
+                    let key = tail.get(..length)?;
+                    let rest = tail.get(length..)?;
+                    if !rest.is_empty() && !rest.starts_with('/') {
+                        return None;
+                    }
+                    (usize::MAX, key.to_owned())
+                };
+                return Some(ListAddress {
+                    list: parent.handle,
+                    key,
+                    index,
+                    generation: parent.props.values.list_generation,
+                    lineage,
+                });
             }
             current = node.parent;
         }
@@ -376,7 +447,15 @@ impl HostView {
             .map(|(id, slot)| (slot.identity.clone(), *id))
             .collect();
         for node in nodes {
+            let address = self.input_address(node.handle);
+            let migratable = retired
+                .get(&node.node_id)
+                .and_then(|old| inputs.get(old))
+                .and_then(|slot| slot.address.as_ref())
+                .zip(address.as_ref())
+                .is_some_and(|(old, next)| old.permits_migration_to(next));
             if !inputs.contains_key(&node.handle)
+                && migratable
                 && let Some(old) = retired.remove(&node.node_id)
                 && let Some(slot) = inputs.remove(&old)
             {
@@ -525,6 +604,10 @@ impl HostView {
         request.finish = range.end as u64;
         request.protected_rows = rows.as_ptr();
         request.protected_len = rows.len() as u64;
+        #[cfg(feature = "native-test-support")]
+        self.coordinator
+            .viewport_requests
+            .set(self.coordinator.viewport_requests.get() + 1);
         let result = self.bridge.request(&request);
         let mut success = result.is_ok();
         let rows = self.accept(result);
@@ -551,7 +634,7 @@ impl HostView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let (schedule, mut protected, generation) = {
+        let (schedule, generation, handles, estimate) = {
             let mut lists = self.lists.borrow_mut();
             let Some(slot) = lists.get_mut(&id) else {
                 return Vec::new();
@@ -559,40 +642,39 @@ impl HostView {
             slot.painting.extend(range.clone());
             let schedule = !slot.scheduled;
             slot.scheduled = true;
-            let keys = slot
-                .visible
-                .union(&slot.painting)
-                .filter_map(|index| slot.rows.get(index).map(|(_, key)| (*index, key.clone())))
+            if schedule {
+                slot.placeholders = false;
+            }
+            let handles = range
+                .map(|index| slot.rows.get(&index).map(|(handle, _)| *handle))
                 .collect::<Vec<_>>();
-            (schedule, keys, slot.generation)
+            slot.placeholders |= handles.iter().any(Option::is_none);
+            (schedule, slot.generation, handles, slot.estimate)
         };
-        protected.extend(self.protected_rows(id, window, cx));
-        self.request_rows(id, range.clone(), protected, cx);
-        self.sync_inputs(window, cx);
         if schedule {
             let weak = cx.entity().downgrade();
-            window.on_next_frame(move |window, app| {
+            // All providers in this paint contribute before the effect cycle ends.
+            // Unlike on_next_frame, defer does not create a frame while idle.
+            window.defer(cx, move |window, app| {
                 let _ = weak.update(app, |view, cx| view.finish_list(id, generation, window, cx));
             });
         }
-        let handles = {
-            let lists = self.lists.borrow();
-            let Some(slot) = lists.get(&id) else {
-                return Vec::new();
-            };
-            range
-                .filter_map(|index| slot.rows.get(&index).map(|(id, _)| *id))
-                .collect::<Vec<_>>()
-        };
         handles
             .into_iter()
-            .map(|handle| {
-                let row = div().w_full().child(self.render_node(handle, cx));
-                if let Some(height) = height {
-                    row.h(px(height)).overflow_hidden().into_any_element()
-                } else {
-                    row.into_any_element()
+            .map(|handle| match handle {
+                Some(handle) => {
+                    let row = div().w_full().child(self.render_node(handle, cx));
+                    if let Some(height) = height {
+                        row.h(px(height)).overflow_hidden().into_any_element()
+                    } else {
+                        row.into_any_element()
+                    }
                 }
+                // Keep estimated geometry until the merged viewport is accepted.
+                None => div()
+                    .w_full()
+                    .h(px(height.unwrap_or(estimate)))
+                    .into_any_element(),
             })
             .collect()
     }
@@ -603,7 +685,10 @@ impl HostView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut protected = {
+        let mut protected = self.protected_rows(id, window, cx);
+        protected.sort_unstable();
+        protected.dedup();
+        let (range, missing, scroll) = {
             let mut lists = self.lists.borrow_mut();
             let Some(slot) = lists.get_mut(&id) else {
                 return;
@@ -611,19 +696,33 @@ impl HostView {
             if !slot.begin_finish(generation) {
                 return;
             }
-            if slot.failed {
-                slot.painting.clear();
+            slot.visible = std::mem::take(&mut slot.painting);
+            let range = match (slot.visible.iter().min(), slot.visible.iter().max()) {
+                (Some(first), Some(last)) => *first..*last + 1,
+                _ => 0..0,
+            };
+            let signature = (range.clone(), protected.clone());
+            if slot.requested.as_ref() == Some(&signature) {
                 return;
             }
-            slot.visible = std::mem::take(&mut slot.painting);
-            slot.visible
-                .iter()
-                .filter_map(|index| slot.rows.get(index).map(|(_, key)| (*index, key.clone())))
-                .collect::<Vec<_>>()
+            let missing = range
+                .clone()
+                .filter(|index| !slot.rows.contains_key(index))
+                .collect::<Vec<_>>();
+            slot.requested = Some(signature);
+            (range, missing, slot.scroll.clone())
         };
-        protected.extend(self.protected_rows(id, window, cx));
-        self.request_rows(id, 0..0, protected, cx);
-        self.sync_inputs(window, cx);
+        if self.request_rows(id, range, protected, cx) {
+            if let Scroll::Variable(state) = scroll
+                && let (Some(first), Some(last)) = (missing.first(), missing.last())
+            {
+                let anchor = state.logical_scroll_top();
+                state.splice(*first..*last + 1, last - first + 1);
+                state.scroll_to(anchor);
+            }
+            self.sync_inputs(window, cx);
+        }
+        cx.notify();
     }
     fn render_list(&self, node: &HostNode, cx: &mut Context<Self>) -> AnyElement {
         let p = &node.props.values;
@@ -686,6 +785,12 @@ impl HostView {
                 slot.count = p.list_count as usize;
                 slot.visible.clear();
                 slot.painting.clear();
+                slot.rows.clear();
+                slot.by_handle.clear();
+                slot.scheduled = false;
+                slot.placeholders = false;
+                slot.requested = None;
+                slot.failed = false;
             }
             slot.scroll.clone()
         };
@@ -870,6 +975,17 @@ impl HostView {
                     }
                     return;
                 }
+                if view.lists.borrow().values().any(|slot| {
+                    slot.scheduled
+                        || slot.placeholders
+                        || slot
+                            .visible
+                            .iter()
+                            .any(|index| !slot.rows.contains_key(index))
+                }) {
+                    Self::schedule_ready(&cx.entity(), window, frames);
+                    return;
+                }
                 view.ready_sent = true;
                 view.sample_rendering(window, LEAF_REQUEST_RENDERING);
                 view.accept(
@@ -944,7 +1060,12 @@ impl Render for HostView {
                         .nodes()
                         .map(|n| (n.node_id.clone(), format!("host-{}", n.handle)))
                         .collect::<Vec<_>>();
-                    crate::native_probe::write(window, cx, targets.into_iter());
+                    crate::native_probe::write_host(
+                        window,
+                        cx,
+                        targets.into_iter(),
+                        view.coordinator.viewport_requests.get(),
+                    );
                 });
             });
         }
@@ -980,16 +1101,20 @@ impl Render for HostView {
                     .overflow_hidden()
                     .child(self.render_node(root, cx)),
             )
-            .when_some(self.error.clone(), |view, error| {
-                view.child(
-                    div()
+            .when_some(
+                self.external_error.clone().or_else(|| self.error.clone()),
+                |view, error| {
+                    let banner = div()
                         .id("leaf-error")
                         .p(px(12.0))
                         .bg(rgb(0x451a1a))
                         .text_color(rgb(0xfecaca))
-                        .child(error),
-                )
-            })
+                        .child(error);
+                    #[cfg(feature = "native-test-support")]
+                    let banner = banner.test_support();
+                    view.child(banner)
+                },
+            )
             .into_any_element()
     }
 }
@@ -1104,6 +1229,28 @@ mod host_ui_tests;
 #[cfg(test)]
 mod typed_list_tests {
     use super::*;
+    #[test]
+    fn editor_migration_requires_new_source_same_list_key_and_host_lineage() {
+        let old = ListAddress {
+            list: 1,
+            key: "中文".into(),
+            index: 0,
+            generation: 1,
+            lineage: vec![4, 0],
+        };
+        let mut next = old.clone();
+        assert!(!old.permits_migration_to(&next));
+        next.generation = 2;
+        assert!(old.permits_migration_to(&next));
+        next.lineage = vec![4, 1];
+        assert!(!old.permits_migration_to(&next));
+        next.lineage = old.lineage.clone();
+        next.list = 2;
+        assert!(!old.permits_migration_to(&next));
+        next.list = 1;
+        next.key = "other".into();
+        assert!(!old.permits_migration_to(&next));
+    }
     #[test]
     fn obsolete_rows_and_frame_cannot_replace_new_source() {
         let props = LeafProps {

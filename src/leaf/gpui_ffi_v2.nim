@@ -170,6 +170,7 @@ type
     y*: float64
     width*: float64
     height*: float64
+    value*: LeafBytes
   LeafConfig* {.bycopy.} = object
     struct_size*: uint32
     flags*: uint32
