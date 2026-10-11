@@ -25,14 +25,19 @@ when defined(windows):
     if getExitCodeProcess(p.handle, code) == 0: raiseOSError(osLastError())
     int(code)
 
-  proc close*(p: WindowsProcess) =
+  proc close*(p: WindowsProcess): int {.discardable.} =
+    result = -1
     if p == nil: return
     # KILL_ON_JOB_CLOSE covers descendants even when the original leader exited.
     p.job.release()
     if p.handle != 0:
-      if waitForSingleObject(p.handle, 3000) == WAIT_TIMEOUT:
+      var status = waitForSingleObject(p.handle, 3000)
+      if status == WAIT_TIMEOUT:
         discard terminateProcess(p.handle, 1)
-        discard waitForSingleObject(p.handle, 3000)
+        status = waitForSingleObject(p.handle, 3000)
+      if status == WAIT_OBJECT_0:
+        var code: int32
+        if getExitCodeProcess(p.handle, code) != 0: result = int(code)
       p.handle.release()
     p.outputHandle.release()
     p.errorHandle.release()

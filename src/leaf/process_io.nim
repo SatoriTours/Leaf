@@ -556,7 +556,8 @@ else:
 
   proc closeSplit*(p: SplitProcess) =
     if p == nil or p.closed: return
-    p.process.close()
+    let code = p.process.close()
+    if p.code < 0: p.code = code
     p.closed = true
 
 const MaxProcessOutput* = 262_144
@@ -643,8 +644,10 @@ proc close*(p: ManagedProcess) =
       sleep(5)
     discard posix.kill(Pid(-p.pid), SIGKILL)
     p.code = p.process.waitForExit()
-  else: p.code = p.exitCode()
-  p.process.close()
+    p.process.close()
+  else:
+    # Windows closes the Job Object and waits before querying the final exit.
+    p.code = p.process.close()
   p.closed = true
 
 var interrupted = false

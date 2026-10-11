@@ -581,15 +581,18 @@ suite "migration runner fix round 2":
     owner.release()
 
   test "an unlinked database returns a controlled lock-path report":
-    let path = busyRoot / "unlinked.sqlite3"
-    let db = openDatabase(path)
-    defer: db.close()
-    removeFile(path)
-    let result = runMigrations(db, @[one], MigrationRequest(kind: mrMigrate))
-    check result.errors.len == 1
-    check result.errors[0].code == "migration_lock_path_failed"
-    check result.executed.len == 0
-    check not db.isMigrationRunnerActive
+    when defined(windows):
+      skip() # Windows SQLite keeps the open database from being deleted.
+    else:
+      let path = busyRoot / "unlinked.sqlite3"
+      let db = openDatabase(path)
+      defer: db.close()
+      removeFile(path)
+      let result = runMigrations(db, @[one], MigrationRequest(kind: mrMigrate))
+      check result.errors.len == 1
+      check result.errors[0].code == "migration_lock_path_failed"
+      check result.executed.len == 0
+      check not db.isMigrationRunnerActive
 
   test "unconfirmed reports never claim committed executions":
     let arbitrary = MigrationStep(version: 77, direction: mdUp, name: "not_confirmed",

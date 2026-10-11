@@ -186,9 +186,9 @@ proc databaseInitPlan*(root, name: string, convertManifest = true): seq[Scaffold
   # Only the exact current catalog is owned; any other content is custom.
   addDatabaseFile(result, root, CatalogPath, catalogSource(),
     proc(previous: string): bool = false, "db/catalog.nim")
-  let readmePath = guardedPath(root, MigrationsDir / "README.md")
+  let readmePath = guardedPath(root, MigrationsDir & "/README.md")
   if not fileExists(readmePath):
-    result.add(ScaffoldFile(path: MigrationsDir / "README.md", content: migrationsReadmeSource()))
+    result.add(ScaffoldFile(path: MigrationsDir & "/README.md", content: migrationsReadmeSource()))
   for file in registryPlan(root, convertManifest): result.add(file)
   let includeUpdate = databaseIncludeUpdate(root)
   if includeUpdate.needed:

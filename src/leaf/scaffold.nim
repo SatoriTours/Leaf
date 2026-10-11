@@ -109,7 +109,7 @@ proc appFiles(name: string, taskVersion: int64): seq[ScaffoldFile] =
     "const\n  ApplicationTitle* = " & name.escape & "\n  WindowWidth* = 960\n  WindowHeight* = 640\n"))
   result.add(ScaffoldFile(path: DatabaseConfigPath, content: databaseConfigSource(name)))
   result.add(ScaffoldFile(path: CatalogPath, content: catalogSource()))
-  result.add(ScaffoldFile(path: MigrationsDir / "README.md", content: migrationsReadmeSource()))
+  result.add(ScaffoldFile(path: MigrationsDir & "/README.md", content: migrationsReadmeSource()))
   let task = parseResource("Task", @["title:string", "done:bool"], taskVersion)
   result.add(ScaffoldFile(path: "app/models/task.nim", content: modelCodeV2(task)))
   result.add(ScaffoldFile(path: "tests/test_home.nim", content: modelTestCodeV2(task)))

@@ -10,7 +10,7 @@ import ./migrations/initialization
 const
   MaintenanceRelative* = "target/leaf-db"
   MaintenanceEntry* = "target/leaf-db/maintenance.nim"
-  MaintenanceBinary* = "target/leaf-db/maintenance"
+  MaintenanceBinary* = "target/leaf-db/maintenance" & (when defined(windows): ".exe" else: "")
   CancelTokenEnv* = "LEAF_MIGRATION_CANCEL_TOKEN"
   ReportEnv* = "LEAF_MIGRATION_REPORT"
   TextReportEnv* = "LEAF_MIGRATION_TEXT_REPORT"

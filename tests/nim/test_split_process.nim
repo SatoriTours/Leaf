@@ -47,12 +47,18 @@ suite "Split subprocess lifecycle":
     check not child.cleanupUnconfirmed
 
   test "a launch failure stays a failure through close":
-    let child = startSplitManaged(root / "missing-executable", @[], root)
-    defer: child.closeSplit()
-    child.finish()
-    child.closeSplit()
-    check child.code == 127
-    check not child.cleanupUnconfirmed
+    when defined(windows):
+      # CreateProcessW reports a missing executable synchronously; no child is
+      # returned. POSIX reports exec failure through its guardian status pipe.
+      expect OSError:
+        discard startSplitManaged(root / "missing-executable", @[], root)
+    else:
+      let child = startSplitManaged(root / "missing-executable", @[], root)
+      defer: child.closeSplit()
+      child.finish()
+      child.closeSplit()
+      check child.code == 127
+      check not child.cleanupUnconfirmed
 
   test "closing one split leaves its sibling usable":
     let one = startSplitManaged(getAppFilename(), @["--sleep"], root)

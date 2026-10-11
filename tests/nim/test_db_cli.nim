@@ -24,7 +24,13 @@ proc runCliIn(directory: string, args: seq[string], env: StringTableRef = nil,
 
 proc snapshot(root: string): seq[tuple[path, bytes: string]] =
   for path in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
-    result.add (relativePath(path, root), (if dirExists(path): "dir" else: readFile(path)))
+    let relative = relativePath(path, root)
+    let portable = relative.replace('\\', '/')
+    # Status may rebuild its own maintenance executable (PE timestamps differ
+    # on Windows); the read-only contract covers storage and project sources.
+    if portable == MaintenanceRelative or portable.startsWith(MaintenanceRelative & "/"):
+      continue
+    result.add (relative, (if dirExists(path): "dir" else: readFile(path)))
 
 suite "Headless database CLI":
   test "init, migrate, status and rollback run from the current project":
@@ -425,9 +431,12 @@ suite "Headless database CLI":
     var env = newStringTable(modeCaseSensitive)
     for key, value in envPairs(): env[key] = value
     env["LEAF_DATABASE_PATH"] = database
+    # Finish fixture writes before warming the maintenance build.
+    writeFile(app / "target-notes.txt", "in scope\n")
     check runCliIn(app, @["db", "migrate", "--json"], env).code == 0
     proc stamp(path: string): string =
-      let value = getLastModificationTime(path)
+      let value = when defined(windows): getFileInfo(path).lastWriteTime
+        else: getLastModificationTime(path)
       $value.toUnix & "." & $value.nanosecond
     proc snap(root: string): seq[tuple[path, text: string]] =
       result.add (".", "dir:" & stamp(root))
@@ -438,7 +447,6 @@ suite "Headless database CLI":
         if normalized == "target/leaf-db" or normalized.startsWith("target/leaf-db/"): continue
         if dirExists(path): result.add (rel & "/", "dir:" & stamp(path))
         else: result.add (rel, "file:" & stamp(path) & ":" & readFile(path))
-    writeFile(app / "target-notes.txt", "in scope\n")
     let before = snap(app)
     check runCliIn(app, @["db", "status", "--json"], env).code == 0
     check runCliIn(app, @["db", "migrate", "--dry-run", "--json"], env).code == 0

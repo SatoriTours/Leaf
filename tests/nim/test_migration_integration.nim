@@ -28,7 +28,8 @@ proc boundedChild(exe: string, args: seq[string], dir: string,
 
 proc stamp(path: string): string =
   ## Exact seconds and nanoseconds; no float rounding.
-  let value = getLastModificationTime(path)
+  let value = when defined(windows): getFileInfo(path).lastWriteTime
+    else: getLastModificationTime(path)
   $value.toUnix & "." & $value.nanosecond
 
 proc snapshotTree(root: string): Table[string, string] =
@@ -643,7 +644,7 @@ db.close()
     check second.code == 0
     check "history 3" in second.output
     check readFile(app / "app/generated/migrations.nim") == delegate
-    let third = boundedChild(app / "target/f2-s2b", @[], app)
+    let third = boundedChild(app / "target/f2-s2b".changeFileExt(ExeExt), @[], app)
     checkpoint third.output
     check third.code == 0
     check "history 3" in third.output

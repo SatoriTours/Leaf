@@ -290,8 +290,8 @@ suite "discoverMigrations catalog":
     check firstCode == 0
     check secondCode == 0
     if firstCode == 0 and secondCode == 0:
-      check "count=2" in runBinary(project / "app-a", project).output
-      check "count=2" in runBinary(project / "app-b", project).output
+      check "count=2" in runBinary(project / "app-a".changeFileExt(ExeExt), project).output
+      check "count=2" in runBinary(project / "app-b".changeFileExt(ExeExt), project).output
 
   when defined(posix):
     test "catalog rejects a symlinked artifact target without writing outside":
@@ -373,23 +373,26 @@ suite "migration catalog fix round 1":
         check toSeq(walkDirRec(realProject / "target" / "leaf-migrations")).len == 1
 
   test "catalog escapes quoted relative directories":
-    let project = base / "quoted directory"
-    writeProbeFiles(project, @[
-      ("db/catalog.nim", """
+    when defined(windows):
+      skip() # Windows filenames cannot contain a double quote.
+    else:
+      let project = base / "quoted directory"
+      writeProbeFiles(project, @[
+        ("db/catalog.nim", """
 import leaf/migrations
 
 discoverMigrations("mig\"quoted", applicationMigrations)
-"""),
-      ("db/mig\"quoted/001_create_tasks.nim", nimMigration("create_tasks", "tasks", "title")),
-      ("main.nim", mainSource)])
-    let probe = buildProbe(project, "main.nim", project / "target" / "cache", "app")
-    check probe.code == 0
-    if probe.code != 0:
-      checkpoint(probe.output)
-    else:
-      let run = runBinary(probe.binary, project)
-      check run.code == 0
-      check "count=1" in run.output
+  """),
+        ("db/mig\"quoted/001_create_tasks.nim", nimMigration("create_tasks", "tasks", "title")),
+        ("main.nim", mainSource)])
+      let probe = buildProbe(project, "main.nim", project / "target" / "cache", "app")
+      check probe.code == 0
+      if probe.code != 0:
+        checkpoint(probe.output)
+      else:
+        let run = runBinary(probe.binary, project)
+        check run.code == 0
+        check "count=1" in run.output
 
   when defined(posix):
     test "catalog escapes literal backslash relative directories":

@@ -65,6 +65,10 @@ proc buildProbe*(root, mainPath, nimcache: string, outName = "probe",
   if compiler.len == 0: return (1, "Nim compiler not found", "")
   result.binary = if outPath.len > 0: outPath
     else: root / (outName & (when defined(windows): ".exe" else: ""))
+  when defined(windows):
+    # Nim appends .exe to an extensionless --out path; CreateProcessW's explicit
+    # application path must name that actual file.
+    if result.binary.splitFile.ext.len == 0: result.binary.add(".exe")
   var args = @["c", "--hints:off", "--path:" & leafSourceRoot,
     "--nimcache:" & nimcache, "--out:" & result.binary]
   args.add extraArgs
