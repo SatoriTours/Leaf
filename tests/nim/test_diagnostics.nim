@@ -127,6 +127,22 @@ suite "Nim diagnostics and build pipeline":
     job.complete()
     check job.code != 0
     check "Error" in job.output
+    check "main.nim" in job.output
+    check job.pollBuild()
+    let failedCode = job.code
+    let failedOutput = job.output
+    job.close()
+    job.close()
+    check job.pollBuild()
+    check job.code == failedCode
+    check job.output == failedOutput
+    check readFile(binary) == "previous executable"
+    writeFile(directory / "main.nim", "echo \"repaired\"\n")
+    let repaired = startBuild(readProject(directory / "main.nim"), output = directory / "candidate")
+    defer: repaired.close()
+    repaired.complete()
+    check repaired.code == 0
+    check fileExists(repaired.binary)
     check readFile(binary) == "previous executable"
   test "doctor works without display and identifies compiler version":
     let display = getEnv("DISPLAY"); let wayland = getEnv("WAYLAND_DISPLAY")

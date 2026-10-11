@@ -100,3 +100,4 @@ suite "inherited validation and callbacks":
       checkpoint compiled.output
       check compiled.code != 0
       check "invalid.nim" in compiled.output
+      check "Error:" in compiled.output

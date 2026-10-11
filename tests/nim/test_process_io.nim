@@ -6,6 +6,16 @@ when defined(posix): import std/posix
 when defined(windows): import std/winlean
 
 let args = commandLineParams()
+if args == @["--diagnostic-child"]:
+  stdout.write("stack trace: (most recent call last)\n")
+  stdout.flushFile()
+  sleep(50)
+  stderr.write("invalid.nim(4, 1) Error: deliberate failure\n")
+  stderr.flushFile()
+  sleep(50)
+  stdout.write("diagnostic tail\n")
+  stdout.flushFile()
+  quit(23)
 if args.len == 2 and args[0] == "--cli-build":
   setCurrentDir(args[1])
   leaf_cli.exitCli(leaf_cli.main(@["build"]))
@@ -39,6 +49,16 @@ proc alive(pid: int): bool =
       discard closeHandle(handle)
 
 suite "Owned subprocess trees":
+  test "compiler diagnostics retain delayed stderr and the final output tail":
+    let p = startManaged(getAppFilename(), @["--diagnostic-child"], root)
+    defer: p.close()
+    let deadline = epochTime() + 10
+    while not p.poll():
+      if epochTime() > deadline: raise newException(IOError, "diagnostic child timed out")
+      sleep(5)
+    check p.code == 23
+    check p.output.replace("\r\n", "\n") == "stack trace: (most recent call last)\n" &
+      "invalid.nim(4, 1) Error: deliberate failure\ndiagnostic tail\n"
   for mode in ["running", "exit"]:
     test "close stops resistant children with leader " & mode:
       let marker = root / mode

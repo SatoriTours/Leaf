@@ -42,7 +42,9 @@ nim c -d:release -r --out:target/nim/benchmark benchmarks/runtime.nim
 
 Windows 应用的尺寸、布局和字号采用逻辑像素，由 GPUI 按当前窗口的设备比例缩放一次。例如逻辑宽度 640 在 150% 下换算为 960 设备像素，不应再在页面中乘 1.5。
 
-Windows CLI 的 build/run/watch/pack 共用 `startBuild`，为主 EXE 嵌入 ID=1、RT_MANIFEST=24 的 PerMonitorV2 manifest，保留 Common Controls v6 依赖。安装 SDK 的资源取自其 `src/leaf/resources/windows`，可随 SDK 搬迁。资源编译复用已选 MinGW GCC 同目录的 windres（其次 PATH），缺工具、工具失败或缺输出会终止构建。源码构建先用 Nim 的项目配置生成 C 编译/链接命令，确认同一 GCC；不兼容工具链明确失败。此路径仅支持现有 MinGW，未新增 MSVC/Clang 支持。
+Windows CLI 的 build/run/watch/pack 共用 `startBuild`，为主 EXE 嵌入 ID=1、RT_MANIFEST=24 的 PerMonitorV2 manifest，保留 Common Controls v6 依赖。安装 SDK 的资源取自其 `src/leaf/resources/windows`，可随 SDK 搬迁。资源编译复用已选 MinGW GCC 同目录的 windres（其次 PATH），缺工具、工具失败或缺输出会终止构建。源码构建先用 Nim 的项目配置生成 C 编译/链接命令，确认同一 GCC；不兼容工具链明确失败。发现阶段的源码编译错误与正式编译错误一样返回可轮询的失败 BuildJob，保留诊断和退出码。CLI 与 Win32 测试 runner 显式选择 Windows 10 头文件（`_WIN32_WINNT=0x0A00`、`WINVER=0x0A00`），无需编辑 Nim 安装目录的配置。此路径仅支持现有 MinGW，未新增 MSVC/Clang 支持。
+
+仓库通过 `.gitattributes` 将内嵌模板、vendored ORM 与测试 fixture 固定为 LF，避免 Windows `core.autocrlf=true` 改变生成文件字节或 ORM 的 SHA256。新检出会自动遵循这些属性；已有 CRLF checkout 可在独立目录重新克隆后验证，不要强制覆盖包含未提交修改的目录。ORM 的原始字节哈希校验保持启用。
 
 直接 `nim c` 不自动嵌入应用资源；桌面入口在加载 GPUI 前按需加载 WinAPI，检查有效 DPI 上下文并尝试 PMv2。已是 PMv2 不重复设置；宿主已选 system/per_monitor 模式则保留并输出 `host_context`，unknown 或初始化失败输出 `failed` 和错误码。访问拒绝只有复查到 PMv2 才视为 already_set。不会强改线程模式。导入 Leaf 和 `--headless`/`--check` 不调用此初始化。Manifest 建立的进程上下文由 Windows 加载器在进程启动时决定，CLI 产物即使以 headless 运行也可能已是 PMv2；这与 headless 主动初始化是两回事。
 

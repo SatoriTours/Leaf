@@ -2,6 +2,7 @@ import ./cleanup_support
 import std/[algorithm, os, osproc, sequtils, strutils, tempfiles, times, unittest]
 import leaf/migrations
 import ./migration_compile_support
+import ./symlink_support
 
 let base = createTempDir("leaf-migration-generator-", "")
 removeDirectoryOnExit(base)
@@ -103,10 +104,7 @@ suite "migration template generation":
     check files[0].version != files[1].version
     check fileExists(root / "target" / "leaf-migration-generation.lock")
 
-  test "blocked or symlinked paths fail without writing outside":
-    let outside = base / "outside"
-    createDir(outside)
-
+  test "blocked paths fail without writing anything":
     let blocked = base / "blocked"
     createDir(blocked)
     writeFile(blocked / "db", "not a directory")
@@ -114,19 +112,27 @@ suite "migration template generation":
     check readFile(blocked / "db") == "not a directory"
     check not dirExists(blocked / "target")
 
-    let symlinkedMigrations = base / "symlinked-migrations"
-    createDir(symlinkedMigrations / "db")
-    createSymlink(outside, symlinkedMigrations / "db" / "migrations")
-    expect MigrationError: discard generateMigration(symlinkedMigrations, "createTasks")
-    expect MigrationError:
-      discard generateMigration(symlinkedMigrations, "createTasks", dryRun = true)
-    check toSeq(walkDirRec(outside)).len == 0
+  test "symlinked paths fail without writing outside":
+    if not canCreateSymlink(base, directory = true):
+      checkpoint "SKIP: Windows user cannot create directory symlinks (error 1314)"
+      skip()
+    else:
+      let outside = base / "outside"
+      createDir(outside)
 
-    let symlinkedTarget = base / "symlinked-target"
-    createDir(symlinkedTarget)
-    createSymlink(outside, symlinkedTarget / "target")
-    expect MigrationError: discard generateMigration(symlinkedTarget, "createTasks")
-    check toSeq(walkDirRec(outside)).len == 0
+      let symlinkedMigrations = base / "symlinked-migrations"
+      createDir(symlinkedMigrations / "db")
+      createSymlink(outside, symlinkedMigrations / "db" / "migrations")
+      expect MigrationError: discard generateMigration(symlinkedMigrations, "createTasks")
+      expect MigrationError:
+        discard generateMigration(symlinkedMigrations, "createTasks", dryRun = true)
+      check toSeq(walkDirRec(outside)).len == 0
+
+      let symlinkedTarget = base / "symlinked-target"
+      createDir(symlinkedTarget)
+      createSymlink(outside, symlinkedTarget / "target")
+      expect MigrationError: discard generateMigration(symlinkedTarget, "createTasks")
+      check toSeq(walkDirRec(outside)).len == 0
 
   test "two generator processes allocate distinct versions":
     let tools = base / "tools"

@@ -75,3 +75,14 @@ Linux 全量 57 套、511 项通过，5 项已有 Windows 环境测试跳过；�
 完整五套之后，新增恢复身份回归在同一真实 Windows 环境复跑 input 套件，15 项全部通过（运行编号 `d017074ebad94982be7609075e3302c2`）；合计覆盖 78 项。该测试将旧 ID/cookie 与当前真实 HWND 组合，并保留实际旧绑定事件，验证 restore 后隔离；未执行强制操作系统数字句柄复用的压力测试。
 
 这批结果仅作为开发版交付证据。上方 H 清单仍全部 NotRun，后续单独验收；不能据此批准普通用户桌面、真实 IME、跨屏 DPI 或辅助技术支持，也不表示 A3/Android 已完成。
+
+
+## 普通用户 Windows 实测后的修复（2026-10-11）
+
+用户在 Windows 11 普通桌面、150% DPI、Nim 2.2.6、官方 MinGW GCC 11.1.0 的实测中，通用/发布套件最近结果为 63/70 通过、7 套失败，Win32 为 4/5 通过、1 套失败。该结果包含 LF 副本复测，不能称为一次全量成功。此前 elevated 开发桌面证据仍是历史记录，不能代替这次普通用户结果。
+
+本轮修复涉及 Windows discovery 的失败 BuildJob、模型编译诊断完整捕获、watch 的可移植编译屏障、迁移符号链接 fixture 的能力检测、DPI 尺寸断言，以及仓库内 Windows 10 头文件与 LF 约束。DPI 测试从实际外框像素增大并保持窗口位置，验证实际客户端像素与 DIP 一致；同屏消息仍不作为跨屏证据。无创建链接权限时，只跳过链接专属测试，普通路径与元数据验证继续执行。
+
+修复后的 Windows 自动化、100%/150%/200% DPI、MinGW 11、普通用户链接权限矩阵仍需在真实 Windows 运行并记录。Linux 回归和 Windows 目标 Nim 静态检查均不能替代这些验收；真实 IME、双屏不同 DPI、Narrator/Accessibility Insights 的 H 门保持待验。
+
+本轮 Linux 同一候选代码的完整 `scripts/test.nim` 回归：70 套，710 项通过、0 失败、5 项平台相关跳过，进程退出 0。日志与摘要保存于主目录 `target/nim/windows-report-fixes/`；包含 CRLF 红绿对照、两种 checkout 回归、无 Git 的 17 套 model 回归及 11 项 Windows 目标静态检查。上述结果不替代真实 Windows 运行或独立验收。

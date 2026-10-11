@@ -3,6 +3,9 @@ import std/[os, json, strutils]
 import ./process_io
 when defined(windows): import ./windows_paths
 
+const WindowsHeaderCompilerArgs* = [
+  "--passC:-D_WIN32_WINNT=0x0A00", "--passC:-DWINVER=0x0A00"]
+
 proc gccFromBuildScript*(path:string):string =
   let script=parseFile(path)
   proc executable(command:string):string =

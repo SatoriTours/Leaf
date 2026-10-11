@@ -46,6 +46,7 @@ proc main(): int =
         "--passC:-I" & quoteShell(compilerPath(directory)),
         "--path:" & compilerPath(root / "src").replace("$", "$$"),
         "--out:" & compilerPath(output).replace("$", "$$")]
+      args.add(WindowsHeaderCompilerArgs)
       let entry = compilerPath(test)
       # Use Nim's selected compiler, then link the same v6/PMv2 resource as apps.
       # No generated object in the source checkout is a prerequisite.

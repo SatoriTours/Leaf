@@ -78,6 +78,36 @@ proc launchAndClose(binary: string) =
 
 
 suite "real Cargo-free Win32 application builds":
+  test "invalid native source returns a completed failure job and can be repaired":
+    let root = createTempDir("leaf-native-invalid-", "")
+    defer: removeDir(root)
+    let entry = root / "main.nim"
+    writeFile(entry, "this is invalid Nim !!!")
+    let previous = root / "previous.exe"
+    writeFile(previous, "previous executable")
+    let project = Project(root: root, entry: entry, backend: backendNative)
+    let job = startBuild(project, output = root / "candidate.exe")
+    defer: job.close()
+    let deadline = getMonoTime() + initDuration(seconds = 30)
+    while not job.pollBuild():
+      if getMonoTime() > deadline: raise newException(IOError, "invalid source build timed out")
+      sleep(10)
+    check job.code != 0
+    check "main.nim" in job.output and "Error:" in job.output
+    let code = job.code
+    let output = job.output
+    job.close()
+    job.close()
+    check job.pollBuild()
+    check job.code == code and job.output == output
+    check readFile(previous) == "previous executable"
+    let headerCheck = "#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0A00 || " &
+      "!defined(WINVER) || WINVER < 0x0A00\n#error Leaf requires Windows 10 headers\n#endif\n"
+    writeFile(entry, "{.emit: " & headerCheck.escape & ".}\necho \"repaired\"\n")
+    let repaired = build(project, output = root / "candidate.exe")
+    check fileExists(repaired)
+    check readFile(previous) == "previous executable"
+
   test "native and headless applications compile from a Unicode space dollar path":
     let root = createTempDir("leaf 原生 $ tools-", "")
     defer: removeDir(root)

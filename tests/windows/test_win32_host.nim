@@ -188,8 +188,23 @@ suite "Unicode owned Win32 Host":
     check ctx.contentHeight == float64(rect.bottom - rect.top) / ctx.scale
     check ctx.scale > 0
     check initializeWindowsDpi().awareness == policy.awareness
-    check SetWindowPos(window,nil,0,0,420,300,SWP_NOZORDER or SWP_NOACTIVATE) != 0
-    check h.context.contentWidth > ctx.contentWidth
+    var outer: RECT
+    check GetWindowRect(window, addr outer) != 0
+    # Grow from actual pixels, keeping this monitor and its DPI. A fixed
+    # 420px outer width can be smaller than the initial 320 DIP client area.
+    const SwpNoMove = 0x0002'u32
+    check SetWindowPos(window, nil, 0, 0, outer.right - outer.left + 100,
+      outer.bottom - outer.top + 100, SwpNoMove or SWP_NOZORDER or SWP_NOACTIVATE) != 0
+    var resized: RECT
+    check GetClientRect(window, addr resized) != 0
+    let grown = h.context
+    check grown.scale == ctx.scale
+    check resized.right - resized.left > rect.right - rect.left
+    check resized.bottom - resized.top > rect.bottom - rect.top
+    check grown.contentWidth == float64(resized.right - resized.left) / grown.scale
+    check grown.contentHeight == float64(resized.bottom - resized.top) / grown.scale
+    check grown.contentWidth > ctx.contentWidth
+    check grown.contentHeight > ctx.contentHeight
     var ticks=0
     h.setSafeTick(proc() = inc ticks)
     let dpi=GetDpiForWindow(window)

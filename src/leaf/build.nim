@@ -28,6 +28,7 @@ proc compilerBase(sources, cache, binary: string, isolatedConfig: bool): seq[str
     "--nimcache:" & cache.replace("$", "$$"),
     "--out:" & binary.replace("$", "$$")]
   if isolatedConfig: result.add(@["--skipParentCfg:on", "--skipUserCfg:on"])
+  when defined(windows): result.add(WindowsHeaderCompilerArgs)
   for argument in ormCompilerArgs(sources): result.add(argument.replace("$", "$$"))
 
 proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedConfig = false,
@@ -69,14 +70,20 @@ proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedCon
       var discoverArgs=args
       discoverArgs.add(@["--compileOnly",entry])
       let discover=startManaged(executable,discoverArgs,project.root)
+      var retained = false
       try:
         while not discover.poll():
           if wasInterrupted():raise newException(ProcessInterruptedError,"compiler discovery interrupted")
           sleep(10)
         if discover.code != 0:
-          fail("Nim compiler discovery failed\n" & discover.output.diagnosticText())
+          # Semantic errors are build results on Windows too. Retain the
+          # completed child so callers can poll, inspect and close the job.
+          result.process = discover
+          retained = true
+          return
         gcc=gccFromBuildScript(cache / binary.extractFilename.changeFileExt("json"))
-      finally:discover.close()
+      finally:
+        if not retained: discover.close()
     let objectPath = compileWindowsManifest(sources, cache, gcc)
     # --passL is opaque to Nim; unlike path switches it does not expand dollars.
     args.add("--passL:" & quoteShell(compilerPath(objectPath)))

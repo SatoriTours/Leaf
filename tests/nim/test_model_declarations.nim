@@ -1,4 +1,4 @@
-import std/[unittest, options, times, sequtils, os, osproc, tempfiles, strutils, streams]
+import std/[unittest, options, times, sequtils, os, strutils]
 import leaf/model
 import leaf/model/[metadata, record]
 import leaf/model/adapters/norm_sqlite
@@ -67,9 +67,6 @@ suite "model declarations":
     check fromStorage(ScalarRecord, blanks[0], db).optDate.isNone
 
   test "invalid declarations and identities fail at compile time":
-    let root = createTempDir("leaf-model-compile-", "")
-    defer: removeDir(root)
-    let source = currentSourcePath().parentDir.parentDir.parentDir / "src"
     for declaration in [
         "type Bad = ref object of Record\n  bytes: seq[int]\ndefineModel(Bad, table=\"bad\")",
         "type Bad = ref object of Task\ndefineModel(Bad, table=\"bad\")",
@@ -78,22 +75,12 @@ suite "model declarations":
         "type Bad = ref object of Record\n  created_at: Option[DateTime]\ndefineModel(Bad, table=\"bad\")",
         "let task = Task()\ntask.id = 100'i64",
         "defineModel(ApplicationRecord, table=\"bad\")"]:
-      let path = root / "invalid.nim"
-      writeFile(path, "import leaf/model\nimport " & (currentSourcePath().parentDir / "model_fixtures").escape & "\n" & declaration & "\n")
-      var args = @["c", "--hints:off", "--path:" & source,
-        "--nimcache:" & root / "cache", "--out:" & root / "invalid", path]
-      # Same vendored config as generated applications, independent of user Nimble.
-      for package in ["norm", "lowdb", "db_connector"]:
-        args.insert("--path:" & source / "leaf/vendor/orm" / package / "src", 1)
-      const Compiler = getCurrentCompilerExe()
-      let process = startProcess(Compiler, args=args,
-        options={poUsePath, poStdErrToStdOut})
-      let output = process.outputStream.readAll()
-      let code = process.waitForExit()
-      process.close()
-      checkpoint output
-      check code != 0
-      check "invalid.nim" in output
+      let compiled = compileModelFailure("import " &
+        (currentSourcePath().parentDir / "model_fixtures").escape & "\n" & declaration)
+      checkpoint compiled.output
+      check compiled.code != 0
+      check "invalid.nim" in compiled.output
+      check "Error:" in compiled.output
 
   test "legal business field names do not collide with generated parameters or getters":
     for field in ["modelType", "errors", "originalValues", "isDestroyed"]:

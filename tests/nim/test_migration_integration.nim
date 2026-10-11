@@ -3,6 +3,7 @@ import std/[algorithm, json, monotimes, os, osproc, sequtils, strutils, streams,
 import leaf/[project, package_files, build, process_io, scaffold, scaffold_types, sqlite, migrations]
 import leaf/migrations/initialization
 import ./migration_compile_support
+import ./symlink_support
 when defined(posix): import std/posix
 
 let base = createTempDir("leaf-migration-integration-", "")
@@ -449,7 +450,7 @@ echo "caller ok"
         result = "accepted"
       except CatchableError as error: result = "controlled:" & error.msg
       except Defect as error: result = "DEFECT:" & $error.name & ":" & error.msg
-    for kind in ["missing_up", "up_symlink", "bad_schema2_metadata", "noncanonical_model",
+    for kind in ["missing_up", "bad_schema2_metadata", "noncanonical_model",
         "wrong_fields_kind"]:
       let root = base / ("f2-" & kind)
       copyDir(fixture, root)
@@ -457,11 +458,6 @@ echo "caller ok"
       var value = parseFile(manifest)
       case kind
       of "missing_up": removeFile(root / "db/migrations/001_create_tasks.up.sql")
-      of "up_symlink":
-        let outside = base / "outside-up.sql"
-        writeFile(outside, readFile(root / "db/migrations/001_create_tasks.up.sql"))
-        removeFile(root / "db/migrations/001_create_tasks.up.sql")
-        createSymlink(outside, root / "db/migrations/001_create_tasks.up.sql")
       of "bad_schema2_metadata":
         value["schema"] = %2
         value["model_api"] = %0
@@ -492,6 +488,27 @@ echo "caller ok"
     let overflowBefore = snapshot(overflow)
     check attempt(overflow).startsWith("controlled:")
     check snapshot(overflow) == overflowBefore
+
+  test "symlinked legacy SQL is rejected before any write":
+    if not canCreateSymlink(base, directory = false):
+      checkpoint "SKIP: Windows user cannot create file symlinks (error 1314)"
+      skip()
+    else:
+      let root = base / "f2-up-symlink"
+      copyDir(fixture, root)
+      let sql = root / "db/migrations/001_create_tasks.up.sql"
+      let outside = base / "outside-up.sql"
+      let original = readFile(sql)
+      writeFile(outside, original)
+      removeFile(sql)
+      createSymlink(outside, sql)
+      proc snapshot(): Table[string, string] =
+        for path in walkDirRec(root): result[relativePath(path, root)] = readFile(path)
+      let before = snapshot()
+      expect CatchableError: discard initializeDatabaseProject(readProject(root))
+      check snapshot() == before
+      check symlinkExists(sql)
+      check readFile(outside) == original
 
   test "implicit task sources and converted manifests are validated":
     proc snapshot(root: string): Table[string, string] =

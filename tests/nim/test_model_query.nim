@@ -175,6 +175,7 @@ suite "direct model queries":
       checkpoint compiled.output
       check compiled.code != 0
       check "invalid.nim" in compiled.output
+      check "Error:" in compiled.output
     let invalidScope = compileModelFailure("type A = ref object of Record\n  title:string\ndefineModel(A,table=\"a\"):\n  scope first, it.title == \"x\"")
     check invalidScope.code != 0
     check "scope name conflicts" in invalidScope.output

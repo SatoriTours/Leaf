@@ -1,6 +1,24 @@
 import ./cleanup_support
-import std/[unittest, os, tempfiles, tables, json, times, strutils]
+import std/[unittest, os, osproc, tempfiles, tables, json, times, strutils, monotimes]
 import leaf/[watch_files, watch_ipc, watch, project, process_io, diagnostics]
+
+# This is a real compiler wrapper. Windows discovery is synchronous, so only
+# the later, asynchronous compile waits at the test-owned barrier.
+let arguments = commandLineParams()
+if arguments.len > 0 and arguments[0] == "c" and
+    getEnv("LEAF_TEST_WATCH_COMPILER").len > 0:
+  let barrier = getEnv("LEAF_TEST_WATCH_BARRIER")
+  if barrier.len > 0 and "--compileOnly" notin arguments:
+    writeFile(barrier & ".entered", "entered")
+    let deadline = getMonoTime() + initDuration(seconds = 5)
+    while not fileExists(barrier & ".release"):
+      if getMonoTime() > deadline: quit(98)
+      sleep(5)
+  let compiler = startProcess(getEnv("LEAF_TEST_WATCH_COMPILER"),
+    args = arguments, options = {poParentStreams})
+  let code = compiler.waitForExit()
+  compiler.close()
+  quit(code)
 
 let root = createTempDir("leaf-watch-", "")
 removeDirectoryOnExit(root)
@@ -50,6 +68,14 @@ suite "Nim development watch":
     writeFile(path, $(%*{"version": 2, "token": "token", "pid": 20}))
     check not isReady(path, "token", 20)
   test "real compiled candidates preserve old process across compile and startup failures":
+    let environmentKeys = ["NIM", "LEAF_TEST_WATCH_COMPILER", "LEAF_TEST_WATCH_BARRIER"]
+    var previousEnvironment: seq[tuple[key: string, present: bool, value: string]]
+    for key in environmentKeys:
+      previousEnvironment.add((key, existsEnv(key), getEnv(key)))
+    defer:
+      for entry in previousEnvironment:
+        if entry.present: putEnv(entry.key, entry.value)
+        else: delEnv(entry.key)
     let directory = root / "app"
     createDir(directory)
     let entry = directory / "main.nim"
@@ -73,12 +99,23 @@ suite "Nim development watch":
     check supervisor.generation >= 4
     let repairedPid = supervisor.current.pid
     let oldGeneration = supervisor.generation
-    writeFile(entry, "import std/os\nstatic: sleep(350)\n" & readyProgram("stale"))
-    supervisor.waitFor(proc(): bool = supervisor.buildJob != nil)
+    let barrier = root / "compile-barrier"
+    putEnv("LEAF_TEST_WATCH_COMPILER", getEnv("NIM", findExe("nim")))
+    putEnv("LEAF_TEST_WATCH_BARRIER", barrier)
+    putEnv("NIM", getAppFilename())
+    writeFile(entry, readyProgram("stale"))
+    supervisor.waitFor(proc(): bool = supervisor.buildJob != nil and fileExists(barrier & ".entered"))
+    check supervisor.current.pid == repairedPid
+    check not supervisor.current.poll()
     writeFile(entry, readyProgram("latest source"))
+    delEnv("LEAF_TEST_WATCH_BARRIER")
+    writeFile(barrier & ".release", "release")
     supervisor.waitFor(proc(): bool = supervisor.current.pid != repairedPid)
     check supervisor.generation >= oldGeneration + 2
     let latestPid = supervisor.current.pid
+    supervisor.waitFor(proc(): bool = "latest source" in supervisor.current.output)
+    check supervisor.current.pid == latestPid
+    check "stale" notin supervisor.current.output
     writeFile(entry, "import std/os\nwhile true: sleep(25)\n")
     supervisor.waitFor(proc(): bool = supervisor.message.len > 0)
     check supervisor.current.pid == latestPid
