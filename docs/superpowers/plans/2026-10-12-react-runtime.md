@@ -317,7 +317,7 @@ HostChanges 的 upserts 为 seq[HostRecord]，removals 为 seq[NodeHandle]，chi
 - [x] **14.5 完整验证**：`cargo test --workspace --locked`；`cargo clippy --workspace --all-targets --locked -- -D warnings`；`cargo fmt --all --check`；`nim c -r --out:target/nim/test_runner scripts/test.nim`；任务13真实窗口矩阵；运行原生帧基准及 SDK 搬迁回归。均记录实际结果；软件 GPU、缺平台或测试工具分别列出。
 - [x] **14.6 写验收记录**：保存 Release 原始样本、平台/编译/commit/库 hash、各分段耗时、稳定内存/峰值、兼容矩阵和未验证项。原始证据放原会话工作区 `/home/jimxl/projects/leaf/target/verification/react-runtime/<run-id>/`，执行 worktree 不删除它；摘要与可复现命令纳入本任务 review 文档。不要把历史 a00191b 的 8.074ms 当当前对照。
 - [x] **14.7 更新用户文档与示例**：说明 State/普通变量、memo、key、离屏 State 淘汰、Snapshot 导出成本、ABI退回诊断和缓存限制；不默认改写 Router/PageGroup 生命周期。新示例须通过 headless 和真实窗口，旧示例继续运行。
-- [ ] **14.8 提交**：message `perf: verify incremental runtime and publish migration guidance`；全分支审查后修复对应问题并重复受影响验证。未获合并推送授权时停在已提交、已审查的功能分支，报告证据与阻塞。
+- [x] **14.8 提交**：message `perf: verify incremental runtime and publish migration guidance`；全分支审查后修复对应问题并重复受影响验证。未获合并推送授权时停在已提交、已审查的功能分支，报告证据与阻塞。
 
 ## 规格覆盖与完成判定
 

@@ -1,4 +1,78 @@
-# Leaf 组件与增量宿主验收
+# Leaf 组件与增量宿主最终验证
+
+最终实现提交：`b7c52a1e75ee1d88e241414427c8f4342659e657`；功能分支 `feat/leaf-react-runtime`，基线 `96a2e035b57c8683c73957506c9a4f2a63c9141a`。功能分支保留，未合并或推送。Linux 实现与验证完成；Windows/macOS、真实系统 IME、DPI/跨屏和离屏焦点手势仍未验收。
+
+审查后的独立证据目录：`/home/jimxl/projects/leaf/target/verification/react-runtime/2026-10-12-reviewed`。原审查报告和审查前样本保留在 `../2026-10-12-final/`；其结论对应修复前代码，不改写为复审通过。本轮按执行约定做一次集中修复与验证，没有第二位审查者。
+
+## 审查问题与修复
+
+| 问题 | 最终行为与证据 |
+| --- | --- |
+| I1 首次接入已更新 Runtime | 新宿主可安装当前接受版本，后续更新仍要求连续版本；真实 Rust HostStore 回归 |
+| I2 无关 Counter 扫描列表源 | 100/1000/100000 项源、50 行已挂载时，独立 Counter 的 source key 读取增量为 0 |
+| I3 可变高度列表逐行 FFI | 同次绘制在 effect 边界合并；相同视口与保护行跳过。100000 项实际窗口首屏请求 59→1，独立 Counter/行 State 更新不新增请求；滚动、初始失败退出和 scope 清理失败不重放通过 |
+| I4 默认 ABI2 丢失 watch 错误 | 类型化 STATUS 返回借用 UTF-8 状态，无 UI JSON；8 种窗口组合均验证显示/清除，清除外部状态不抹除业务错误 |
+| I5 nativeStrict 与 issues | 后续提交沿用 strict；兼容 issues 只随接受版本发布并去重，拒绝不发布 |
+| I6 跨 Runtime State 泄漏 | init/render/updater/event/commit 中跨 Runtime 写入和嵌套任务被拒绝，执行域在异常后恢复 |
+| I7 诊断 ID 导致错误输入复用 | 组件类型进入内部诊断身份；普通重挂载建立新 Entity，列表源替换只在同列表/key/宿主祖先类型匹配时迁移 |
+| M1 深度兼容（升级为 Important） | 根深度 0，合法 64 条边通过、65 条边拒绝；Nim/Rust 一致 |
+
+各问题的实际 RED/GREEN 输出在 `logs/final-i*.log`、`logs/final-m1*.log`；初始环境缺失与测试探针定位失败亦保留，没有覆盖为成功输出。
+
+ABI2 尚未发布，本分支为 watch 在 `LeafReply` 尾部加 `value` 和 STATUS 有效标记；使用过此功能分支旧 ABI2 的外部调用者须重编译，结构尺寸不匹配会拒绝。ABI1 合同保留。托管完整节点诊断 ID 是内部格式，业务查找使用稳定 key。
+
+## 最终回归
+
+- 全部 85 个 Nim suite、43 个 Rust 测试通过；default/原生测试特性严格 clippy、fmt、diff 检查通过。
+- C/Nim/Rust 独立实际声明布局一致：157 entries。
+- Linux legacy/managed × ABI1/2 × CACHE0/1 共 8 组实际窗口通过；每组都验证 watch 错误显示/清除。组件示例与十万项可变高度列表窗口另通过。
+- 最终 SDK 在中文及含空格路径解包。清除外部 NIM 并限定 PATH 后，以包内 CLI/Nim 构建组件应用；headless 增加一次得到 1，doctor 成功。应用 staged、SDK bundled 与性能测量库 SHA256 一致。
+- `harness/final-reviewed.sh` 为全量回归、修复提交、串行测量和打包命令；`harness/relocate-reviewed.sh` 证明实际包内编译器；`harness/seal-reviewed.py` 校验并封存来源、原始输出与 hash。
+
+## 最终 CPU 对照
+
+Nim 2.2.6 Release/ORC、分配次数统计；同业务，warmup50、rounds3×iterations200，各规模 600 个原始样本。只测 Runtime+编码，Rust apply/GPUI frame 不在这张表内。
+
+| 模式 | 静态数 | median/P95 ms | 每次分配次数 median |
+| --- | ---: | ---: | ---: |
+| legacy-json | 100 | 0.386314/0.398241 | 9888 |
+| legacy-json | 1000 | 3.989032/4.200137 | 96887 |
+| legacy-json | 5000 | 26.800928/29.970507 | 481085 |
+| legacy-typed | 100 | 0.390260/0.402102 | 3553 |
+| legacy-typed | 1000 | 3.902312/4.016677 | 35068 |
+| legacy-typed | 5000 | 23.325497/24.026297 | 171376 |
+| managed-typed | 100 | 0.013655/0.025367 | 116 |
+| managed-typed | 1000 | 0.013459/0.013928 | 116 |
+| managed-typed | 5000 | 0.013652/0.014132 | 116 |
+
+managed 每次组件 render、宿主访问/归一化/索引编辑、操作数均为 1，整树 Snapshot 导出为 0。 `ffiBytes` 范围 466–467（计数字符串长度变化）。 分配是次数，不是字节；原始报告另外保存存活堆、RSS 和峰值。
+
+## 最终实际窗口对照
+
+1000 个静态节点，warmup50、3×200 样本。Nim Release、Rust Debug、Xvfb/Mesa 软件绘制。draw 包含 layout+paint，纯 layout 未测；frame 含调度/帧节奏。不能据此宣称硬件 60FPS。
+
+| 模式 | 缓存 | frame median/P95 ms | dispatch median ms | Rust prepare/apply median ms | draw median ms | Host render median |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| legacy-json | 0 | 79.883927/80.116469 | 1.384519 | —/— | — | — |
+| legacy-json | 1 | 79.839077/80.123255 | 1.379389 | —/— | — | — |
+| legacy-typed | 0 | 80.551102/99.206291 | 4.939974 | 0.055680/0.000333 | 35.157437 | 2 |
+| legacy-typed | 1 | 80.405762/95.966529 | 4.932746 | 0.054426/0.000367 | 34.970257 | 2 |
+| managed-typed | 0 | 96.292667/112.026209 | 0.125548 | 0.054126/0.000349 | 43.441768 | 2004 |
+| managed-typed | 1 | 48.090660/59.411110 | 0.117906 | 0.048489/0.000355 | 19.404941 | 3 |
+
+以上只支持当前工作负载的局部更新和缓存收益。保留组件状态/边界带来内存成本，各 run 的 RSS/峰值见 resources；独立 Rust 分配与候选峰值、硬件 GPU/Release Rust 性能仍缺证据。CPU metadata 在测量时记录 dirty；原生 harness 保守固定 source_dirty=true，以 implementation commit、源码归档及 binary/library hash 确认来源。
+
+## 保留的 Minor 与平台门
+
+- M2：类型化 RENDERING 尚未恢复旧 DPI 诊断日志；尺寸请求仍有效，日志兼容后续处理。
+- M3：审查前 artifact 表中 progress.md 副本 hash 过期；原表和原样本保留并注明。本次单独封存最终证据，索引只引用不再修改的副本。
+- Windows/macOS、真实系统 IME、DPI/跨屏、离屏焦点手势 NotRun。Windows runner 在 Linux 的返回 2 不计通过；计划 13.4 保持未勾选，不签全平台验收。
+
+## 审查前记录（历史对照）
+
+以下内容来自修复前提交 e4de315，对应 `2026-10-12-final`，不作为最终代码性能或测试计数。
+
+### 审查前验收原文
 
 代码采用 React 风格组件/State 调度和 ABI2 类型化宿主批次。Linux 证据通过与全平台验收分开记录；Windows/macOS、实际系统 IME、DPI 切换和离屏焦点原生手势仍未验证。
 
