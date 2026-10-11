@@ -203,12 +203,12 @@ HostChanges 的 upserts 为 seq[HostRecord]，removals 为 seq[NodeHandle]，chi
 - `host(node:Node):UiDescription`；`componentView(body:untyped):UiDescription`。内部 row/column 构建 host shell + UiDescription children，避免新增返回类型相同参数的公共重载造成 `column(@[])` 歧义。
 - type ID 使用编译期的声明模块+name；同模块重复 name 的不同定义拒绝。不使用 proc/闭包地址。组件只能返回一个根。
 
-- [ ] **8.1 写失败测试**：DSL 生成宿主/组件混合树，支持 if/for/case，旧 view/column(@[]) 不歧义。普通 proc 不自动建实例；同类型/key 身份可匹配，重复 key 提前拒绝；同 name 不同模块不冲突，复制 ComponentDef 不变 type ID；props 版本和 memo 比较记录保留。
+- [x] **8.1 写失败测试**：DSL 生成宿主/组件混合树，支持 if/for/case，旧 view/column(@[]) 不歧义。普通 proc 不自动建实例；同类型/key 身份可匹配，重复 key 提前拒绝；同 name 不同模块不冲突，复制 ComponentDef 不变 type ID；props 版本和 memo 比较记录保留。
   静态断言 `doAssert typeof(column(@[])) is Node`；复制定义断言 `check originalTypeId == copiedTypeId`，两个模块同名定义断言 `check firstTypeId != secondTypeId`。
-- [ ] **8.2 运行**：分别编译运行 `tests/nim/test_components.nim`、`tests/nim/test_component_view.nim`，FAIL。
-- [ ] **8.3 实现** 描述与类型擦除；抽共享宏 AST 时不改变旧错误信息及 NodeKind。`components.nim` 只汇总公共 API，不自动导入桌面。
-- [ ] **8.4 验证**：重复 8.2，并跑 `tests/nim/test_view.nim`、`tests/nim/test_core.nim`，PASS。
-- [ ] **8.5 提交**：message `feat: describe managed component boundaries in Nim`。
+- [x] **8.2 运行**：分别编译运行 `tests/nim/test_components.nim`、`tests/nim/test_component_view.nim`，FAIL。
+- [x] **8.3 实现** 描述与类型擦除；抽共享宏 AST 时不改变旧错误信息及 NodeKind。`components.nim` 只汇总公共 API，不自动导入桌面。
+- [x] **8.4 验证**：重复 8.2，并跑 `tests/nim/test_view.nim`、`tests/nim/test_core.nim`，PASS。
+- [x] **8.5 提交**：message `feat: describe managed component boundaries in Nim`。
 
 ### Task 9: Runtime driver、局部协调和统一接受点
 
