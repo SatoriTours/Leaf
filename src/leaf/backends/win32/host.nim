@@ -23,7 +23,6 @@ type
     needsTick, retryDeferred: bool
     errorCount: uint64
     pendingError: ref CatchableError
-    errors: seq[ref CatchableError]
   HostDiagnostics* = object
     liveWindows*, liveRoots*: int
     callbackErrors*: uint64
@@ -73,11 +72,10 @@ proc pixelSize(value, scale: float64): int32 =
   if classify(pixels) in {fcNan, fcInf, fcNegInf} or pixels > float64(high(int32) - 4096):
     fail("Win32 Host pixel size overflows")
   int32(max(1.0, pixels))
-proc recordError(host: Win32Host, error: ref CatchableError) =
+proc recordError(host: Win32Host) =
   inc host.errorCount
-  host.errors.add(error)
 proc captureError(host: Win32Host, error: ref CatchableError) =
-  host.recordError(error)
+  host.recordError()
   if host.pendingError == nil: host.pendingError = error
   elif host.pendingError != error: host.pendingError.msg.add("; native secondary: " & error.msg)
 proc checkCallback(host: Win32Host) =
@@ -181,15 +179,19 @@ proc windowProc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.
           host.needsTick = true
           return 0
       of WM_NCDESTROY:
-        discard host.calls.setWindowData(window, GWLP_USERDATA, 0)
-        host.window = nil
-        host.timer = 0 # USER32 has destroyed this window's remaining timers.
-        if host.counted:
-          dec liveWindowCount
-          host.counted = false
-        if host.rooted:
-          roots.del(cookie)
-          host.rooted = false
+        try:
+          discard host.calls.setWindowData(window, GWLP_USERDATA, 0)
+        finally:
+          # Native lifetime has ended even if the optional userdata clear throws.
+          # Never retain/retry a dead HWND or expose it through a borrowed getter.
+          host.window = nil
+          host.timer = 0 # USER32 has destroyed this window's remaining timers.
+          if host.counted:
+            dec liveWindowCount
+            host.counted = false
+          if host.rooted:
+            roots.del(cookie)
+            host.rooted = false
       else: discard
       return host.calls.defWindowProc(window, message, wp, lp)
     finally:
@@ -200,20 +202,33 @@ proc windowProc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.
     return 0
 
 proc nativeCleanup(host: Win32Host) =
-  if host.timer != 0:
-    if host.calls.killTimer(host.window, host.timer) == 0: nativeError("KillTimer")
-    host.timer = 0
-  if host.window != nil:
-    if host.calls.destroyWindow(host.window) == 0: nativeError("DestroyWindow")
-    if host.window != nil: fail("DestroyWindow did not release the owned native window")
-  if host.rooted:
-    roots.del(host.cookie)
-    host.rooted = false
-  if host.ownsClass:
-    if host.calls.unregisterClass(addr host.className[0], host.instance) == 0:
-      nativeError("UnregisterClassW")
-    host.ownsClass = false
-  host.checkCallback()
+  var cleanupError: ref CatchableError
+  try:
+    if host.timer != 0:
+      if host.calls.killTimer(host.window, host.timer) == 0: nativeError("KillTimer")
+      host.timer = 0
+    if host.window != nil:
+      if host.calls.destroyWindow(host.window) == 0: nativeError("DestroyWindow")
+      if host.window != nil: fail("DestroyWindow did not release the owned native window")
+    if host.rooted:
+      roots.del(host.cookie)
+      host.rooted = false
+    if host.ownsClass:
+      if host.calls.unregisterClass(addr host.className[0], host.instance) == 0:
+        nativeError("UnregisterClassW")
+      host.ownsClass = false
+  except CatchableError as error:
+    cleanupError = error
+  # A synchronous native callback may have failed during DestroyWindow. Finish
+  # the remaining cleanup attempt, then report that exact primary at this Nim
+  # boundary. Failed class ownership remains available for explicit owner retry.
+  let callbackError = host.pendingError
+  host.pendingError = nil
+  if callbackError != nil:
+    if cleanupError != nil and cleanupError != callbackError:
+      callbackError.msg.add("; Host cleanup secondary: " & cleanupError.msg)
+    raise callbackError
+  if cleanupError != nil: raise cleanupError
 
 proc finish(host: Win32Host) =
   # Only called after actual Session disposal plus all native resources released.
@@ -244,14 +259,14 @@ proc safeTurn(host: Win32Host) =
     inc host.tickDepth
     try: host.safeTick()
     except CatchableError as error:
-      host.recordError(error)
+      host.recordError()
       primary = error
     finally: dec host.tickDepth
   if host.close.pending and host.session != nil and not host.busy() and not host.retryDeferred:
     try:
       host.release()
     except CatchableError as error:
-      host.recordError(error)
+      host.recordError()
       host.close.closeFailed()
       host.retryDeferred = true
       if primary != nil: primary.msg.add("; close secondary: " & error.msg)
@@ -356,7 +371,7 @@ proc destroyHost*(host: Win32Host) =
   host.retryDeferred = false
   try: host.release()
   except CatchableError as error:
-    host.recordError(error)
+    host.recordError()
     host.close.closeFailed()
     raise error
 
@@ -408,6 +423,6 @@ proc pump*(host: Win32Host): int =
         host.window != nil and host.session != nil:
       try: host.delayed()
       except CatchableError as secondary:
-        host.recordError(secondary)
+        host.recordError()
         if primary != nil: primary.msg.add("; pump scheduling secondary: " & secondary.msg)
         else: raise secondary

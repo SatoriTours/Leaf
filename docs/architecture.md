@@ -73,6 +73,8 @@ Backend 实例通过私有资源占用 token 拒绝跨 Runtime 的同时使用�
 
 `BackendSession.requestClose` 只置 closing 并使队列/已捕获事件不再 eligible；不卸 hooks、不调用 backend.dispose、不永久 freeze。WM_CLOSE 观察即应用此意图；当前合法候选仍走原 confirm/abort。安全 turn 必须绑定完成、完整 Scope 空闲、无 update/hook-install/native dispatch/tick/release 递归；pending close 跳过普通业务 tick，先实际 Session.dispose，并确认 disposed=true，再 timer→window→root→class 清理。dispose/DestroyWindow 失败保留 pending 与资源所有权，按一发 timer 延后重试；窗口已销毁而 class 清理失败向 owner 抛错，必须显式 destroyHost 重试，不在死 HWND 排 timer。完成后清 tick/Scope query/Session/calls 引用并切断闭环；不依赖 ORC/进程退出释放 OS 资源。
 
+WM_NCDESTROY 是不可逆的 native lifetime 边界：即使 userdata 清除抛 CatchableError，finally 仍撤销 HWND、窗口计数与 registry root，borrowed getter 随即拒绝死句柄。普通 Nim cleanup 保留 callback 原异常引用/类型/parent，class 清理失败仅追加 secondary 并保留该 class 的显式 owner 重试资格；报告异常时不提前 complete，成功重试后才断开回调闭环。Host 仅保留必要 pending 异常与累计诊断计数，不保留无消费者的强引用错误历史。
+
 WndProc 只记录关闭/几何/错误及通知；业务 tick 和实际 release 都在 DispatchMessage 返回后的普通 Nim 边界。nested/busy pump 有界 PeekMessage 后返回，不阻塞或自旋；WM_APP/timer 消费会清 posted，重试 timer 显式持有并清理。GetMessage -1 抛 UiError、0 返回 WM_QUIT 的退出值且不表示 Session 已释放；Host 销毁不向同线程其它窗口发全局 WM_QUIT。
 
 DPI policy 在 HWND 前初始化，保留宿主已选 awareness。标题先检查 UTF8、NUL、原预算与 UTF16/整数界限；创建与读取均用 W API。HostContext 使用真实 client rect/scale 的有限 DIP；WM_SIZE/WM_DPICHANGED 更新几何并安排安全布局，不直接 render/重建 input。`HostDiagnostics` 返回值副本：liveWindows/liveRoots 是当前 owner 线程全部 Host registry 总数，callbackErrors/pendingClose 属当前 Host；不把 T4 child/font/subclass 计入这些数字。

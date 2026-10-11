@@ -560,3 +560,82 @@ suite "Win32 real thread ownership before Runtime":
     h.destroyHost()
     check h.diagnostics.liveRoots==0
     check h.diagnostics.liveWindows==0
+
+
+proc verifyNcDestroyFailure(rejectClassOnce: bool) =
+  let anchor = makeHost()
+  defer: anchor.destroyHost()
+  let baseline = anchor.diagnostics
+  var c = systemWin32Calls()
+  let setData = c.setWindowData
+  let nativeDestroy = c.destroyWindow
+  let unregister = c.unregisterClass
+  let cause = newException(IOError, "NCDESTROY cause")
+  let primary = newException(ValueError, "one-shot NCDESTROY setter failure")
+  primary.parent = cause
+  var armed = false
+  var setterThrows, destroys, unregisters: int
+  c.setWindowData = proc(window: HWND, index: int32, value: int): int =
+    if armed and index == GWLP_USERDATA and value == 0 and setterThrows == 0:
+      inc setterThrows
+      raise primary
+    setData(window, index, value)
+  c.destroyWindow = proc(window: HWND): BOOL =
+    inc destroys
+    nativeDestroy(window)
+  c.unregisterClass = proc(name: WidePtr, instance: HINSTANCE): BOOL =
+    inc unregisters
+    if rejectClassOnce and unregisters == 1:
+      setLastError(5)
+      return 0
+    unregister(name, instance)
+  let h = makeHost(c)
+  let window = h.windowHandle
+  var className = newSeq[WCHAR](256)
+  check GetClassNameW(window, addr className[0], int32(className.len)) > 0
+  let bound = h.attach()
+  var ordinary = 0
+  h.setSafeTick(proc() = inc ordinary)
+  armed = true
+  var first: ref CatchableError
+  try: h.destroyHost()
+  except CatchableError as error: first = error
+  check setterThrows == 1
+  check IsWindow(window) == 0
+  check bound.s.disposed
+  check first == primary
+  check first of ValueError
+  if first != nil: check first.parent == cause
+  if rejectClassOnce:
+    check primary.msg.contains("UnregisterClassW")
+  check h.diagnostics.liveWindows == baseline.liveWindows
+  check h.diagnostics.liveRoots == baseline.liveRoots
+  check h.diagnostics.pendingClose
+  check h.diagnostics.callbackErrors >= 1
+  expect UiError: discard h.windowHandle
+  expect UiError: discard h.context
+  var copy = h.diagnostics
+  copy.pendingClose = false
+  check h.diagnostics.pendingClose
+  var cls: WNDCLASSEXW
+  check (GetClassInfoExW(GetModuleHandleW(nil), addr className[0], addr cls) != 0) == rejectClassOnce
+  var second: ref CatchableError
+  try: h.destroyHost()
+  except CatchableError as error: second = error
+  check second == nil
+  check not h.diagnostics.pendingClose
+  check destroys == 1 # No DestroyWindow call on the dead owned HWND.
+  check unregisters == (if rejectClassOnce: 2 else: 1)
+  check GetClassInfoExW(GetModuleHandleW(nil), addr className[0], addr cls) == 0
+  check h.diagnostics.liveWindows == baseline.liveWindows
+  check h.diagnostics.liveRoots == baseline.liveRoots
+  check bound.r.disposeCalls == 1
+  check ordinary == 0
+  h.destroyHost()
+  check destroys == 1
+
+suite "Win32 irreversible NCDESTROY cleanup":
+  test "NCDESTROY setter exception retires native ownership and preserves primary for retry":
+    verifyNcDestroyFailure(false)
+  test "NCDESTROY primary keeps class cleanup failure secondary and retries only owned class":
+    verifyNcDestroyFailure(true)
