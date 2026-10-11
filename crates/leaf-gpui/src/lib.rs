@@ -1,3 +1,4 @@
+mod abi_v2;
 mod bridge;
 mod desktop;
 mod model;

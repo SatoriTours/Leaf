@@ -83,12 +83,12 @@
 - `normalizeHostProps(node: Node, policy: HostStylePolicy): HostProps`；`HostStylePolicy = gpuiCompatible | nativeStrict`，保留现有两端属性容忍差异。
 - `UpdateStats` 记录 componentRenders、visitedHosts、normalizedHosts、indexEdits、ops、ffiBytes、snapshotExports；计数均 uint64。
 
-- [ ] **1.1 写失败测试**：`host_props_preserve_absence_unicode_and_list_metadata`：空文本与 `"你好"` 不混同 absence；删除 opacity 后 presence 消失；input resetToken=7；100000 项列表 rowHeight=30/overscan=2 正确保留。`style_policies_preserve_platform_semantics`：同一 full 值保留可供后端区分的语义，未知控件属性沿用各自策略；非有限数拒绝。
+- [x] **1.1 写失败测试**：`host_props_preserve_absence_unicode_and_list_metadata`：空文本与 `"你好"` 不混同 absence；删除 opacity 后 presence 消失；input resetToken=7；100000 项列表 rowHeight=30/overscan=2 正确保留。`style_policies_preserve_platform_semantics`：同一 full 值保留可供后端区分的语义，未知控件属性沿用各自策略；非有限数拒绝。
   核心断言：`check normalizeHostProps(text("你好"), gpuiCompatible).text == "你好"`。
-- [ ] **1.2 运行**：`nim c -r --path:src --out:target/nim/test_host_protocol tests/nim/test_host_protocol.nim`；新增类型缺失导致 FAIL，确认不是工具链错误。
-- [ ] **1.3 实现**上述类型与转换；JSON 不参与此模块，完整属性携带 presence，回调只保留事件 mask。
-- [ ] **1.4 验证**：重复 1.2，并运行 `tests/nim/test_native_styles.nim`；全部 PASS。
-- [ ] **1.5 提交**：仅本任务文件，message `feat: define typed host update protocol`。
+- [x] **1.2 运行**：`nim c -r --path:src --out:target/nim/test_host_protocol tests/nim/test_host_protocol.nim`；新增类型缺失导致 FAIL，确认不是工具链错误。
+- [x] **1.3 实现**上述类型与转换；JSON 不参与此模块，完整属性携带 presence，回调只保留事件 mask。
+- [x] **1.4 验证**：重复 1.2，并运行 `tests/nim/test_native_styles.nim`；全部 PASS。
+- [x] **1.5 提交**：仅本任务文件，message `feat: define typed host update protocol`。
 
 ### Task 2: ABI 2 合同、缓冲区和三端布局验证
 
@@ -105,12 +105,12 @@
 - `LeafGpuiApiV2`：struct_size/abi/capabilities，以及 run(config,callbacks,nimCtx,error)；`leaf_gpui_query_v2(requestedAbi,outApi,outSize,error): int32`。
 - Nim `encodeBatch(batch: HostBatch): OwnedFfiBatch` 与 `borrow(batch: var OwnedFfiBatch): ptr LeafBatch`；OwnedFfiBatch 在同步调用结束前持有数组与字符串。
 
-- [ ] **2.1 写失败测试**：C/Nim/Rust 对所有 struct 的 sizeof/alignment/每个字段 offset/数组 stride 相等；测试 callback 实际调用约定。Rust 测试 `decode_rejects_bad_ranges_and_preserves_empty_utf8` 覆盖 null+0、null+1、偏移溢出、1MiB 边界、错误截断、中文字节长度和非法 UTF-8。
+- [x] **2.1 写失败测试**：C/Nim/Rust 对所有 struct 的 sizeof/alignment/每个字段 offset/数组 stride 相等；测试 callback 实际调用约定。Rust 测试 `decode_rejects_bad_ranges_and_preserves_empty_utf8` 覆盖 null+0、null+1、偏移溢出、1MiB 边界、错误截断、中文字节长度和非法 UTF-8。
   每个布局字段的断言为 `check cValue == nimValue`、`check cValue == rustValue`；三值由各自独立编译的 probe 取得，不能都来自同一份手写数字表。
-- [ ] **2.2 运行**：`nim c -r --path:src --out:target/nim/check_gpui_v2_abi scripts/check_gpui_v2_abi.nim`；脚本缺失或新 ABI 缺失 FAIL。脚本之后应分别编译 C/Nim/Rust layout probe 并比较，不启动 GPUI。
-- [ ] **2.3 实现** header、两端绑定、owned buffer 与检查脚本；裸声明模块不依赖 GPUI，可供 Rust standalone probe 引用。不增加 bindgen 或其他生成器依赖。
-- [ ] **2.4 验证**：重复 2.2；`cargo test -p leaf-gpui --locked abi_v2::tests`，全部 PASS。Windows 使用同脚本 `.exe` 结果，不把 Linux 布局报告当 Windows 证据。
-- [ ] **2.5 提交**：本任务文件，message `feat: add versioned GPUI C ABI contract`。
+- [x] **2.2 运行**：`nim c -r --path:src --out:target/nim/check_gpui_v2_abi scripts/check_gpui_v2_abi.nim`；脚本缺失或新 ABI 缺失 FAIL。脚本之后应分别编译 C/Nim/Rust layout probe 并比较，不启动 GPUI。
+- [x] **2.3 实现** header、两端绑定、owned buffer 与检查脚本；裸声明模块不依赖 GPUI，可供 Rust standalone probe 引用。不增加 bindgen 或其他生成器依赖。
+- [x] **2.4 验证**：重复 2.2；`cargo test -p leaf-gpui --locked abi_v2::tests`，全部 PASS。Windows 使用同脚本 `.exe` 结果，不把 Linux 布局报告当 Windows 证据。
+- [x] **2.5 提交**：本任务文件，message `feat: add versioned GPUI C ABI contract`。
 
 ### Task 3: Rust 宿主存储及可拒绝批次
 
