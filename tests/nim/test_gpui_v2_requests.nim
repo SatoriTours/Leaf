@@ -1,6 +1,6 @@
 {.define:leafProtocolProbes.}
 import std/[unittest, os, osproc, dynlib]
-import leaf/[core, widgets, backend, gpui_api, gpui_ffi_v2, gpui_session]
+import leaf/[core, widgets, backend, gpui_api, gpui_ffi_v2, gpui_session,components]
 type TestScript=proc(config:ptr LeafConfig,host:ptr LeafHostCallbacks,ctx:pointer,error:ptr LeafError):int32 {.cdecl.}
 var rt:Runtime
 var scenario:int
@@ -71,6 +71,15 @@ suite "typed requests keep JSON off the bridge":
     scenario=1
     check openGpuiSession(rt,api).run()==0
     check built==50
+    built=0
+    rt=newRuntime(componentApplication(componentList("items",keys,proc(i:int):UiDescription=
+      inc built
+      host(text($i)),rowHeight=30,overscan=0),"托管列表"))
+    let exports=rt.updateStats().snapshotExports
+    check openGpuiSession(rt,api).run()==0
+    check built==50
+    check rt.updateStats().snapshotExports==exports
+
     rt=newRuntime(Application(title:"失败",width:640,height:480,render:proc(c:BuildContext):Node=
       virtualList("items",@["a"],proc(i:int):Node=raise newException(UiError,"row failed"))))
     scenario=2

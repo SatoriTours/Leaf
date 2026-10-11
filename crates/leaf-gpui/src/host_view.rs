@@ -55,6 +55,16 @@ struct ListSlot {
     failed: bool,
 }
 impl ListSlot {
+    fn accept_rows(&mut self,generation:u64,current:u64,rows:Vec<crate::bridge_v2::HostRow>)->bool {
+        if generation!=current || generation!=self.generation { return false; }
+        self.rows=rows.into_iter().map(|r|(r.index as usize,(r.handle,r.key))).collect();
+        true
+    }
+    fn begin_finish(&mut self,generation:u64)->bool {
+        if generation!=self.generation {return false;}
+        self.scheduled=false;
+        true
+    }
     fn new(p: &LeafProps) -> Self {
         Self {
             generation: p.list_generation,
@@ -339,14 +349,12 @@ impl HostView {
         request.protected_rows = rows.as_ptr();
         request.protected_len = rows.len() as u64;
         let result = self.bridge.request(&request);
-        let success = result.is_ok();
+        let mut success = result.is_ok();
         let rows = self.accept(result);
+        let current=self.store.borrow().node(id).map(|n|n.props.values.list_generation).unwrap_or(0);
         if let Some(slot) = self.lists.borrow_mut().get_mut(&id) {
             if success {
-                slot.rows = rows
-                    .into_iter()
-                    .map(|r| (r.index as usize, (r.handle, r.key)))
-                    .collect();
+                success=slot.accept_rows(generation,current,rows);
             }
             slot.failed = !success;
         }
@@ -360,7 +368,7 @@ impl HostView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let (schedule, mut protected) = {
+        let (schedule, mut protected, generation) = {
             let mut lists = self.lists.borrow_mut();
             let Some(slot) = lists.get_mut(&id) else {
                 return Vec::new();
@@ -373,7 +381,7 @@ impl HostView {
                 .union(&slot.painting)
                 .filter_map(|index| slot.rows.get(index).map(|(_, key)| (*index, key.clone())))
                 .collect::<Vec<_>>();
-            (schedule, keys)
+            (schedule, keys,slot.generation)
         };
         protected.extend(self.protected_rows(id, window, cx));
         self.request_rows(id, range.clone(), protected);
@@ -381,7 +389,7 @@ impl HostView {
         if schedule {
             let weak = cx.entity().downgrade();
             window.on_next_frame(move |window, app| {
-                let _ = weak.update(app, |view, cx| view.finish_list(id, window, cx));
+                let _ = weak.update(app, |view, cx| view.finish_list(id,generation,window,cx));
             });
         }
         let handles = {
@@ -405,13 +413,13 @@ impl HostView {
             })
             .collect()
     }
-    fn finish_list(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+    fn finish_list(&mut self, id: u64,generation:u64, window: &mut Window, cx: &mut Context<Self>) {
         let mut protected = {
             let mut lists = self.lists.borrow_mut();
             let Some(slot) = lists.get_mut(&id) else {
                 return;
             };
-            slot.scheduled = false;
+            if !slot.begin_finish(generation) {return;}
             if slot.failed {
                 slot.painting.clear();
                 return;
@@ -778,3 +786,21 @@ pub fn run(store: Rc<RefCell<HostStore>>, bridge: TypedBridge, frames: bool) -> 
 #[cfg(test)]
 #[path = "host_ui_tests.rs"]
 mod host_ui_tests;
+
+#[cfg(test)]
+mod typed_list_tests {
+    use super::*;
+    #[test]
+    fn obsolete_rows_and_frame_cannot_replace_new_source() {
+        let props=LeafProps {list_generation:2,list_count:100,height_mode:0,row_height:24.0,..Default::default()};
+        let mut slot=ListSlot::new(&props);
+        slot.rows.insert(9,(90,"accepted".into()));
+        assert!(!slot.accept_rows(1,2,vec![]));
+        assert_eq!(slot.rows[&9].1,"accepted");
+        slot.scheduled=true;
+        assert!(!slot.begin_finish(1));
+        assert!(slot.scheduled);
+        assert!(slot.accept_rows(2,2,vec![crate::bridge_v2::HostRow{handle:10,index:1,key:"new".into()}]));
+        assert_eq!(slot.rows[&1].1,"new");
+    }
+}

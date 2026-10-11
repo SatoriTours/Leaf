@@ -66,6 +66,8 @@ proc nativeHostConsumer*(backend:Backend,sessionId=0'u64,
       elif a.kind==opCreate: -1
       elif b.kind==opCreate:1
       else:0)
+    removed.sort(proc(a,b:NodeHandle):int=
+      cmp(depth(UpdateOp(parent:entities.getOrDefault(b).parent)),depth(UpdateOp(parent:entities.getOrDefault(a).parent))))
     for handle in removed:batch.ops.add(UpdateOp(kind:opRemove,handle:handle))
     batch.finalOrders=orders
     backend.prepare(batch)

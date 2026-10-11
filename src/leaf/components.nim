@@ -3,5 +3,5 @@ import ./core
 import ./[component_description,component_view]
 export component_description,component_view
 import ./managed_runtime
-export managed_runtime.componentApplication,managed_runtime.updateStats,managed_runtime.invalidateRoot
+export managed_runtime.componentApplication,managed_runtime.updateStats,managed_runtime.invalidateRoot,managed_runtime.listStats
 export core.flush,core.batch,core.uiTask

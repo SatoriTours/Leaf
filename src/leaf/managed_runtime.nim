@@ -5,6 +5,10 @@ import ./[core,component_description,component_state,host_reconcile,backend]
 export host_protocol.UpdateStats
 
 type
+  RowSlot=object
+    id:uint64
+    index:int
+    used:uint64
   Instance=ref object
     id,parent,owner:uint64
     depth:int
@@ -14,6 +18,10 @@ type
     children:seq[uint64]
     handle,parentHost:NodeHandle
     bytes:int
+    active:bool
+    rowIndex:int
+    rows:Table[string,RowSlot]
+    rowClock:uint64
   ManagedStore=ref object
     owner:Runtime
     states:StateStore
@@ -63,14 +71,22 @@ proc descriptionBytes(desc:UiDescription,path:string):int=
       let source=node.listSource
       result+=source.len*16
       for i in 0..<source.len:result+=source.itemKey(i).len
+proc copyInstance(item:Instance):Instance=
+  result=Instance()
+  result[]=item[]
+proc materializeList(d:ManagedDriver,item:Instance,first,finish:int,protected:seq[int])
 proc erase(d:ManagedDriver,id:uint64)=
   let old=d.current(id)
   if old==nil:return
-  for child in old.children:d.erase(child)
+  var children=old.children
+  for slot in old.rows.values:
+    if slot.id notin children:children.add(slot.id)
+  for child in children:d.erase(child)
   d.edits[id]=nil
   dec d.count;d.bytes-=old.bytes
-  if old.description.kind==DescriptionKind.host:d.changes.removals.add(old.handle)
-  else:d.changes.boundaries.add(HostBoundary(id:id))
+  if old.description.kind==DescriptionKind.host:
+    if old.handle!=NoHandle:d.changes.removals.add(old.handle)
+  elif old.active:d.changes.boundaries.add(HostBoundary(id:id))
 proc allocate(d:ManagedDriver):uint64=
   if d.data.nextId==high(uint64):fail("component identity exhausted")
   result=d.data.nextId;inc d.data.nextId
@@ -88,9 +104,11 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
     old=nil
   let oldRoot=if old==nil:NoHandle else:d.hostRoot(old.id)
   let id=if old==nil:d.allocate() else:old.id
-  let item=Instance(id:id,parent:parent,owner:owner,depth:depth,path:path,description:desc,parentHost:parentHost)
+  let item=Instance(id:id,parent:parent,owner:owner,depth:depth,path:path,description:desc,parentHost:parentHost,active:true,rowIndex: -1)
   if old==nil:inc d.count
-  else:d.bytes-=old.bytes
+  else:
+    d.bytes-=old.bytes
+    item.rowIndex=old.rowIndex
   item.bytes=descriptionBytes(desc,path);d.bytes+=item.bytes
   if d.count>MaxNodes or d.bytes>MaxTreeBytes:fail("managed description exceeds node/instance/byte budget")
   d.edits[id]=item
@@ -100,7 +118,7 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
       d.data.states.setPhase(StatePhase.initializing)
       try:item.model=desc.erased.instantiate(newMountContext(d.data.states,id))
       finally:d.data.states.setPhase(StatePhase.idle)
-    if old!=nil and id notin d.dirty and desc.erased.equalProps(old.description.erased):
+    if old!=nil and old.active and id notin d.dirty and desc.erased.equalProps(old.description.erased):
       item.children=old.children
       return id
     d.computed.incl(id)
@@ -118,13 +136,31 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
     if old==nil or root!=oldRoot:
       d.changes.boundaries.add(HostBoundary(id:id,root:root,parent:owner))
   else:
-    item.handle=if old==nil:d.data.reconciler.reserveHandle() else:old.handle
+    item.handle=if old==nil or old.handle==NoHandle:d.data.reconciler.reserveHandle() else:old.handle
     let node=desc.hostNode
-    item.description=hostShell(node,@[])
+    item.description=desc.hostOnly()
     let props=normalizeHostProps(node,d.data.policy)
     inc d.measurements.normalizedHosts
     d.changes.upserts.add(HostRecord(handle:item.handle,parent:parentHost,nodeId:path,
       kind:node.kind,props:props,boundaryId:owner))
+    if node.kind==NodeKind.virtualList:
+      if node.listSource==nil:fail("virtual list has no source")
+      if old!=nil and old.description.hostNode.listSource==node.listSource:
+        item.rows=old.rows;item.children=old.children;item.rowClock=old.rowClock
+      elif old!=nil:
+        var restoreKeys:seq[string]
+        for child in old.children:
+          let previous=d.current(child)
+          if previous!=nil and previous.rowIndex>=0:
+            restoreKeys.add(old.description.hostNode.listSource.itemKey(previous.rowIndex))
+        for slot in old.rows.values:d.erase(slot.id)
+        var indices:seq[int]
+        var lookup:Table[string,int]
+        for i in 0..<node.listSource.len:lookup[node.listSource.itemKey(i)]=i
+        for key in restoreKeys:
+          if lookup.hasKey(key):indices.add(lookup.getOrDefault(key))
+        d.materializeList(item,0,0,indices)
+      return id
     var previous:Table[string,uint64]
     if old!=nil:
       for i,childId in old.children:
@@ -160,6 +196,84 @@ proc repairAncestors(d:ManagedDriver,id:uint64)=
       return
     d.changes.boundaries.add(HostBoundary(id:parent,root:d.hostRoot(child),parent:ancestor.owner))
     child=parent;parent=ancestor.parent
+proc retainedDescription(d:ManagedDriver,id:uint64):UiDescription=
+  let item=d.current(id)
+  if item.description.kind==DescriptionKind.component:return item.description
+  var children:seq[UiDescription]
+  for child in item.children:children.add(d.retainedDescription(child))
+  hostShell(item.description.hostNode,children)
+proc deactivate(d:ManagedDriver,id:uint64)=
+  let old=d.current(id)
+  if old==nil or not old.active:return
+  let item=old.copyInstance()
+  item.active=false
+  for child in item.children:d.deactivate(child)
+  if item.description.kind==DescriptionKind.host:
+    if item.handle!=NoHandle:d.changes.removals.add(item.handle)
+    item.handle=NoHandle
+  else:d.changes.boundaries.add(HostBoundary(id:id))
+  d.edits[id]=item
+proc materializeList(d:ManagedDriver,item:Instance,first,finish:int,protected:seq[int])=
+  let source=item.description.hostNode.listSource
+  if source==nil or first<0 or finish<first or finish>source.len:fail("invalid list viewport")
+  var active:HashSet[int]
+  for i in max(0,first-source.overscan)..<min(source.len,finish+source.overscan):active.incl(i)
+  for i in protected:
+    if i<0 or i>=source.len:fail("invalid protected row")
+    active.incl(i)
+  var indices:seq[int]
+  for i in active:indices.add(i)
+  indices.sort()
+  inc item.rowClock
+  var children:seq[uint64]
+  var handles:seq[NodeHandle]
+  for index in indices:
+    let key=source.itemKey(index)
+    var slot=item.rows.getOrDefault(key)
+    let old=d.current(slot.id)
+    if old==nil or not old.active:
+      let description=if old==nil:item.description.buildDescriptionRow(index) else:d.retainedDescription(old.id)
+      slot.id=d.reconcile(description,slot.id,item.id,item.owner,item.handle,
+        item.path & "/item/k:" & $key.len & ":" & key,item.depth+1)
+    let row=d.current(slot.id).copyInstance()
+    row.rowIndex=index
+    d.edits[slot.id]=row
+    slot.index=index;slot.used=item.rowClock
+    item.rows[key]=slot
+    children.add(slot.id);handles.add(d.hostRoot(slot.id))
+  for oldId in item.children:
+    if oldId notin children:d.deactivate(oldId)
+  item.children=children
+  var warm:seq[(string,RowSlot)]
+  for key,slot in item.rows:
+    if slot.index notin active:warm.add((key,slot))
+  warm.sort(proc(a,b:(string,RowSlot)):int=cmp(a[1].used,b[1].used))
+  let limit=max(128,active.len)
+  for i in 0..<max(0,item.rows.len-limit):
+    let (key,slot)=warm[i]
+    d.erase(slot.id);item.rows.del(key)
+  d.edits[item.id]=item
+  d.changes.children.add(HostChildren(parent:item.handle,children:handles))
+proc prepareHost(d:ManagedDriver)=
+  var changes=HostChanges(window:d.changes.window)
+  var upserts:Table[NodeHandle,HostRecord]
+  var orders:Table[NodeHandle,HostChildren]
+  var boundaries:Table[uint64,HostBoundary]
+  var removed:HashSet[NodeHandle]
+  for record in d.changes.upserts:upserts[record.handle]=record
+  for order in d.changes.children:orders[order.parent]=order
+  for boundary in d.changes.boundaries:boundaries[boundary.id]=boundary
+  for handle in d.changes.removals:
+    removed.incl(handle);upserts.del(handle);orders.del(handle)
+  for record in upserts.values:changes.upserts.add(record)
+  for order in orders.values:changes.children.add(order)
+  for boundary in boundaries.values:changes.boundaries.add(boundary)
+  for handle in removed:
+    if d.data.reconciler.record(handle).isSome:changes.removals.add(handle)
+  d.candidate=d.data.reconciler.planDelta(changes,d.data.owner.acceptedRevision+1)
+  d.data.reconciler.validate(d.candidate)
+  d.data.states.validateAttempt(d.attempt)
+  d.exported=none(Snapshot)
 method stage*(base:ManagedDriver,forceRoot:bool):RuntimeDriver=
   let data=base.data
   let forceRoot=forceRoot or data.forceRoot
@@ -183,22 +297,47 @@ method stage*(base:ManagedDriver,forceRoot:bool):RuntimeDriver=
     for id in dirty:
       if id in d.computed:continue
       let item=d.current(id)
-      if item==nil:continue
+      if item==nil or not item.active:continue
       let before=d.hostRoot(id)
       discard d.reconcile(item.description,id,item.parent,item.owner,item.parentHost,item.path,item.depth)
       if d.hostRoot(id)!=before:d.repairAncestors(id)
     if data.root==0:
       let config=data.owner.applicationConfig
       d.changes.window=some(HostWindow(title:config.title,width:config.width,height:config.height))
-    d.candidate=data.reconciler.planDelta(d.changes,data.owner.acceptedRevision+1)
-    data.reconciler.validate(d.candidate)
-    data.states.validateAttempt(d.attempt)
+    d.prepareHost()
+    result=d
+  except CatchableError:
+    d.reject()
+    raise
+method stageViewport*(base:ManagedDriver,key:string,first,finish:int,protected:seq[int]):RuntimeDriver=
+  var d=base
+  if d.candidate==nil:
+    let staged=base.stage(false)
+    if staged!=nil:d=ManagedDriver(staged)
+    else:
+      d=ManagedDriver(data:base.data,count:base.data.count,bytes:base.data.bytes,root:base.data.root)
+      d.attempt=d.data.states.beginAttempt()
+  try:
+    var target:Instance
+    for item in d.edits.values:
+      if item!=nil and item.description.kind==DescriptionKind.host and (item.path==key or item.description.key==key):target=item
+    if target==nil:
+      var id=d.data.index.getOrDefault(key)
+      if id==0:
+        let ids=d.data.keys.getOrDefault(key)
+        if ids.len!=1:fail("unknown or ambiguous list")
+        id=ids[0]
+      target=d.current(id)
+    if target==nil or target.description.hostNode.kind!=NodeKind.virtualList:fail("not a virtual list")
+    target=target.copyInstance()
+    d.materializeList(target,first,finish,protected)
+    d.prepareHost()
     result=d
   except CatchableError:
     d.reject()
     raise
 proc removeIndex(data:ManagedStore,item:Instance) {.raises:[].}=
-  if item.description.kind!=DescriptionKind.host:return
+  if item.description.kind!=DescriptionKind.host or not item.active:return
   data.index.del(item.path)
   let key=item.description.key
   if key.len>0:
@@ -217,7 +356,7 @@ method publish*(d:ManagedDriver) {.raises:[].}=
       data.instances.del(id);data.states.disposeOwner(id)
     else:data.instances[id]=item
   for id,item in d.edits:
-    if item!=nil and item.description.kind==DescriptionKind.host:
+    if item!=nil and item.active and item.description.kind==DescriptionKind.host:
       data.index[item.path]=id
       let key=item.description.key
       if key.len>0:data.keys.mgetOrPut(key,@[]).add(id)
@@ -248,12 +387,13 @@ proc lookup(data:ManagedStore,key:string):Instance=
     if ids.len!=1:fail("ambiguous key: " & key & "; use full node ID")
     id=ids[0]
   data.instances.getOrDefault(id)
-proc exportNode(d:ManagedDriver,id:uint64):MountedNode=
+proc exportNode(d:ManagedDriver,id:uint64,rowIndex= -1):MountedNode=
   let item=d.current(id)
-  if item.description.kind==DescriptionKind.component:return d.exportNode(item.children[0])
+  let index=if rowIndex>=0:rowIndex else:item.rowIndex
+  if item.description.kind==DescriptionKind.component:return d.exportNode(item.children[0],index)
   var children:seq[MountedNode]
   for child in item.children:children.add(d.exportNode(child))
-  mountedDescription(item.description.hostNode,item.path,children)
+  mountedDescription(item.description.hostNode,item.path,children,itemIndex=index)
 method exportSnapshot*(d:ManagedDriver):Snapshot=
   if d.candidate!=nil:
     let config=d.data.owner.applicationConfig
@@ -317,3 +457,17 @@ proc useNativePolicy*(runtime:Runtime,capabilities:BackendCapabilities,mode=comp
       let props=normalizeHostProps(node,nativeStrict)
       result.add(checkTypedCapabilities(item.path,node.kind,props.normalized,capabilities,mode))
   data.policy=nativeStrict
+
+proc listStats*(runtime:Runtime,key:string):tuple[activeRows,warmRows,instances,activeInstances,eventBindings:int]=
+  let d=ManagedDriver(runtime.runtimeDriver)
+  let item=d.data.lookup(key)
+  result.activeRows=item.children.len
+  result.warmRows=item.rows.len-item.children.len
+  result.instances=d.data.instances.len
+  for instance in d.data.instances.values:
+    if instance.active:
+      inc result.activeInstances
+      if instance.description.kind==DescriptionKind.host:
+        let node=instance.description.hostNode
+        for kind in EventKind:
+          if node.handler(kind)!=nil:inc result.eventBindings

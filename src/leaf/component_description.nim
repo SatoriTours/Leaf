@@ -39,6 +39,7 @@ type
     nested:seq[UiDescription]
     instance:ErasedComponent
     instanceKey:string
+    rowFactory:proc(index:int):UiDescription {.closure.}
 
 var componentDeclarations {.compileTime.}:Table[string,string]
 macro componentIdentity(name:static[string],file:static[string],line,column:static[int],P,M:typedesc):untyped=
@@ -128,3 +129,17 @@ proc host*(node:Node):UiDescription=
   hostShell(node,children)
 proc toDescription*(node:Node):UiDescription=host(node)
 proc toDescription*(description:UiDescription):UiDescription=description
+
+proc componentList*(key:string,keys:seq[string],builder:proc(index:int):UiDescription {.closure.},
+    rowHeight=0.0,estimatedHeight=40.0,overscan=2):UiDescription=
+  if builder==nil:fail("component list needs a builder")
+  let node=core.virtualList(key,keys,proc(index:int):Node=fail("managed rows require a Runtime viewport"),
+    rowHeight,estimatedHeight,overscan)
+  result=hostShell(node,@[])
+  result.rowFactory=builder
+proc buildDescriptionRow*(description:UiDescription,index:int):UiDescription=
+  if description.rowFactory!=nil:description.rowFactory(index)
+  else:host(description.hostNode.listSource.buildRow(index))
+proc hostOnly*(description:UiDescription):UiDescription=
+  result=hostShell(description.hostNode,@[])
+  result.rowFactory=description.rowFactory

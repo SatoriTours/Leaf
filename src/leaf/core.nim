@@ -606,6 +606,7 @@ proc installCommitter*(runtime: Runtime, committer: RuntimeCommitter,
       if committed and lifecycle.confirm != nil: lifecycle.confirm()
     except CatchableError as error:
       if committed: runtime.abortInstallation(lifecycle, error)
+      if candidate!=nil and candidate.driver!=nil and candidate.driver!=runtime.driver:candidate.driver.reject()
       raise error
     # Framework confirmation has completed; publication invokes no business
     # callback and remains protected by the same update guard.
@@ -669,6 +670,9 @@ proc prepareSnapshotImpl(runtime: Runtime, preparer: RuntimePreparer) =
     if candidate.stagingChanged:
       runtime.gateAndPublish(candidate)
       runtime.safeDump()
+  except CatchableError:
+    if candidate.driver!=nil and candidate.driver!=runtime.driver:candidate.driver.reject()
+    raise
   finally: runtime.inUpdate = false
 
 proc prepareSnapshot(runtime: Runtime, preparer: RuntimePreparer) =
@@ -702,6 +706,7 @@ proc installPreparer*(runtime: Runtime, preparer: RuntimePreparer): uint64 =
       if committed and lifecycle.confirm != nil: lifecycle.confirm()
     except CatchableError as error:
       if committed: runtime.abortInstallation(lifecycle, error)
+      if candidate!=nil and candidate.driver!=nil and candidate.driver!=runtime.driver:candidate.driver.reject()
       raise error
     if candidate.stagingChanged:
       runtime.publishCandidate(candidate, candidate.proposed)
@@ -793,6 +798,30 @@ proc materializeInto(runtime: Runtime, key: string, first, finish: int,
                   protected: seq[int]): seq[MountedNode] =
   ## Apply a complete list viewport to a staging runtime. Only visible/protected
   ## rows are mounted; up to 128 rows stay warm, without live event handlers.
+  if runtime.driver!=nil:
+    if runtime.inUpdate:fail("reentrant list request")
+    if runtime.isCandidate:
+      runtime.driver=runtime.driver.stageViewport(key,first,finish,protected)
+      runtime.markStaged()
+      for row in runtime.driver.find(key).children:
+        if row.listIndex>=first and row.listIndex<finish:result.add(row)
+      return
+    runtime.inUpdate=true
+    var staged:RuntimeDriver
+    try:
+      staged=runtime.driver.stageViewport(key,first,finish,protected)
+      let candidate=runtime.candidateFrom()
+      candidate.driver=staged
+      candidate.markStaged()
+      if runtime.validator!=nil:runtime.validator(staged.exportSnapshot())
+      for row in staged.find(key).children:
+        if row.listIndex>=first and row.listIndex<finish:result.add(row)
+      runtime.gateAndPublish(candidate)
+    except CatchableError:
+      if staged!=nil:staged.reject()
+      raise
+    finally:runtime.inUpdate=false
+    return
   if runtime.inUpdate: fail("reentrant list request")
   let target = runtime.find(key)
   let source = target.description.source

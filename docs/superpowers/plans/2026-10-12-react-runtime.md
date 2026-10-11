@@ -267,13 +267,13 @@ HostChanges 的 upserts 为 seq[HostRecord]，removals 为 seq[NodeHandle]，chi
 
 **Interfaces:** `componentList(key:string, keys:seq[string], builder:proc(index:int):UiDescription, rowHeight=0.0, estimatedHeight=40.0, overscan=2):UiDescription`；builder 版本由新 source generation 标识。视口请求带列表句柄/source generation/first/finish/protected keys，高度结果带相同 source generation；响应只含已接受行句柄/范围/版本，不附 Snapshot。普通 host(virtualList(...)) 保持旧 RowBuilder 行为。
 
-- [ ] **11.1 写失败测试**：100000 项首视口 [5000,5050) 只初始化 50 行（overscan=0 fixture）；同视口重复请求不重建；同源重排保留 key 的 State，新源代数重建。旧代数高度/行结果拒绝；新源 key 锚点恢复正确。
+- [x] **11.1 写失败测试**：100000 项首视口 [5000,5050) 只初始化 50 行（overscan=0 fixture）；同视口重复请求不重建；同源重排保留 key 的 State，新源代数重建。旧代数高度/行结果拒绝；新源 key 锚点恢复正确。
   首次和同视口重复请求后均断言 `check initializedRows == 50`；移出再淘汰的行句柄写入断言 `check writeResult == StateWriteResult.disposed`。
-- [ ] **11.2 写失败测试**：活动+受保护行超过128仍保持活动；离屏暖缓存最终淘汰释放 State/回调；焦点/IME 行受保护不卸载，取消保护后可淘汰。行构建失败保留旧行/回调/高度，源替换失败不能发布部分候选。componentList 在 ABI1 的快照/列表适配路径与 ABI2 行结果一致。
-- [ ] **11.3 运行**：`nim c -r --path:src --out:target/nim/test_component_lists tests/nim/test_component_lists.nim`；`cargo test -p leaf-gpui --locked list_tests`，FAIL。
-- [ ] **11.4 实现** 行 owner=(列表实例,source generation,item key)，预算/事件激活分离；范围合并，先释放 Rust store 借用再调用 Nim，返回后建 GPUI view。不得在 render 中调用业务 callback。
-- [ ] **11.5 验证**：重复 11.3，并跑 `test_lists.nim`、`test_gpui_bridge.nim`；PASS。统计活动实例、暖行、事件数，不以 GC 后总内存代替生命周期断言。
-- [ ] **11.6 提交**：message `feat: retain bounded component state in virtual lists`。
+- [x] **11.2 写失败测试**：活动+受保护行超过128仍保持活动；离屏暖缓存最终淘汰释放 State/回调；焦点/IME 行受保护不卸载，取消保护后可淘汰。行构建失败保留旧行/回调/高度，源替换失败不能发布部分候选。componentList 在 ABI1 的快照/列表适配路径与 ABI2 行结果一致。
+- [x] **11.3 运行**：`nim c -r --path:src --out:target/nim/test_component_lists tests/nim/test_component_lists.nim`；`cargo test -p leaf-gpui --locked list_tests`，FAIL。
+- [x] **11.4 实现** 行 owner=(列表实例,source generation,item key)，预算/事件激活分离；范围合并，先释放 Rust store 借用再调用 Nim，返回后建 GPUI view。不得在 render 中调用业务 callback。
+- [x] **11.5 验证**：重复 11.3，并跑 `test_lists.nim`、`test_gpui_bridge.nim`；PASS。统计活动实例、暖行、事件数，不以 GC 后总内存代替生命周期断言。
+- [x] **11.6 提交**：message `feat: retain bounded component state in virtual lists`。
 
 ### Task 12: GPUI HostView 缓存和失效传播
 
