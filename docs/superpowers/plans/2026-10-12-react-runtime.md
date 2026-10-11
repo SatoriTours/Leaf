@@ -184,12 +184,12 @@ HostChanges 的 upserts 为 seq[HostRecord]，removals 为 seq[NodeHandle]，chi
 `readAccepted[T](s:State[T]):T`、`readCandidate[T](attempt:StateAttempt,s:State[T]):T`。
 最后一个接口只供实现层及测试访问，应用从 ComponentContext.value 读取候选值。
 
-- [ ] **7.1 写失败测试**：初值 0，三次 set(1) 后为 1，三次 update(+1) 后为 3；封存失败保持 0 且队列不重放；disposed 不能影响后挂载组件。跨 runtime、非 UI 线程、render/init/updater 期间写入拒绝。缺少安全 snapshot 策略的可变引用类型拒绝创建；提供深快照后拒绝 candidate 不污染 accepted 值。
+- [x] **7.1 写失败测试**：初值 0，三次 set(1) 后为 1，三次 update(+1) 后为 3；封存失败保持 0 且队列不重放；disposed 不能影响后挂载组件。跨 runtime、非 UI 线程、render/init/updater 期间写入拒绝。缺少安全 snapshot 策略的可变引用类型拒绝创建；提供深快照后拒绝 candidate 不污染 accepted 值。
   同一 StateAttempt 内断言 `check acceptedValue == 0`、`check candidateValue == 3`；reject 后再次尝试断言 `check candidateValue == 0`。变量由本任务的低层 StateStore 测试夹具读取，不依赖尚未完成的组件 DSL。
-- [ ] **7.2 运行**：`nim c -r --threads:on --path:src --out:target/nim/test_component_state tests/nim/test_component_state.nim`，FAIL。
-- [ ] **7.3 实现** 有类型槽与擦除后的队列桥接；默认 scalar/string/不含可变引用的值对象可用；复杂共享对象需显式 snapshot 或外部模型。相等比较缺省 nil 时保守计算，不对任意 ref 使用地址相等。
-- [ ] **7.4 验证**：重复 7.2，覆盖更新函数抛错和多 owner 批次的整体拒绝，全部 PASS。
-- [ ] **7.5 提交**：message `feat: add transactional component state queues`。
+- [x] **7.2 运行**：`nim c -r --threads:on --path:src --out:target/nim/test_component_state tests/nim/test_component_state.nim`，FAIL。
+- [x] **7.3 实现** 有类型槽与擦除后的队列桥接；默认 scalar/string/不含可变引用的值对象可用；复杂共享对象需显式 snapshot 或外部模型。相等比较缺省 nil 时保守计算，不对任意 ref 使用地址相等。
+- [x] **7.4 验证**：重复 7.2，覆盖更新函数抛错和多 owner 批次的整体拒绝，全部 PASS。
+- [x] **7.5 提交**：message `feat: add transactional component state queues`。
 
 ### Task 8: 组件定义、UiDescription 与 componentView DSL
 
