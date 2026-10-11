@@ -1513,3 +1513,51 @@ suite "Recording backend sessions":
     check acceptedCalls == 1
     check session.acceptedEntities == recording.entities
     dispose(session)
+
+
+suite "Session close intent":
+  test "close inside current callback invalidates captured events without disposal":
+    var actions = 0
+    var session: BackendSession
+    let recording = newRecordingBackend(fullCapabilities())
+    let runtime = newRuntime(app(proc(ctx: BuildContext): Node =
+      button("close", key = "close", onClick = proc(e: Event) =
+        inc actions
+        session.requestClose()
+        session.requestClose()
+        check session.closing
+        check not session.disposed
+        check recording.disposeCalls == 0)))
+    session = attachBackend(runtime, recording.backend, makeHost())
+    let owner = runtime.committerOwner
+    let handle = session.handleFor(runtime.find("close").id)
+    check session.enqueue(userEvent(session, handle, 1, Event(kind: click)))
+    check session.enqueue(userEvent(session, handle, 2, Event(kind: click)))
+    session.drainEvents()
+    check actions == 1
+    check session.queuedEvents == 0
+    check session.closing
+    check not session.disposed
+    check not runtime.eventsFrozen
+    check runtime.committerOwner == owner
+    check recording.disposeCalls == 0
+    check not session.enqueue(userEvent(session, handle, 3, Event(kind: click)))
+    session.dispose()
+    check session.disposed
+    check recording.disposeCalls == 1
+
+  test "close intent empties queued events and nil disposed requests are safe":
+    requestClose(BackendSession(nil))
+    let runtime = newRuntime(app(proc(ctx: BuildContext): Node = text("x", key = "x")))
+    let recording = newRecordingBackend(fullCapabilities())
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    let handle = session.handleFor(runtime.find("x").id)
+    check session.enqueue(userEvent(session, handle, 1, Event(kind: click)))
+    session.requestClose()
+    check session.queuedEvents == 0
+    check session.closing
+    check recording.disposeCalls == 0
+    session.dispose()
+    session.requestClose()
+    check session.disposed
+    check recording.disposeCalls == 1

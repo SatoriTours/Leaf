@@ -15,8 +15,17 @@ import ./core
 
 type
   ThreadIdProc* = proc(): uint64 {.closure, raises: [].}
+  UiScopeActivity* = ref object
+    depth: int
 
-proc guardUiApplication*(app: Application, currentThread: ThreadIdProc): Application =
+proc newUiScopeActivity*(): UiScopeActivity = UiScopeActivity()
+proc busy*(activity: UiScopeActivity): bool {.raises: [].} =
+  ## Read on the owning UI thread; includes original scope entry/post-body/exit.
+  activity != nil and activity.depth > 0
+
+
+proc guardedApplication(app: Application, currentThread: ThreadIdProc,
+                        activity: UiScopeActivity): Application =
   ## Capture `currentThread()` as the expected owner now, then return a value
   ## copy of `app` whose execution scope enforces that owner. No render,
   ## handler, row builder, validator or preparer runs here.
@@ -50,6 +59,7 @@ proc guardUiApplication*(app: Application, currentThread: ThreadIdProc): Applica
         fail("UI body must run exactly once")
       body()
     var primary: ref CatchableError
+    if activity != nil: inc activity.depth
     try:
       if original != nil:
         original(guardedBody)
@@ -61,6 +71,7 @@ proc guardUiApplication*(app: Application, currentThread: ThreadIdProc): Applica
       # The synchronous scope call is over: revoke body authorization on every
       # exit path (normal, primary exception, zero body, worker violation).
       authorized.store(false)
+      if activity != nil: dec activity.depth
     # Even if the original scope swallowed a worker exception, the latch makes
     # the owner fail instead of silently accepting an unrendered Runtime.
     var secondary = ""
@@ -74,3 +85,11 @@ proc guardUiApplication*(app: Application, currentThread: ThreadIdProc): Applica
       raise primary
     if secondary.len > 0:
       fail("UI guard violation" & secondary)
+proc guardUiApplication*(app: Application, currentThread: ThreadIdProc): Application =
+  guardedApplication(app, currentThread, nil)
+
+proc guardUiApplication*(app: Application, currentThread: ThreadIdProc,
+                         activity: UiScopeActivity): Application =
+  ## Same owner/body guard, with full original Scope activity for safe hosts.
+  if activity == nil: fail("UI scope activity must not be nil")
+  guardedApplication(app, currentThread, activity)

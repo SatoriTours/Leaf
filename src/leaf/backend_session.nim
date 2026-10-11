@@ -332,6 +332,16 @@ proc attachBackend*(runtime: Runtime, backend: Backend, host: HostContext,
     raise error
   session
 
+proc requestClose*(session: BackendSession) =
+  ## Intent only: invalidate queued/captured event eligibility immediately.
+  ## In-flight candidate acceptance/abort and actual lease disposal remain
+  ## with their existing coordinators; no business or native callback runs.
+  if session == nil or session.disposed: return
+  session.closing = true
+  session.queue.setLen(0)
+  session.lastQueued = 0
+  session.lastProcessed = 0
+
 proc dispose*(session: BackendSession) =
   ## Teardown. A request made while a Runtime update/commit is in progress is
   ## rejected with a catchable `UiError`, so the host can retry on a safe tick
@@ -343,10 +353,7 @@ proc dispose*(session: BackendSession) =
   if session == nil or session.disposed: return
   if session.runtime != nil and session.runtime.installingUpdate:
     fail("cannot dispose backend session during a runtime update; retry on a safe tick")
-  session.closing = true
-  session.queue.setLen(0)
-  session.lastQueued = 0
-  session.lastProcessed = 0
+  session.requestClose()
   if session.runtime != nil:
     if session.committerToken != 0:
       session.runtime.clearCommitter(session.committerToken)

@@ -246,3 +246,57 @@ when compileOption("threads"):
     check workerCaught
     check actions == 0
     borrowed = nil
+
+suite "Full UI scope activity":
+  test "activity covers original scope entry body and post body with context":
+    let activity = newUiScopeActivity()
+    var stages: seq[bool]
+    var inContext = false
+    let source = app(proc(body: proc() {.closure.}) =
+      stages.add(activity.busy)
+      inContext = true
+      body()
+      stages.add(activity.busy)
+      inContext = false)
+    let guarded = guardUiApplication(source, proc(): uint64 = 1, activity)
+    check not activity.busy
+    guarded.executionScope(proc() =
+      check inContext
+      stages.add(activity.busy))
+    check stages == @[true, true, true]
+    check not activity.busy
+
+  test "post scope primary identity and chain survive and activity clears":
+    let activity = newUiScopeActivity()
+    let cause = newException(IOError, "cause")
+    let primary = newException(ValueError, "post")
+    primary.parent = cause
+    var postBusy = false
+    let source = app(proc(body: proc() {.closure.}) =
+      body()
+      postBusy = activity.busy
+      raise primary)
+    let guarded = guardUiApplication(source, proc(): uint64 = 1, activity)
+    var caught: ref CatchableError
+    try: guarded.executionScope(proc() = discard)
+    except CatchableError as e: caught = e
+    check caught == primary
+    check caught.parent == cause
+    check postBusy
+    check not activity.busy
+
+  test "activity nests and wrong owner never enters original scope":
+    let activity = newUiScopeActivity()
+    var current = 1'u64
+    var entries = 0
+    let guarded = guardUiApplication(app(proc(body: proc() {.closure.}) =
+      inc entries
+      body()), proc(): uint64 = current, activity)
+    guarded.executionScope(proc() =
+      guarded.executionScope(proc() = check activity.busy)
+      check activity.busy)
+    check not activity.busy
+    current = 2
+    expect UiError: guarded.executionScope(proc() = discard)
+    check entries == 2
+    check not activity.busy

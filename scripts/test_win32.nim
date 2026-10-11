@@ -26,13 +26,17 @@ proc main(): int =
     if compiler.len == 0:
       stderr.writeLine("Nim compiler not found; put nim on PATH or set NIM")
       return 1
-    let outputDirectory = root / "target" / "nim" / "a2" / "windows"
+    let outputDirectory = getEnv("LEAF_WIN32_TEST_OUT",
+      root / "target" / "nim" / "a2" / "windows")
     createDir(outputDirectory)
     for test in tests:
       let name = test.extractFilename.changeFileExt(ExeExt)
       let output = outputDirectory / name
       let process = startProcess(compiler, workingDir = root,
-        args = @["c", "-r", "--path:" & root / "src", "--out:" & output, test],
+        args = @["c", "-r", "--threads:on", "--forceBuild:on",
+          "--skipParentCfg:on", "--skipUserCfg:on",
+          "--nimcache:" & outputDirectory / (name & "-cache"),
+          "--passC:-I" & directory, "--path:" & root / "src", "--out:" & output, test],
         options = {poUsePath, poParentStreams})
       let code = process.waitForExit()
       process.close()

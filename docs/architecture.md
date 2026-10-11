@@ -60,4 +60,23 @@ Backend 实例通过私有资源占用 token 拒绝跨 Runtime 的同时使用�
 - `ui_thread.nim`：`guardUiApplication(app, currentThread)` 在调用时捕获 owner 线程，返回 `app` 的值副本并包装 `executionScope`；包装 scope 先检查 owner，再把带 body-entry 检查的 guarded body 交给原 scope（原 scope 为 nil 时直接执行）。只支持同步恰一次 scope：异线程入口、0 次 body、重复 body 都被拒绝。每次调用使用原子 latch：任一退出路径（正常返回、原 primary 异常、0 次 body、worker 违规）都会撤销该次调用的 body 授权，被 scope 保存的 guarded body 之后在 owner 执行会被拒绝，违规后的 owner fallback 也不执行业务；即使原 scope 吞掉 worker 异常，owner 返回时仍抛 `UiError`，不会让未 render 的 Runtime 初始化成功。原 primary/post-body 异常保留类型与消息，guard 违规作为附加 secondary 信息；不 import Win32、不改 ORM scope 参数/context、不改 Runtime 安装与发布顺序。
 - `backends/win32/host_state.nim`：`CloseState(pending, posted, complete)` 与 `requestClose` / `markClosePosted` / `closeOnTick` / `closeSucceeded` / `closeFailed`。重复请求合并为单个 pending；`posted` 合并 WM_APP/timer 安全 tick；busy tick 返回 false 且不消费请求、不自旋；失败保持 pending 并可重试；只有真正 dispose 成功才 `complete`，完成后幂等、不再重开。
 - `scripts/test_win32.nim`：非 Windows 明确输出 `NotRun` 并 exit 2；Windows 上扫描 `tests/windows/test_*.nim` 逐套 compile/run 且要求 exit 0，空目录/无测试明确失败——没有实际运行的 Windows host 测试就不报成功。
-- **未完成（W 子门）**：`win32/api.nim`、`calls.nim`、`host.nim`、真实 Unicode 窗口/消息循环/DPI、`tests/windows/test_win32_host.nim` 与真实 ABI/Windows 头编译验证均未在本批实现，本批不声明任何 Windows 窗口/IME/ABI 验收。
+- W 实现与实际开发测试见下节；独立产品验收和平台支持状态由 Task3-W 报告/独立 review 判定，L 本身不能证明 W。
+
+
+## A2 T3-W：owned Unicode Win32 Host
+
+`backends/win32/api.nim` 仅包含固定宽度/指针宽度的 W ABI 和少量系统入口，opaque handle 使用 Windows header 类型；`calls.nim` 是内部 Nim closure 转发表，系统默认全转发真实调用（closure 不是 stdcall callback）。产品没有 C shim。`WndProc`/声明的 `SUBCLASSPROC` 是 stdcall、raises:[]；CatchableError 记录后在普通 Nim pump 边界交付，Defect 不宣称可恢复。窗口 userdata 仅存非零数字 cookie，owner-thread registry 强持 Host，不存 Nim ref 地址。
+
+保留 `createHost(title, DipSize, calls=systemWin32Calls())`、`context`、`setSafeTick`、`requestClose`、`pump`、`destroyHost`。增加 native-only `bindSession(host, actual BackendSession, scopeBusy: proc():bool {.closure,raises:[].})` 和 borrowed `windowHandle(host):HWND`。所有方法/观测先检查真实 GetCurrentThreadId；HWND/context 还要求 live。HWND 不进入 DSL/JSON/HostContext；借用者不得销毁父 HWND。绑定要求 context.sessionId 匹配、唯一 active binding，mountGeneration 仍以 Session 为准。
+
+`ui_thread.nim` 新增 `UiScopeActivity`、`newUiScopeActivity()`、owner-only `busy(activity):bool {.raises:[].}`，以及 `guardUiApplication(app,currentThread,activity)` 重载；原二参数调用保留。两者共用原 body guard，capture 在任何 newRuntime 前，depth 在原 Scope 入口前增加、完整 post-body/异常返回后 finally 清除；不改 ORM context、业务/SQL 或同步 exactly-once 合同。Win32 装配先以真实 GetCurrentThreadId guard Application，再 newRuntime，随后创建 Host、attach BackendSession、bindSession(activity.busy)。Host 不以 Runtime.inUpdate 单独推断 Scope 已退出。
+
+`BackendSession.requestClose` 只置 closing 并使队列/已捕获事件不再 eligible；不卸 hooks、不调用 backend.dispose、不永久 freeze。WM_CLOSE 观察即应用此意图；当前合法候选仍走原 confirm/abort。安全 turn 必须绑定完成、完整 Scope 空闲、无 update/hook-install/native dispatch/tick/release 递归；pending close 跳过普通业务 tick，先实际 Session.dispose，并确认 disposed=true，再 timer→window→root→class 清理。dispose/DestroyWindow 失败保留 pending 与资源所有权，按一发 timer 延后重试；窗口已销毁而 class 清理失败向 owner 抛错，必须显式 destroyHost 重试，不在死 HWND 排 timer。完成后清 tick/Scope query/Session/calls 引用并切断闭环；不依赖 ORC/进程退出释放 OS 资源。
+
+WndProc 只记录关闭/几何/错误及通知；业务 tick 和实际 release 都在 DispatchMessage 返回后的普通 Nim 边界。nested/busy pump 有界 PeekMessage 后返回，不阻塞或自旋；WM_APP/timer 消费会清 posted，重试 timer 显式持有并清理。GetMessage -1 抛 UiError、0 返回 WM_QUIT 的退出值且不表示 Session 已释放；Host 销毁不向同线程其它窗口发全局 WM_QUIT。
+
+DPI policy 在 HWND 前初始化，保留宿主已选 awareness。标题先检查 UTF8、NUL、原预算与 UTF16/整数界限；创建与读取均用 W API。HostContext 使用真实 client rect/scale 的有限 DIP；WM_SIZE/WM_DPICHANGED 更新几何并安排安全布局，不直接 render/重建 input。`HostDiagnostics` 返回值副本：liveWindows/liveRoots 是当前 owner 线程全部 Host registry 总数，callbackErrors/pendingClose 属当前 Host；不把 T4 child/font/subclass 计入这些数字。
+
+`tests/windows/test_win32_host.nim` 实际 Windows 窗口/Session 测试用 Recording Backend 验证 generic lease 集成，Recording 不是 Native 子控件后端。测试内 windows.h/commctrl.h 对 sizeof/alignment/offsetof/WNDPROC/SUBCLASSPROC 做真实 GCC 编译断言；EDIT/BUTTON 仅导航 fixture，由测试显式销毁。Windows runner 的子 suite threads:on、forceBuild 和独立 `LEAF_WIN32_TEST_OUT` cache/out；非 Windows仍明确 NotRun exit2。
+
+Task3-W 当前仅获授权的 elevated DEVELOPMENT 执行证据：真实 Session/Token 值记录在报告，不据此宣布 NativeReady、标准权限或完整 Windows 支持。E3 non-elevated 与真实 IME/多显示器 DPI/accessibility(H) 仍开放；T4 实际控件/编辑/IME未实施。T4 必须在 Native Backend 已取得资源、尚未 bind 的 startup 窗口补最小 hold/lease；未绑定 Host 仅保留关闭意图，不能拿父窗口销毁替代子资源释放。原 T1M2/T5/final 集成义务不由 Host 测试结案。
