@@ -118,12 +118,12 @@
 
 **Interfaces:** `HostStore::new(session_id: u64)`；`prepare(&mut self, batch: &DecodedBatch) -> Result<(), HostError>`；`apply(&mut self) -> Result<(), HostError>`；`accept(&mut self, revision: u64)`；`discard(&mut self)`；`node(handle: u64) -> Option<&HostNode>`；`revision() -> u64`；`take_dirty_boundaries() -> Vec<u64>`。`HostNode` 保存种类、owned props、父/有序子句柄和最近边界，不存 JSON Node 或 Nim 状态。DecodedBatch 是任务 2 校验后的临时借用视图，HostStore 不延长其生命周期。
 
-- [ ] **3.1 写失败测试** `host_store::tests`：create 根和文本，update 后输入缓冲释放仍读到 `"你好"`；prepare/apply 不改变 accepted revision；accept 后 revision 递增；discard 保留旧节点。拒绝 foreign session、stale base、多父、图环、未知句柄、重复 create、kind 就地改变、悬空边界；5000 子项逆序结果正确。会话 dispose 后旧 prepared token 不可 accept。
+- [x] **3.1 写失败测试** `host_store::tests`：create 根和文本，update 后输入缓冲释放仍读到 `"你好"`；prepare/apply 不改变 accepted revision；accept 后 revision 递增；discard 保留旧节点。拒绝 foreign session、stale base、多父、图环、未知句柄、重复 create、kind 就地改变、悬空边界；5000 子项逆序结果正确。会话 dispose 后旧 prepared token 不可 accept。
   apply 后、accept 前：`assert_eq!(store.revision(), before_revision)`；accept 后：`assert_eq!(store.revision(), before_revision + 1)`。
-- [ ] **3.2 运行**：`cargo test -p leaf-gpui --locked host_store::tests`；新增模块缺失/断言失败 FAIL。
-- [ ] **3.3 实现** affected-node overlay 与预留空间；prepare 校验变化关系/祖先链，apply 仅应用到候选；accept 不分配/调用 GPUI/失败。不得 clone 整张图或为每次接受保留一层 overlay。属性更新不扫描全图。
-- [ ] **3.4 验证**：重复 3.2；新增分配/访问计数断言，5000 静态节点加一个文本 update 的访问量与 100 节点版本一致，允许固定祖先路径差异。
-- [ ] **3.5 提交**：message `feat: retain transactional GPUI host state`。
+- [x] **3.2 运行**：`cargo test -p leaf-gpui --locked host_store::tests`；新增模块缺失/断言失败 FAIL。
+- [x] **3.3 实现** affected-node overlay 与预留空间；prepare 校验变化关系/祖先链，apply 仅应用到候选；accept 不分配/调用 GPUI/失败。不得 clone 整张图或为每次接受保留一层 overlay。属性更新不扫描全图。
+- [x] **3.4 验证**：重复 3.2；新增分配/访问计数断言，5000 静态节点加一个文本 update 的访问量与 100 节点版本一致，允许固定祖先路径差异。
+- [x] **3.5 提交**：message `feat: retain transactional GPUI host state`。
 
 ### Task 4: Nim 宿主协调器与最终子项顺序
 
