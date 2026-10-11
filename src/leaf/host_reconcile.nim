@@ -262,3 +262,14 @@ proc planSnapshot*(r:HostReconciler,snapshot:Snapshot,nextRevision:uint64,
     if id notin seen:changes.removals.add(id)
   result=r.planDelta(changes,nextRevision)
   result.measurements.normalizedHosts=normalized
+proc fullBatch*(r:HostReconciler,sessionId:uint64):HostBatch=
+  ## Initial synchronization only. Ordinary managed commits use their delta.
+  result=HostBatch(sessionId:sessionId,baseRevision:0,nextRevision:r.acceptedRevision)
+  for id,stored in r.records:
+    let record=stored.record
+    result.ops.add(HostOp(kind:HostOpKind.create,handle:id,parent:record.parent,
+      nodeId:record.nodeId,nodeKind:record.kind,props:record.props))
+  for id,stored in r.records:
+    result.ops.add(HostOp(kind:HostOpKind.setChildren,handle:id,children:stored.children))
+  for boundary in r.boundaries.values:result.ops.add(HostOp(kind:HostOpKind.boundary,boundary:boundary))
+  if r.window.isSome:result.ops.add(HostOp(kind:HostOpKind.window,window:r.window.get))

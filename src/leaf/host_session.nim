@@ -1,7 +1,7 @@
 ## One owner-bound, synchronous commit consumer. prepare/apply may fail;
 ## accept/discard publish metadata only and may not invoke application code.
 import std/options
-import ./[core, backend, host_reconcile]
+import ./[core, backend, host_reconcile,managed_runtime]
 export host_reconcile
 
 type
@@ -18,6 +18,8 @@ type
     consumer: HostConsumer
     token,lease,lastSequence:uint64
     pending:HostCandidate
+    pendingWire:HostBatch
+    isManaged:bool
     closing,disposed:bool
 var nextLease:uint64
 proc revision*(session:HostSession):uint64=session.reconciler.revision
@@ -28,22 +30,36 @@ proc alive(session:HostSession):bool =
   not session.disposed and not session.closing and session.consumer.lease==session.lease
 proc requestClose*(session:HostSession)=session.closing=true
 proc dropPending(session:HostSession) {.raises:[].} =
-  if session.pending!=nil:
+  if session.pendingWire.nextRevision!=0:
     session.consumer.discardPrepared()
     session.pending=nil
+    session.pendingWire=default(HostBatch)
 proc acceptPending(session:HostSession) {.raises:[].} =
   let candidate=session.pending
-  session.consumer.accept(candidate.batch.nextRevision)
-  session.reconciler.publish(candidate)
+  session.consumer.accept(session.pendingWire.nextRevision)
+  if not session.isManaged:session.reconciler.publish(candidate)
   session.pending=nil
+  session.pendingWire=default(HostBatch)
 proc commit(session:HostSession,accepted,candidate:Runtime)=
   if not session.alive:fail("host session is closing")
   let revision=if candidate.proposedRevision!=0:candidate.proposedRevision else:candidate.acceptedRevision
-  let plan=session.reconciler.planSnapshot(candidate.snapshot,revision,gpuiCompatible)
-  session.reconciler.validate(plan)
+  var plan:HostCandidate
+  var wire:HostBatch
+  if session.isManaged:
+    plan=candidate.hostCandidate
+    if plan==nil:wire=session.reconciler.fullBatch(session.sessionId)
+    else:
+      session.reconciler.validate(plan)
+      wire=plan.batch
+      wire.sessionId=session.sessionId
+  else:
+    plan=session.reconciler.planSnapshot(candidate.snapshot,revision,gpuiCompatible)
+    session.reconciler.validate(plan)
+    wire=plan.batch
   session.pending=plan
+  session.pendingWire=wire
   try:
-    session.consumer.prepare(plan.batch)
+    session.consumer.prepare(wire)
     if not session.alive:fail("host session closed after prepare")
     session.consumer.apply()
     if not session.alive:fail("host session closed after apply")
@@ -75,7 +91,8 @@ proc attachHostSession*(runtime:Runtime,consumer:HostConsumer):HostSession=
   if runtime.committerOwner!=0:fail("runtime committer already installed")
   inc nextLease
   let session=HostSession(runtime:runtime,consumer:consumer,lease:nextLease,
-    reconciler:newHostReconciler(consumer.sessionId))
+    reconciler:(if runtime.managed:runtime.managedReconciler else:newHostReconciler(consumer.sessionId)),
+    isManaged:runtime.managed)
   consumer.lease=session.lease
   try:
     session.token=runtime.installCommitter(proc(accepted,candidate:Runtime)=session.commit(accepted,candidate),

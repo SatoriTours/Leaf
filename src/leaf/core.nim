@@ -72,6 +72,8 @@ type
     width*, height*: int
     render*: RenderProc
     executionScope*: ExecutionScope
+    driverFactory: proc(owner:Runtime):RuntimeDriver {.closure.}
+  RuntimeDriver* = ref object of RootObj
   PerformanceStats* = object
     renders*, builtNodes*, cacheHits*, cacheMisses*, dispatches*: uint64
     builtItems*, rowCacheHits*: uint64
@@ -86,6 +88,7 @@ type
     rows: Table[int, RowEntry]
   Runtime* = ref object
     app: Application
+    driver:RuntimeDriver
     current: Snapshot
     index: Table[string, MountedNode]
     keys: Table[string, seq[MountedNode]]
@@ -120,6 +123,24 @@ type
     ## Neither callback renders or invokes business callbacks.
     confirm*: proc() {.closure.}
     abort*: proc(scoped: bool) {.closure.}
+
+# Internal driver seam: core owns scopes, revisions and backend gate ownership.
+method stage*(driver:RuntimeDriver,forceRoot:bool):RuntimeDriver {.base.}=nil
+method stageViewport*(driver:RuntimeDriver,key:string,first,finish:int,protected:seq[int]):RuntimeDriver {.base.}=nil
+method invokeAccepted*(driver:RuntimeDriver,key:string,event:Event):bool {.base.}=false
+method exportSnapshot*(driver:RuntimeDriver):Snapshot {.base.}=default(Snapshot)
+method find*(driver:RuntimeDriver,key:string):MountedNode {.base.}=nil
+method stats*(driver:RuntimeDriver):PerformanceStats {.base.}=default(PerformanceStats)
+method publish*(driver:RuntimeDriver) {.base,raises:[].}=discard
+method reject*(driver:RuntimeDriver) {.base,raises:[].}=discard
+proc runtimeDriver*(runtime:Runtime):RuntimeDriver=runtime.driver
+proc applicationConfig*(runtime:Runtime):tuple[title:string,width,height:int]=
+  (runtime.app.title,runtime.app.width,runtime.app.height)
+proc newDriverApplication*(title:string,width,height:int,
+    factory:proc(owner:Runtime):RuntimeDriver {.closure.},executionScope:ExecutionScope=nil):Application=
+  Application(title:title,width:width,height:height,driverFactory:factory,executionScope:executionScope)
+proc mountedDescription*(node:Node,id:string,children:seq[MountedNode]= @[],itemIndex= -1):MountedNode=
+  MountedNode(description:node,identity:id,lookupKey:node.nodeKey,descendants:children,itemIndex:itemIndex)
 
 proc fail*(message: string) {.noreturn.} =
   raise newException(UiError, message)
@@ -345,7 +366,7 @@ proc candidateFrom(runtime: Runtime): Runtime =
   ## structure is shared read-only; list preparation rebuilds changed paths
   ## instead of mutating shared MountedNodes. The candidate carries no
   ## committer, so nested preparation never recurses into the outer gate.
-  Runtime(app: runtime.app, current: runtime.current, index: runtime.index,
+  Runtime(app: runtime.app, driver:runtime.driver, current: runtime.current, index: runtime.index,
     keys: runtime.keys, rowCaches: runtime.rowCaches, counters: runtime.counters,
     rowClock: runtime.rowClock, validator: runtime.validator,
     revision: runtime.revision, descriptionBytes: runtime.descriptionBytes,
@@ -362,6 +383,9 @@ proc markStaged(runtime: Runtime) =
 proc publishCandidate(runtime: Runtime, candidate: Runtime, proposed: uint64) =
   ## Move accepted state only. The external callback has already run exactly
   ## once; this never renders or re-invokes the committer.
+  if candidate.driver!=nil:
+    candidate.driver.publish()
+    runtime.driver=candidate.driver
   runtime.current = candidate.current
   runtime.index = move(candidate.index)
   runtime.keys = move(candidate.keys)
@@ -448,22 +472,65 @@ proc refreshImpl(runtime: Runtime): bool =
     ctx.candidate.clear()
     runtime.inUpdate = false
 
+proc flushDriverImpl(runtime:Runtime,forceRoot:bool):bool=
+  if runtime.isCandidate or runtime.inUpdate:fail("reentrant runtime update")
+  runtime.inUpdate=true
+  var staged:RuntimeDriver
+  try:
+    staged=runtime.driver.stage(forceRoot)
+    if staged==nil:return false
+    let candidate=runtime.candidateFrom()
+    candidate.driver=staged
+    candidate.markStaged()
+    if runtime.validator!=nil:runtime.validator(staged.exportSnapshot())
+    if runtime.preparer!=nil:runtime.preparer(candidate)
+    runtime.gateAndPublish(candidate)
+    result=true
+    runtime.postCommitDiagnostics()
+  except CatchableError:
+    if staged!=nil:staged.reject()
+    else:runtime.driver.reject()
+    raise
+  finally:runtime.inUpdate=false
+proc flush*(runtime:Runtime):bool=
+  var completed:bool
+  inExecutionScope(runtime):
+    completed=if runtime.driver==nil:runtime.refreshImpl() else:runtime.flushDriverImpl(false)
+  completed
+proc batch*(runtime:Runtime,body:proc() {.closure.})=
+  if runtime.inUpdate or runtime.isCandidate:fail("reentrant runtime batch")
+  inExecutionScope(runtime):
+    runtime.inUpdate=true
+    try:body()
+    except CatchableError:
+      if runtime.driver!=nil:runtime.driver.reject()
+      raise
+    finally:runtime.inUpdate=false
+    discard (if runtime.driver==nil:runtime.refreshImpl() else:runtime.flushDriverImpl(false))
+proc uiTask*(runtime:Runtime,body:proc() {.closure.})=
+  ## Backend task boundary. State writes enqueue; flush follows body completion.
+  runtime.batch(body)
+
 proc refresh*(runtime: Runtime): bool =
   var completed: bool
-  inExecutionScope(runtime): completed = runtime.refreshImpl()
+  inExecutionScope(runtime):
+    completed=if runtime.driver==nil:runtime.refreshImpl() else:runtime.flushDriverImpl(true)
   completed
 
 proc newRuntime*(app: Application, validator: SnapshotValidator = nil,
                  diagnostics: Diagnostics = nil): Runtime =
-  if app.render == nil: fail("application needs a render function")
+  if app.render == nil and app.driverFactory==nil: fail("application needs a render function")
   if app.width notin 1..16_384 or app.height notin 1..16_384:
     fail("invalid window dimensions")
   validString(app.title)
   result = Runtime(app: app, context: BuildContext(), validator: validator, diagnostics: diagnostics)
+  if app.driverFactory!=nil:result.driver=app.driverFactory(result)
   discard result.refresh()
 
-proc snapshot*(runtime: Runtime): Snapshot = runtime.current
-proc stats*(runtime: Runtime): PerformanceStats = runtime.counters
+proc snapshot*(runtime: Runtime): Snapshot =
+  if runtime.driver==nil:runtime.current else:runtime.driver.exportSnapshot()
+proc stats*(runtime: Runtime): PerformanceStats =
+  if runtime.driver==nil:runtime.counters else:runtime.driver.stats()
 
 proc setDiagnostics*(runtime: Runtime, diagnostics: Diagnostics) =
   ## Desktop attaches after its initial tree and lazy viewports are validated.
@@ -479,7 +546,7 @@ proc setValidatorImpl(runtime: Runtime, validator: SnapshotValidator) =
   ## A renderer can validate its constraints before a runtime transaction
   ## publishes state. Validate the current snapshot before attaching it.
   if runtime.inUpdate: fail("cannot replace validator during update")
-  if validator != nil: validator(runtime.current)
+  if validator != nil: validator(runtime.snapshot)
   runtime.validator = validator
 
 proc setValidator*(runtime: Runtime, validator: SnapshotValidator) =
@@ -666,6 +733,7 @@ proc retirePreparerOwner*(runtime:Runtime,owner:uint64) {.raises:[].} =
     runtime.preparerOwner=0
 
 proc find*(runtime: Runtime, key: string): MountedNode =
+  if runtime.driver!=nil:return runtime.driver.find(key)
   if key in runtime.index: return runtime.index[key]
   if key notin runtime.keys: fail("node key not found: " & key)
   if runtime.keys[key].len != 1: fail("ambiguous key: " & key & "; use full node ID")
@@ -676,6 +744,17 @@ proc dispatchImpl(runtime: Runtime, key: string, event: Event): bool =
     fail("business events are frozen: " & runtime.frozenReason)
   if runtime.isCandidate: fail("candidate runtime cannot dispatch business events")
   if runtime.inUpdate: fail("reentrant event dispatch")
+  if runtime.driver!=nil:
+    try:
+      runtime.inUpdate=true
+      let invoked=runtime.driver.invokeAccepted(key,event)
+      runtime.inUpdate=false
+      if not invoked:return false
+      return runtime.flushDriverImpl(false)
+    except CatchableError:
+      runtime.driver.reject()
+      raise
+    finally:runtime.inUpdate=false
   let n = runtime.find(key).description
   if n.inactive: return false
   let callback = n.handlers[event.kind]

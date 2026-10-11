@@ -222,9 +222,9 @@ HostChanges 的 upserts 为 seq[HostRecord]，removals 为 seq[NodeHandle]，chi
 - `hostCandidate(candidate:Runtime):HostCandidate` 由 managed_runtime 暴露给 host_session；legacy 走任务 4 的 planSnapshot，managed 直接使用 planDelta，不调用 candidate.snapshot。
 - core 的 public refresh 在 managed 模式 forceRoot=true；事件结束 flush 为 false，仅处理队列/失效。Snapshot/find 显式查询才物化；事件查找直接走已接受回调索引。
 
-- [ ] **9.1 写失败测试**：Counter 加 100/1000/5000 静态节点，每次点击 componentRenders=1，visitedHosts/indexEdits 不随静态数增长；同事件三次 update 只有一次提交，两个点击分别提交；无显式 batch 的 UI 任务只在安全边界 flush。
-- [ ] **9.2 写失败测试**：同 key 重排保留 State；换 key/type/parent 重建；父子同时更新只执行一次子 render；memo 父跳过仍处理脏后代；父移除排队子后 render 次数=0、State.write=disposed。只换回调时宿主 ops=0，但下一点击调用新闭包。只改 State 而输出相同仍推进 revision。
-- [ ] **9.3 写失败测试**：callback/render/prepare/apply 失败保留 accepted State、回调、索引与 revision；普通变量副作用保留。scope body 已接受后收尾失败，State 和 revision 保持新值且 outcome=acceptedScopeError；安装收尾失败不安装 hook。节点/深度/字节与组件实例预算不能被局部增长绕过。
+- [x] **9.1 写失败测试**：Counter 加 100/1000/5000 静态节点，每次点击 componentRenders=1，visitedHosts/indexEdits 不随静态数增长；同事件三次 update 只有一次提交，两个点击分别提交；无显式 batch 的 UI 任务只在安全边界 flush。
+- [x] **9.2 写失败测试**：同 key 重排保留 State；换 key/type/parent 重建；父子同时更新只执行一次子 render；memo 父跳过仍处理脏后代；父移除排队子后 render 次数=0、State.write=disposed。只换回调时宿主 ops=0，但下一点击调用新闭包。只改 State 而输出相同仍推进 revision。
+- [x] **9.3 写失败测试**：callback/render/prepare/apply 失败保留 accepted State、回调、索引与 revision；普通变量副作用保留。scope body 已接受后收尾失败，State 和 revision 保持新值且 outcome=acceptedScopeError；安装收尾失败不安装 hook。节点/深度/字节与组件实例预算不能被局部增长绕过。
 
   Counter fixture 的核心断言固定为以下代码；`rt` 是已经挂载的 managed Runtime，测量不包含首屏：
 
@@ -240,10 +240,10 @@ HostChanges 的 upserts 为 seq[HostRecord]，removals 为 seq[NodeHandle]，chi
 
   此 fixture 的 Counter 固定为 column/text/button 三个宿主，无嵌套组件；其它静态组件是 sibling。
   函数式队列测试的最终断言为 `check counter.read() == 3`；拒绝后为 `check counter.read() == 0`。
-- [ ] **9.4 运行**：分别编译运行 `tests/nim/test_managed_runtime.nim`、`tests/nim/test_component_commit.nim`，确认 FAIL。
-- [ ] **9.5 实现** driver 分支、脏 owner/后代路径、key 映射、候选 overlay、增量 key 多义索引和预算汇总；发布前预留，发布后不累积 overlay 链。保留旧 refreshImpl 主体，不借此全面拆 core。host_session 接受宿主版本后 core.publish 同时接受 State/回调；这段期间不运行用户代码。
-- [ ] **9.6 验证**：重复 9.4，并跑 `tests/nim/test_native_commit.nim`、`test_model_postcommit_ui.nim`、`test_model_transactions.nim`；PASS。对 UI 任务边界使用可控调度器测试，headless 必须显式 flush，不靠睡眠碰运气。
-- [ ] **9.7 提交**：message `feat: update managed components without full-tree refresh`。
+- [x] **9.4 运行**：分别编译运行 `tests/nim/test_managed_runtime.nim`、`tests/nim/test_component_commit.nim`，确认 FAIL。
+- [x] **9.5 实现** driver 分支、脏 owner/后代路径、key 映射、候选 overlay、增量 key 多义索引和预算汇总；发布前预留，发布后不累积 overlay 链。保留旧 refreshImpl 主体，不借此全面拆 core。host_session 接受宿主版本后 core.publish 同时接受 State/回调；这段期间不运行用户代码。
+- [x] **9.6 验证**：重复 9.4，并跑 `tests/nim/test_native_commit.nim`、`test_model_postcommit_ui.nim`、`test_model_transactions.nim`；PASS。对 UI 任务边界使用可控调度器测试，headless 必须显式 flush，不靠睡眠碰运气。
+- [x] **9.7 提交**：message `feat: update managed components without full-tree refresh`。
 
 ### Task 10: 旧 API、Snapshot 与 Win32 适配
 

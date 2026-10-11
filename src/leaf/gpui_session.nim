@@ -182,7 +182,7 @@ proc run*(session:GpuiSession):int=
   if session.running or session.detached:fail("GPUI session already used")
   session.running=true
   defer:session.running=false
-  let snapshot=session.runtime.snapshot
+  let snapshot=session.runtime.applicationConfig
   var config=LeafConfig(struct_size:uint32(sizeof(LeafConfig)),session_id:session.id,width:uint32(snapshot.width),height:uint32(snapshot.height),
     title:LeafBytes(`ptr`:cast[ptr uint8](snapshot.title.cstring),len:uint64(snapshot.title.len)))
   var callbacks=LeafHostCallbacks(struct_size:uint32(sizeof(LeafHostCallbacks)),attach:attach,request:request,detach:detach)
