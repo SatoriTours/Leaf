@@ -439,6 +439,31 @@ proc discardPrepared(win: Win32Backend) =
 proc prepare(win: Win32Backend, batch: UpdateBatch) =
   win.checkLive()
   if win.prepared.len != 0: win.discardPrepared()
+  if batch.isDelta:
+    win.candidate.clear()
+    if win.measurement==nil:win.measurement=newNativeMeasure(win.host.windowHandle,win.calls)
+    inc win.depth
+    defer:dec win.depth
+    for op in batch.ops:
+      case op.kind
+      of opCreate:
+        if op.handle in win.current:fail("duplicate native handle")
+        let entity=MountedEntity(handle:op.handle,parent:op.parent,index:op.index,
+          nodeId:op.nodeId,kind:op.nodeKind,props:op.props)
+        win.candidate[op.handle]=entity
+        discard win.makeControl(entity)
+      of opUpdate,opMove:
+        if op.handle notin win.current:fail("unknown native handle")
+        var entity=win.candidate.getOrDefault(op.handle,win.current.getOrDefault(op.handle))
+        if op.kind==opUpdate:
+          discard checkedWide(op.props.control.label.get(""))
+          discard checkedWide(op.props.control.value.get(""))
+          entity.props=op.props
+        else:entity.parent=op.parent;entity.index=op.index
+        win.candidate[op.handle]=entity
+      of opRemove:
+        if op.handle notin win.current:fail("unknown native handle")
+    return
   win.candidate = win.current
   if win.measurement == nil: win.measurement = newNativeMeasure(win.host.windowHandle, win.calls)
   inc win.depth
@@ -492,7 +517,12 @@ proc apply(win: Win32Backend, batch: UpdateBatch) =
     of opMove: discard
   for handle, entity in win.candidate:
     win.controls[handle].entity = entity
-  win.current = win.candidate
+  if batch.isDelta:
+    for op in batch.ops:
+      if op.kind==opRemove:win.current.del(op.handle)
+    for handle,entity in win.candidate:win.current[handle]=entity
+    win.candidate.clear()
+  else:win.current=win.candidate
   if batch.ops.len > 0:
     let ctx = win.host.context
     win.relayout(DipSize(width: ctx.contentWidth, height: ctx.contentHeight), int(ctx.scale * 96))
@@ -506,6 +536,16 @@ proc accept(win: Win32Backend, entities: Table[NodeHandle, MountedEntity], revis
     control.editor.acceptModel(entity.value, revision, entity.props.control.resetToken)
     if control.editor.pendingReset.isSome: control.armed = false
     elif win.bound: control.armed = true
+proc acceptDelta(win:Win32Backend,delta:HostAcceptedDelta) {.raises:[].}=
+  for handle in delta.removals:win.accepted.del(handle)
+  for entity in delta.upserts:
+    win.accepted[entity.handle]=entity
+    let control=win.controls.getOrDefault(entity.handle)
+    if control!=nil:
+      control.editor.acceptModel(entity.value,delta.revision,entity.props.control.resetToken)
+      if control.editor.pendingReset.isSome:control.armed=false
+      elif win.bound:control.armed=true
+  win.revision=delta.revision
 proc rebind(win: Win32Backend, id, generation: uint64) =
   win.checkLive()
   if id == 0 or generation == 0: fail("invalid native binding identity")
@@ -595,6 +635,7 @@ proc newWin32Backend*(host: Win32Host, calls: Win32Calls = systemWin32Calls()): 
   win.protocol.discardPrepared = proc() = win.discardPrepared()
   win.protocol.restore = proc(entities: Table[NodeHandle, MountedEntity]) = win.restore(entities)
   win.protocol.dispose = proc() = win.dispose()
+  win.protocol.acceptedDelta=proc(delta:HostAcceptedDelta) {.raises:[].}=win.acceptDelta(delta)
   win.protocol.accepted = proc(entities: Table[NodeHandle, MountedEntity], revision: uint64) {.raises: [].} = win.accept(entities, revision)
   win.protocol.rebind = proc(id, generation: uint64) = win.rebind(id, generation)
   win.protocol.bindingValid = proc(handle: NodeHandle, generation: uint64): bool =

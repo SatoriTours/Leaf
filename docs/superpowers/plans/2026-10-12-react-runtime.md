@@ -251,13 +251,13 @@ HostChanges 的 upserts 为 seq[HostRecord]，removals 为 seq[NodeHandle]，chi
 
 **Interfaces:** managed application 返回现有 Application，因此 newRuntime/run/headless 不新增另一套应用类型。`exportSnapshot` 按 revision 缓存，旧 validator/custom committer 显式触发完整导出。`nativeHostConsumer(backend:Backend):HostConsumer` 将 HostBatch 映射为 Native UpdateBatch；为 Backend 增加可选 `acceptedDelta` 元数据入口（HostAcceptedDelta 只含变更实体、删除句柄与最终顺序），旧 accepted 保留兼容。Win32 新适配使用 delta 更新持久事件/实体索引，不为每次组件更新复制整表。
 
-- [ ] **10.1 写失败测试**：旧普通变量回调仍根刷新且失败后变量不回滚；managed 普通变量需 invalidate；旧 view/cached/Router 行为不变。legacy/managed × ABI1/2 四种路径输出一致，ABI1 兼容导出成本计入统计。相同 revision 两次 Snapshot 查询只导出一次，下一更新失效；安装 SnapshotValidator 产生显式 export 计数，内置后端不产生该计数。
+- [x] **10.1 写失败测试**：旧普通变量回调仍根刷新且失败后变量不回滚；managed 普通变量需 invalidate；旧 view/cached/Router 行为不变。legacy/managed × ABI1/2 四种路径输出一致，ABI1 兼容导出成本计入统计。相同 revision 两次 Snapshot 查询只导出一次，下一更新失效；安装 SnapshotValidator 产生显式 export 计数，内置后端不产生该计数。
   连续显式导出前后计数断言 `check after.snapshotExports - before.snapshotExports <= 1'u64`；兼容输出按树内容比较，不比较进程内句柄数值。
-- [ ] **10.2 写失败测试**：fake native backend 接到局部 create/update/setChildren/remove 的准确结果；5000 逆序最终 index 正确，无二次方 Nim seq 模拟；旧 Backend.accepted 插件仍得到完整兼容元数据，Win32 acceptedDelta 不重建全表。事件代数和 settlement 规则保持现有测试结果。
-- [ ] **10.3 运行**：`nim c -r --path:src --out:target/nim/test_component_compat tests/nim/test_component_compat.nim`，FAIL。
-- [ ] **10.4 实现** 兼容导出与 Native 适配；setChildren 对原生控件顺序可逐控件调用，但在 Nim 使用最终顺序直接赋值，不逐项搜索/搬移；保留 Win32 现有全布局策略并如实计数。首次 managed 支持使用显式 import leaf/components，不改变旧 import leaf 的初始化。
-- [ ] **10.5 验证**：重复 10.3，并跑 `test_routing.nim`、`test_native_backend.nim`、`test_native_reconcile.nim`、`test_native_edit.nim`。编译 `-d:leafHeadlessOnly` fixture，确认不加载 GPUI/user32；真实 Windows 检查留任务 13。
-- [ ] **10.6 提交**：message `feat: adapt managed updates to legacy and Win32 hosts`。批次 B 用 headless 和 fake backends 验收局部计算，不以此宣称桌面交互已验收。
+- [x] **10.2 写失败测试**：fake native backend 接到局部 create/update/setChildren/remove 的准确结果；5000 逆序最终 index 正确，无二次方 Nim seq 模拟；旧 Backend.accepted 插件仍得到完整兼容元数据，Win32 acceptedDelta 不重建全表。事件代数和 settlement 规则保持现有测试结果。
+- [x] **10.3 运行**：`nim c -r --path:src --out:target/nim/test_component_compat tests/nim/test_component_compat.nim`，FAIL。
+- [x] **10.4 实现** 兼容导出与 Native 适配；setChildren 对原生控件顺序可逐控件调用，但在 Nim 使用最终顺序直接赋值，不逐项搜索/搬移；保留 Win32 现有全布局策略并如实计数。首次 managed 支持使用显式 import leaf/components，不改变旧 import leaf 的初始化。
+- [x] **10.5 验证**：重复 10.3，并跑 `test_routing.nim`、`test_native_backend.nim`、`test_native_reconcile.nim`、`test_native_edit.nim`。编译 `-d:leafHeadlessOnly` fixture，确认不加载 GPUI/user32；真实 Windows 检查留任务 13。
+- [x] **10.6 提交**：message `feat: adapt managed updates to legacy and Win32 hosts`。批次 B 用 headless 和 fake backends 验收局部计算，不以此宣称桌面交互已验收。
 
 ## 批次 C：列表、缓存与平台性能验收
 

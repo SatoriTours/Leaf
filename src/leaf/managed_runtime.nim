@@ -25,6 +25,7 @@ type
     keys:Table[string,seq[uint64]]
     invalid:HashSet[uint64]
     count,bytes:int
+    policy:HostStylePolicy
     totals:UpdateStats
     snapshot:Snapshot
     snapshotValid,forceRoot:bool
@@ -34,6 +35,7 @@ type
     changes:HostChanges
     attempt:StateAttempt
     candidate:HostCandidate
+    exported:Option[Snapshot]
     computed,dirty:HashSet[uint64]
     created:seq[uint64]
     root:uint64
@@ -118,7 +120,8 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
   else:
     item.handle=if old==nil:d.data.reconciler.reserveHandle() else:old.handle
     let node=desc.hostNode
-    let props=normalizeHostProps(node,gpuiCompatible)
+    item.description=hostShell(node,@[])
+    let props=normalizeHostProps(node,d.data.policy)
     inc d.measurements.normalizedHosts
     d.changes.upserts.add(HostRecord(handle:item.handle,parent:parentHost,nodeId:path,
       kind:node.kind,props:props,boundaryId:owner))
@@ -221,7 +224,8 @@ method publish*(d:ManagedDriver) {.raises:[].}=
   data.reconciler.publish(d.candidate)
   data.states.publishAttempt(d.attempt)
   data.root=d.root;data.count=d.count;data.bytes=d.bytes
-  data.snapshotValid=false
+  data.snapshotValid=d.exported.isSome
+  if d.exported.isSome:data.snapshot=d.exported.get
   let h=d.candidate.stats
   data.totals.componentRenders+=d.measurements.componentRenders
   data.totals.normalizedHosts+=d.measurements.normalizedHosts
@@ -253,7 +257,10 @@ proc exportNode(d:ManagedDriver,id:uint64):MountedNode=
 method exportSnapshot*(d:ManagedDriver):Snapshot=
   if d.candidate!=nil:
     let config=d.data.owner.applicationConfig
-    return Snapshot(title:config.title,width:config.width,height:config.height,root:d.exportNode(d.root))
+    if d.exported.isNone:
+      inc d.data.totals.snapshotExports
+      d.exported=some(Snapshot(title:config.title,width:config.width,height:config.height,root:d.exportNode(d.root)))
+    return d.exported.get
   if not d.data.snapshotValid:
     inc d.data.totals.snapshotExports
     let config=d.data.owner.applicationConfig
@@ -261,7 +268,14 @@ method exportSnapshot*(d:ManagedDriver):Snapshot=
     d.data.snapshotValid=true
   d.data.snapshot
 method find*(d:ManagedDriver,key:string):MountedNode=
-  let item=d.data.lookup(key)
+  var item:Instance
+  try:item=d.current(d.data.lookup(key).id)
+  except UiError:
+    for edited in d.edits.values:
+      if edited!=nil and edited.description.kind==DescriptionKind.host and (edited.path==key or edited.description.key==key):
+        if item!=nil:fail("ambiguous key: " & key)
+        item=edited
+  if item==nil:fail("node key not found: " & key)
   d.exportNode(item.id)
 method invokeAccepted*(d:ManagedDriver,key:string,event:Event):bool=
   let node=d.data.lookup(key).description.hostNode
@@ -294,3 +308,12 @@ proc updateStats*(runtime:Runtime):UpdateStats=
 proc invalidateRoot*(runtime:Runtime)=
   if not runtime.managed:fail("invalidateRoot requires managed runtime")
   ManagedDriver(runtime.runtimeDriver).data.forceRoot=true
+
+proc useNativePolicy*(runtime:Runtime,capabilities:BackendCapabilities,mode=compatible):seq[CapabilityIssue]=
+  let data=ManagedDriver(runtime.runtimeDriver).data
+  for item in data.instances.values:
+    if item.description.kind==DescriptionKind.host:
+      let node=item.description.hostNode
+      let props=normalizeHostProps(node,nativeStrict)
+      result.add(checkTypedCapabilities(item.path,node.kind,props.normalized,capabilities,mode))
+  data.policy=nativeStrict

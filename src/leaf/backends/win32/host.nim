@@ -311,7 +311,9 @@ proc safeTurn(host: Win32Host) =
       (host.lease == nil or host.bridge.matchesSession(host.session)):
     host.needsTick = false
     inc host.tickDepth
-    try: host.safeTick()
+    try:
+      host.safeTick()
+      if host.session!=nil and host.session.runtime.runtimeDriver!=nil:discard host.session.runtime.flush()
     except CatchableError as error:
       host.recordError()
       primary = error

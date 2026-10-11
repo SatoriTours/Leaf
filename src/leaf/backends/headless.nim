@@ -53,6 +53,23 @@ proc applyImpl(recording: RecordingBackend, batch: UpdateBatch) =
     if recording.failApply or
         (recording.failApplyAt > 0 and position >= recording.failApplyAt):
       raise newException(UiError, "recording apply failure at op " & $position)
+    if batch.isDelta:
+      case op.kind
+      of opCreate:
+        recording.entities[op.handle]=MountedEntity(handle:op.handle,parent:op.parent,index:op.index,
+          nodeId:op.nodeId,kind:op.nodeKind,props:op.props)
+        inc recording.creates
+      of opUpdate:
+        recording.entities[op.handle].props=op.props;inc recording.updates
+        if recording.onSetter!=nil:recording.onSetter(op.handle)
+      of opMove:
+        recording.entities[op.handle].parent=op.parent
+        recording.entities[op.handle].index=op.index;inc recording.moves
+      of opRemove:
+        recording.entities.del(op.handle);recording.children.del(op.handle)
+        recording.inputState.del(op.handle);inc recording.removes
+      recording.history.add(op)
+      continue
     case op.kind
     of opCreate:
       if op.parent != NoHandle and not recording.entities.hasKey(op.parent):
@@ -91,6 +108,9 @@ proc applyImpl(recording: RecordingBackend, batch: UpdateBatch) =
       recording.inputState.del(op.handle)
       inc recording.removes
     recording.history.add(op)
+
+  if batch.isDelta:
+    for order in batch.finalOrders:recording.children[order.parent]=order.children
 
 proc restoreImpl(recording: RecordingBackend,
                  entities: Table[NodeHandle, MountedEntity]) =

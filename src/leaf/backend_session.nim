@@ -5,7 +5,7 @@
 ## a backend. It never renders business state, never runs a business callback
 ## before the backend confirms a batch, and never executes platform lifecycle.
 import std/[tables, sets, math, strutils, json]
-import ./[core, styles, backend, reconcile]
+import ./[core, styles, backend, reconcile,managed_runtime,host_session,native_host_adapter]
 
 type
   EventSource* = enum
@@ -35,6 +35,7 @@ type
     committerToken: uint64
     preparerToken: uint64
     backendToken: uint64
+    typedHost:HostSession
     pendingPlan: ReconcilePlan
     pendingInstall: bool
     pendingInitial: bool
@@ -281,12 +282,16 @@ proc attachBackendImpl(runtime: Runtime, backend: Backend, host: HostContext,
       classify(host.contentHeight) in {fcNan, fcInf, fcNegInf} or host.contentHeight <= 0:
     fail("host content size must be finite and positive")
   # Required capabilities are rejected here, before the backend sees a batch.
-  discard checkCapabilities(runtime.snapshot.root, backend.capabilities, mode)
+  if not runtime.managed:discard checkCapabilities(runtime.snapshot.root, backend.capabilities, mode)
 
   var session = BackendSession(runtime: runtime, backend: backend, host: host,
     mode: mode, reconciler: newReconciler(), sessionId: host.sessionId,
     mountGeneration: host.mountGeneration)
-  session.collectIssues(runtime.snapshot.root)
+  if runtime.managed:
+    session.entities=initTable[NodeHandle,MountedEntity](MaxNodes*4)
+    session.byNodeId=initTable[string,NodeHandle](MaxNodes*4)
+    session.issues=runtime.useNativePolicy(backend.capabilities,mode)
+  else:session.collectIssues(runtime.snapshot.root)
   session.backendToken = backend.reserveSession()
 
   try:
@@ -296,6 +301,25 @@ proc attachBackendImpl(runtime: Runtime, backend: Backend, host: HostContext,
     # Tell the host its identity before the first prepare, inside this lease.
     if backend.rebind != nil:
       backend.rebind(session.sessionId, session.mountGeneration)
+    if runtime.managed:
+      let consumer=nativeHostConsumer(backend,session.sessionId,
+        onAccepted=proc(delta:HostAcceptedDelta) {.raises:[].}=
+          for handle in delta.removals:
+            let old=session.entities.getOrDefault(handle)
+            session.byNodeId.del(old.nodeId);session.entities.del(handle)
+          for entity in delta.upserts:
+            session.entities[entity.handle]=entity
+            session.byNodeId[entity.nodeId]=entity.handle,
+        onRecover=proc()=
+          inc session.mountGeneration
+          session.queue.setLen(0);session.lastQueued=0;session.lastProcessed=0
+          if backend.rebind!=nil:backend.rebind(session.sessionId,session.mountGeneration),
+        onFault=proc(reason:string) {.raises:[].}=
+          session.faulted=true
+          runtime.freezeEvents("native restore failed: " & reason))
+      session.typedHost=attachHostSession(runtime,consumer)
+      session.committerToken=runtime.committerOwner
+      return session
     session.committerToken = runtime.installCommitter(
       proc(accepted: Runtime, candidate: Runtime) =
         session.commit(accepted, candidate),
@@ -371,6 +395,7 @@ proc dispose*(session: BackendSession) =
   if session.runtime != nil and session.runtime.installingUpdate:
     fail("cannot dispose backend session during a runtime update; retry on a safe tick")
   session.requestClose()
+  if session.typedHost!=nil:session.typedHost.close()
   if session.runtime != nil:
     if session.committerToken != 0:
       session.runtime.clearCommitter(session.committerToken)

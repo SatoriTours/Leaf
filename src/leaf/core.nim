@@ -95,6 +95,7 @@ type
     context: BuildContext
     counters: PerformanceStats
     inUpdate: bool
+    batchDepth:int
     rowCaches: Table[string, RowCache]
     rowClock: uint64
     validator: SnapshotValidator
@@ -321,10 +322,11 @@ proc cacheBytes(context: BuildContext): int =
     if result > MaxTreeBytes: fail("subtree cache exceeds 16 MiB")
 
 proc toJson*(snapshot: Snapshot): JsonNode
+proc snapshot*(runtime:Runtime):Snapshot
 
 proc dump(runtime: Runtime) =
   if runtime.diagnostics != nil and runtime.diagnostics.dumpFile.len > 0:
-    runtime.diagnostics.snapshot(runtime.current.toJson())
+    runtime.diagnostics.snapshot(runtime.snapshot.toJson())
 
 template inExecutionScope(runtime: Runtime, body: untyped) =
   if runtime.app.executionScope == nil:
@@ -498,14 +500,22 @@ proc flush*(runtime:Runtime):bool=
     completed=if runtime.driver==nil:runtime.refreshImpl() else:runtime.flushDriverImpl(false)
   completed
 proc batch*(runtime:Runtime,body:proc() {.closure.})=
+  if runtime.batchDepth>0:
+    inc runtime.batchDepth
+    try:body()
+    finally:dec runtime.batchDepth
+    return
   if runtime.inUpdate or runtime.isCandidate:fail("reentrant runtime batch")
   inExecutionScope(runtime):
     runtime.inUpdate=true
+    runtime.batchDepth=1
     try:body()
     except CatchableError:
       if runtime.driver!=nil:runtime.driver.reject()
       raise
-    finally:runtime.inUpdate=false
+    finally:
+      runtime.batchDepth=0
+      runtime.inUpdate=false
     discard (if runtime.driver==nil:runtime.refreshImpl() else:runtime.flushDriverImpl(false))
 proc uiTask*(runtime:Runtime,body:proc() {.closure.})=
   ## Backend task boundary. State writes enqueue; flush follows body completion.

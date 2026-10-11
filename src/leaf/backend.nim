@@ -76,9 +76,19 @@ type
     nodeKind*: NodeKind
     props*: NormalizedProps
 
+  HostChildOrder* = object
+    parent*:NodeHandle
+    children*:seq[NodeHandle]
+  HostAcceptedDelta* = object
+    revision*:uint64
+    upserts*:seq[MountedEntity]
+    removals*:seq[NodeHandle]
+    orders*:seq[HostChildOrder]
   UpdateBatch* = object
     revision*: uint64
     ops*: seq[UpdateOp]
+    isDelta*:bool
+    finalOrders*:seq[HostChildOrder]
 
   EventSettlement* = object
     ## UI metadata emitted after an event has been handled and the Runtime
@@ -104,6 +114,7 @@ type
     dispose*: proc() {.closure.}
     accepted*: proc(entities: Table[NodeHandle, MountedEntity],
                      revision: uint64) {.closure, raises: [].}
+    acceptedDelta*:proc(delta:HostAcceptedDelta) {.closure,raises:[].}
     rebind*: proc(sessionId, mountGeneration: uint64) {.closure.}
     bindingValid*: proc(handle: NodeHandle, bindingGeneration: uint64): bool {.closure.}
     settle*: proc(value: EventSettlement) {.closure.}
@@ -159,6 +170,69 @@ proc fullCapabilities*(): BackendCapabilities =
       variantWarning, variantInfo, variantOutline, variantGhost, variantSecondary},
     controls: {cfInputReset})
 
+proc checkTypedCapabilities*(nodeId:string,kind:NodeKind,props:NormalizedProps,capabilities:BackendCapabilities,mode=compatible):seq[CapabilityIssue]=
+  var issues: seq[CapabilityIssue]
+
+  proc report(nodeId, property, reason: string) =
+    if mode == strict:
+      fail("backend capability rejected " & property & " on " & nodeId & ": " & reason)
+    issues.add(CapabilityIssue(nodeId: nodeId, property: property, reason: reason))
+
+  if kind notin capabilities.kinds:
+    fail("backend does not support control " & kind.kindName & ": " & nodeId)
+
+  template requireLayout(feature: LayoutFeature, property: string) =
+    if feature notin capabilities.layouts:
+      fail("backend does not support required layout " & property & ": " & nodeId)
+
+  if props.layout.gap.isSome: requireLayout(lfGap, "gap")
+  if props.layout.padding.isSome: requireLayout(lfPadding, "padding")
+  if props.layout.width.isSome: requireLayout(lfWidth, "width")
+  if props.layout.height.isSome: requireLayout(lfHeight, "height")
+  if props.layout.flexGrow.isSome: requireLayout(lfFlexGrow, "flex_grow")
+  if props.layout.align.isSome: requireLayout(lfAlign, "align")
+  if props.layout.justify.isSome: requireLayout(lfJustify, "justify")
+  if props.layout.overflow.isSome: requireLayout(lfOverflow, "overflow")
+  if props.layout.minWidth.isSome or props.layout.minHeight.isSome or
+      props.layout.maxWidth.isSome or props.layout.maxHeight.isSome:
+    requireLayout(lfMinMax, "min/max")
+  if props.layout.flexShrink.isSome: requireLayout(lfFlexShrink, "flex_shrink")
+
+  if props.layout.align.isSome and props.layout.align.get notin capabilities.alignments:
+    fail("backend does not support alignment " & $props.layout.align.get & ": " & nodeId)
+  if props.layout.justify.isSome and
+      props.layout.justify.get notin capabilities.justifications:
+    fail("backend does not support justification " &
+      $props.layout.justify.get & ": " & nodeId)
+  if props.layout.overflow.isSome and
+      props.layout.overflow.get notin capabilities.overflows:
+    fail("backend does not support overflow " & $props.layout.overflow.get & ": " & nodeId)
+
+  if props.decoration.color.isSome and dfColor notin capabilities.decorations:
+    report(nodeId, "color", "decoration not supported")
+  if props.decoration.background.isSome and dfBackground notin capabilities.decorations:
+    report(nodeId, "background", "decoration not supported")
+  if props.decoration.borderColor.isSome and dfBorderColor notin capabilities.decorations:
+    report(nodeId, "border_color", "decoration not supported")
+  if props.decoration.radius.isSome and dfRadius notin capabilities.decorations:
+    report(nodeId, "radius", "decoration not supported")
+  if props.decoration.borderWidth.isSome and dfBorderWidth notin capabilities.decorations:
+    report(nodeId, "border_width", "decoration not supported")
+  if props.decoration.opacity.isSome and dfOpacity notin capabilities.decorations:
+    report(nodeId, "opacity", "decoration not supported")
+  if props.decoration.fontSize.isSome and dfFontSize notin capabilities.decorations:
+    report(nodeId, "font_size", "decoration not supported")
+  if props.decoration.weight.isSome and dfWeight notin capabilities.decorations:
+    report(nodeId, "weight", "decoration not supported")
+  if props.control.variant.isSome and props.control.variant.get notin capabilities.variants:
+    report(nodeId, "variant", "variant not supported")
+  # Required control behaviour: never degraded, even in compatible mode.
+  if props.control.resetToken.isSome and props.control.resetToken.get != 0 and
+      cfInputReset notin capabilities.controls:
+    fail("backend does not support input reset token: " & nodeId)
+
+  issues
+
 proc checkCapabilities*(root: MountedNode, capabilities: BackendCapabilities,
                         mode = compatible): seq[CapabilityIssue] =
   ## Validate a mounted tree against a backend's declared capabilities.
@@ -167,68 +241,8 @@ proc checkCapabilities*(root: MountedNode, capabilities: BackendCapabilities,
   ## variants return structured issues in `compatible` and raise in `strict`.
   var issues: seq[CapabilityIssue]
 
-  proc report(nodeId, property, reason: string) =
-    if mode == strict:
-      fail("backend capability rejected " & property & " on " & nodeId & ": " & reason)
-    issues.add(CapabilityIssue(nodeId: nodeId, property: property, reason: reason))
-
-  proc visit(mounted: MountedNode) =
-    let node = mounted.node
-    let nodeId = mounted.id
-    if node.kind notin capabilities.kinds:
-      fail("backend does not support control " & node.kind.kindName & ": " & nodeId)
-    let props = normalizeProps(node)
-
-    template requireLayout(feature: LayoutFeature, property: string) =
-      if feature notin capabilities.layouts:
-        fail("backend does not support required layout " & property & ": " & nodeId)
-
-    if props.layout.gap.isSome: requireLayout(lfGap, "gap")
-    if props.layout.padding.isSome: requireLayout(lfPadding, "padding")
-    if props.layout.width.isSome: requireLayout(lfWidth, "width")
-    if props.layout.height.isSome: requireLayout(lfHeight, "height")
-    if props.layout.flexGrow.isSome: requireLayout(lfFlexGrow, "flex_grow")
-    if props.layout.align.isSome: requireLayout(lfAlign, "align")
-    if props.layout.justify.isSome: requireLayout(lfJustify, "justify")
-    if props.layout.overflow.isSome: requireLayout(lfOverflow, "overflow")
-    if props.layout.minWidth.isSome or props.layout.minHeight.isSome or
-        props.layout.maxWidth.isSome or props.layout.maxHeight.isSome:
-      requireLayout(lfMinMax, "min/max")
-    if props.layout.flexShrink.isSome: requireLayout(lfFlexShrink, "flex_shrink")
-
-    if props.layout.align.isSome and props.layout.align.get notin capabilities.alignments:
-      fail("backend does not support alignment " & $props.layout.align.get & ": " & nodeId)
-    if props.layout.justify.isSome and
-        props.layout.justify.get notin capabilities.justifications:
-      fail("backend does not support justification " &
-        $props.layout.justify.get & ": " & nodeId)
-    if props.layout.overflow.isSome and
-        props.layout.overflow.get notin capabilities.overflows:
-      fail("backend does not support overflow " & $props.layout.overflow.get & ": " & nodeId)
-
-    if props.decoration.color.isSome and dfColor notin capabilities.decorations:
-      report(nodeId, "color", "decoration not supported")
-    if props.decoration.background.isSome and dfBackground notin capabilities.decorations:
-      report(nodeId, "background", "decoration not supported")
-    if props.decoration.borderColor.isSome and dfBorderColor notin capabilities.decorations:
-      report(nodeId, "border_color", "decoration not supported")
-    if props.decoration.radius.isSome and dfRadius notin capabilities.decorations:
-      report(nodeId, "radius", "decoration not supported")
-    if props.decoration.borderWidth.isSome and dfBorderWidth notin capabilities.decorations:
-      report(nodeId, "border_width", "decoration not supported")
-    if props.decoration.opacity.isSome and dfOpacity notin capabilities.decorations:
-      report(nodeId, "opacity", "decoration not supported")
-    if props.decoration.fontSize.isSome and dfFontSize notin capabilities.decorations:
-      report(nodeId, "font_size", "decoration not supported")
-    if props.decoration.weight.isSome and dfWeight notin capabilities.decorations:
-      report(nodeId, "weight", "decoration not supported")
-    if props.control.variant.isSome and props.control.variant.get notin capabilities.variants:
-      report(nodeId, "variant", "variant not supported")
-    # Required control behaviour: never degraded, even in compatible mode.
-    if props.control.resetToken.isSome and props.control.resetToken.get != 0 and
-        cfInputReset notin capabilities.controls:
-      fail("backend does not support input reset token: " & nodeId)
-
+  proc visit(mounted:MountedNode)=
+    issues.add(checkTypedCapabilities(mounted.id,mounted.node.kind,normalizeProps(mounted.node),capabilities,mode))
     for child in mounted.children: visit(child)
 
   visit(root)

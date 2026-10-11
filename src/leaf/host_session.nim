@@ -11,6 +11,7 @@ type
     apply*: proc() {.closure.}
     accept*: proc(revision:uint64) {.closure,raises:[].}
     discardPrepared*: proc() {.closure,raises:[].}
+    faultPrepared*:proc() {.closure,raises:[].}
     lease: uint64
   HostSession* = ref object
     runtime*: Runtime
@@ -29,9 +30,10 @@ proc record*(session:HostSession,handle:NodeHandle):Option[HostRecord]=session.r
 proc alive(session:HostSession):bool =
   not session.disposed and not session.closing and session.consumer.lease==session.lease
 proc requestClose*(session:HostSession)=session.closing=true
-proc dropPending(session:HostSession) {.raises:[].} =
+proc dropPending(session:HostSession,scoped=true) {.raises:[].} =
   if session.pendingWire.nextRevision!=0:
-    session.consumer.discardPrepared()
+    if scoped:session.consumer.discardPrepared()
+    elif session.consumer.faultPrepared!=nil:session.consumer.faultPrepared()
     session.pending=nil
     session.pendingWire=default(HostBatch)
 proc acceptPending(session:HostSession) {.raises:[].} =
@@ -100,7 +102,7 @@ proc attachHostSession*(runtime:Runtime,consumer:HostConsumer):HostSession=
         confirm:proc()=
           if not session.alive:fail("host session closed during installation")
           session.acceptPending(),
-        abort:proc(scoped:bool)=session.dropPending()))
+        abort:proc(scoped:bool)=session.dropPending(scoped)))
   except CatchableError:
     session.dropPending()
     if consumer.lease==session.lease:consumer.lease=0

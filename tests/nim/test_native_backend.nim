@@ -1764,3 +1764,30 @@ suite "Editor state and installation lifecycle integration":
     check editor.pendingReset.isNone and editor.consumedResetToken == token
     check editor.resetEffects().len == 0
     check runtime.stats.renders == renders
+
+import leaf/[components,managed_runtime]
+var managedValue:State[int]
+let NativeCounter=defineComponent[int,State[int]]("NativeManagedCounter",
+  proc(ctx:MountContext,p:int):State[int]=
+    result=ctx.state(0);managedValue=result,
+  proc(ctx:ComponentContext,p:int,s:State[int]):UiDescription=
+    let n=ctx.value(s)
+    host(button($n,key="native-go",onClick=proc(e:Event)=s.set(n+1))))
+suite "managed native sessions":
+  test "existing event envelope and recovery use incremental entities":
+    let runtime=newRuntime(componentApplication(component(NativeCounter,0),"native"))
+    let recording=newRecordingBackend(fullCapabilities())
+    let session=attachBackend(runtime,recording.backend,makeHost())
+    let handle=session.handleFor(runtime.find("native-go").id)
+    let exports=runtime.updateStats().snapshotExports
+    check session.enqueue(userEvent(session,handle,1,Event(kind:click)))
+    session.drainEvents()
+    check managedValue.read()==1
+    check runtime.updateStats().snapshotExports==exports
+    recording.failApply=true
+    check session.enqueue(userEvent(session,handle,2,Event(kind:click)))
+    session.drainEvents()
+    check managedValue.read()==1
+    check session.mountGeneration==2
+    recording.failApply=false
+    session.dispose()
