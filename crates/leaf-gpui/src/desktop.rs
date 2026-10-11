@@ -55,6 +55,7 @@ struct Desktop {
     sync_clock: u64,
     frame_start: Option<std::time::Instant>,
     ready_sent: bool,
+    closing: bool,
     rendering_supported: bool,
     last_rendering: Option<serde_json::Value>,
     _bounds_subscription: Subscription,
@@ -75,6 +76,7 @@ impl Desktop {
             sync_clock: 0,
             frame_start: None,
             ready_sent: false,
+            closing: false,
             rendering_supported: false,
             last_rendering: None,
             _bounds_subscription: cx.observe_window_bounds(window, |view, window, _| {
@@ -514,6 +516,9 @@ impl Desktop {
 }
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.closing {
+            return div().into_any_element();
+        }
         #[cfg(feature = "native-test-support")]
         if std::env::var_os("LEAF_TEST_GEOMETRY").is_some() {
             let weak = cx.entity().downgrade();
@@ -534,6 +539,19 @@ impl Render for Desktop {
         let tree = self.render_node(&self.snapshot.root, cx);
         div()
             .id("leaf-window")
+            .on_action(cx.listener(|view, _: &Quit, window, cx| {
+                cx.stop_propagation();
+                view.closing = true;
+                view.inputs.clear();
+                view.list_slots.borrow_mut().clear();
+                window.blur(cx);
+                window.on_next_frame(|window, cx| {
+                    window.draw(cx).clear(cx);
+                    window.remove_window();
+                    cx.defer(|cx| cx.quit());
+                });
+                cx.notify();
+            }))
             .flex()
             .flex_col()
             .size_full()
@@ -551,6 +569,7 @@ impl Render for Desktop {
                         .child(error),
                 )
             })
+            .into_any_element()
     }
 }
 pub fn run(snapshot: Snapshot, bridge: Bridge, frames: bool) -> Result<(), String> {

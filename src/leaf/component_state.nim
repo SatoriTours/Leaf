@@ -56,6 +56,9 @@ proc setPhase*(store:StateStore,phase:StatePhase)=
   store.uiThread()
   store.phase=phase
 proc phase*(store:StateStore):StatePhase=store.phase
+proc requireIdle*(store:StateStore)=
+  store.uiThread()
+  if store.phase!=StatePhase.idle or store.active!=nil:fail("cannot queue during component computation or commit")
 proc dirtyOwners*(attempt:StateAttempt):seq[uint64]=attempt.dirty
 proc pendingOwners*(store:StateStore):seq[uint64]=
   store.uiThread()

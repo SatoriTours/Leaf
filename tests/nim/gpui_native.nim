@@ -18,7 +18,9 @@ proc main():int =
     return 1
   let root=currentSourcePath().parentDir.parentDir.parentDir
   let directory=createTempDir("leaf-gpui-native-","")
-  defer:removeDir(directory)
+  defer:
+    if getEnv("LEAF_KEEP_NATIVE_TEST")!="1":removeDir(directory)
+    else:echo "Native evidence: ",directory
   let xdotool=getEnv("LEAF_TEST_XDOTOOL",findExe("xdotool"))
   require(xdotool.len>0,"xdotool is required")
   let binary=build(readProject(root/getEnv("LEAF_TEST_APP","tests/nim/gpui_native_app.nim")),directory/"native-app")
@@ -60,6 +62,7 @@ proc main():int =
           if id==key or id.endsWith(":" & key) or id.endsWith(":" & key & "/r"):
             let x=int(bounds["x"].getFloat+bounds["width"].getFloat/2)
             let y=int(bounds["y"].getFloat+bounds["height"].getFloat/2)
+            echo "Click ",key," at ",x,",",y
             discard command(xdotool,@["mousemove","--window",window,$x,$y,"click","1"],root)
             return
       require(getMonoTime()<deadline,"geometry target not found: " & key)
@@ -81,6 +84,22 @@ proc main():int =
   awaitStatus("1:nim gpui:0")
   discard command(xdotool,@["key","Return"],root)
   awaitStatus("1:nim gpui:1")
+  # A rejected update restores the accepted input; reset replaces its buffer.
+  clickTarget("reject")
+  sleep(100)
+  awaitStatus("1:nim gpui:1")
+  clickTarget("reset")
+  awaitStatus("1:中文输入:1")
+  # Select only the final character. This catches selection loss on model sync.
+  clickTarget("entry")
+  discard command(xdotool,@["key","End","shift+Left"],root)
+  discard command(xdotool,@["type","--clearmodifiers","X"],root)
+  awaitStatus("1:中文输X:1")
+  discard command(xdotool,@["windowsize",window,"800","600"],root)
+  discard command(xdotool,@["windowunmap",window],root)
+  discard command(xdotool,@["windowmap",window,"windowfocus",window],root)
+  clickTarget("add")
+  awaitStatus("2:中文输X:1")
   discard command(xdotool,@["key","ctrl+q"],root)
   let closing=getMonoTime()+initDuration(seconds=5)
   while not child.poll():

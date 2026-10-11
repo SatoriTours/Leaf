@@ -248,7 +248,10 @@ impl HostView {
     ) -> Vec<crate::bridge_v2::HostRow> {
         match result {
             Ok(reply) => {
-                self.error = None;
+                if let Some(message) = &reply.scope_error {
+                    eprintln!("leaf GPUI: {message}");
+                }
+                self.error = reply.scope_error;
                 reply.rows
             }
             Err(e) => {

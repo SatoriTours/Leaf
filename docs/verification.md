@@ -93,3 +93,14 @@ P4 要求在 150% 实际点击计数、编辑中文、移动光标、选择文�
 P5 的混版本回归通过真实 Desktop 订阅和 ready 路径验证：能力初始 false，只有成功 ready 的严格布尔 true 开启新 op；缺能力/false/非bool/ready拒绝或回调失败保持关闭。旧宿主 fixture 保留 unknown op 持久错误及 status/list/event/receipt 语义，不能用丢弃响应掩盖污染。协商后的诊断失败不交给业务 accept；旧 DLL 的旧格式 ready 仍被新版 Nim 接受。
 
 必需 Windows 原生证据缺失时，最终验收结论应为 blocked；本记录只证明已执行的平台检查，不声明模糊已解决。
+
+
+## React 风格组件和类型化宿主（2026-10-12）
+
+运行 `nim c -r --path:src tests/nim/test_component_faults.nim` 验证候选拒绝、State 与宿主 revision、恢复失败冻结、已接受作用域收尾错误、旧序列及提交重入。`cargo test --workspace --locked` 包括真实 GPUI Kit 输入控件、组件缓存和错误诊断测试。
+
+Linux 实际窗口：先 `cargo build -p leaf-gpui --features native-test-support --locked`，设置 `LEAF_GPUI_LIBRARY` 指向该库，运行 `nim c -r scripts/native_test.nim`。`LEAF_TEST_APP=tests/nim/component_native_app.nim`、`LEAF_TEST_MODE=legacy|managed`、`LEAF_GPUI_ABI=1|2`、`LEAF_GPUI_CACHE=0|1` 组成八组矩阵。可用 `LEAF_TEST_XVFB` / `LEAF_TEST_XDOTOOL` 指定工具。定位使用测试构建导出的实际元素 bounds；几何文件只用于工具，不走 UI 桥接协议。`LEAF_KEEP_NATIVE_TEST=1` 可保留临时交互日志。
+
+已执行：Linux Xvfb / Mesa 软件渲染八组，点击、中文初值/重置、编辑、Enter、拒绝恢复、选区替换、resize、隐藏/显示、ready/失败 viewport、退出。ABI1 保留拒绝非零 reset token 的原契约，fixture 使用受控值变化重置；ABI2 检查显式 token。测试构建启用 GPUI 句柄泄漏检查，两个渲染器均在安全帧释放平台输入处理器后退出。
+
+未执行：真实 Windows / macOS、系统 IME 输入法组合阶段、真实平台的离屏焦点行操作与 DPI 切换；这些不由 X11 模拟输入或纯运行时测试替代。`nim c -r scripts/test_win32.nim` 在 Linux 返回 2，必须记 NotRun。新增 `tests/windows/test_component_host.nim` 需要实际 Windows 执行，跨平台窗口验收仍有阻塞。

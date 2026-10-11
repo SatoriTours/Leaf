@@ -26,6 +26,7 @@ pub struct HostRow {
 }
 #[derive(Debug)]
 pub struct HostReply {
+    pub scope_error: Option<String>,
     pub status: u32,
     pub revision: u64,
     pub flags: u64,
@@ -114,6 +115,8 @@ impl TypedBridge {
         {
             return Err(error(1, reply.accepted_revision, "invalid typed reply"));
         }
+        let scope_error = (status == LEAF_STATUS_ACCEPTED_SCOPE_ERROR as i32)
+            .then(|| String::from_utf8_lossy(&bytes[..fault.written as usize]).to_string());
         let raw = if reply.rows_len == 0 {
             &[]
         } else {
@@ -139,6 +142,7 @@ impl TypedBridge {
             });
         }
         Ok(HostReply {
+            scope_error,
             status: reply.status,
             revision: reply.accepted_revision,
             flags: reply.flags,
@@ -452,5 +456,31 @@ mod tests {
         assert!(bridge.request(&req).is_ok());
         drop(host);
         assert!(bridge.request(&req).is_err());
+    }
+    #[test]
+    fn accepted_scope_error_keeps_diagnostic_without_replaying_request() {
+        unsafe extern "C" fn accepted(
+            _: *mut c_void,
+            _: *const LeafRequest,
+            reply: *mut LeafReply,
+            error: *mut LeafError,
+        ) -> i32 {
+            unsafe {
+                (*reply).accepted_revision = 2;
+                (*reply).status = LEAF_STATUS_ACCEPTED_SCOPE_ERROR as u32;
+                write_error(error, "scope cleanup failed");
+            }
+            LEAF_STATUS_ACCEPTED_SCOPE_ERROR as i32
+        }
+        let mut callbacks = callbacks(false);
+        callbacks.request = Some(accepted);
+        let host =
+            unsafe { AttachedHost::attach(&config(), &callbacks, std::ptr::null_mut()) }.unwrap();
+        let reply = host
+            .bridge()
+            .request(&host.bridge().command(LEAF_REQUEST_EVENT))
+            .unwrap();
+        assert_eq!(reply.revision, 2);
+        assert_eq!(reply.scope_error.as_deref(), Some("scope cleanup failed"));
     }
 }

@@ -87,7 +87,7 @@ proc value*[T](ctx:ComponentContext,state:State[T]):T=
   ctx.attempt.readCandidate(state)
 proc invalidate*(ctx:ComponentContext)=
   if ctx==nil or ctx.invalidateOwner==nil:fail("component has no active runtime")
-  if ctx.store.phase!=StatePhase.idle:fail("cannot invalidate during component computation")
+  ctx.store.requireIdle()
   ctx.invalidateOwner(ctx.owner)
 proc component*[P,M](definition:ComponentDef[P,M],props:P,key="",
     revision:Option[uint64]=none(uint64)):UiDescription=

@@ -294,12 +294,12 @@ HostChanges 的 upserts 为 seq[HostRecord]，removals 为 seq[NodeHandle]，chi
 
 **Interfaces:** native fixture 使用同一业务场景，可选择 legacy/managed、ABI=1/2、CACHE=0/1；测试通过已有定位接口点击/编辑，不靠固定屏幕坐标或前台窗口猜测。fault fixture 仅测试构建导出注入点，发行 API 不暴露任意故障开关。
 
-- [ ] **13.1 写失败测试**：候选 build/prepare/apply、恢复失败、scope 入场/收尾、安装确认、窗口关闭、旧 session/序列事件的故障矩阵；验收 State/Runtime/HostStore revision 一致。恢复失败冻结后不再执行业务回调；已接受 scope 错误不自动重复事件。
+- [x] **13.1 写失败测试**：候选 build/prepare/apply、恢复失败、scope 入场/收尾、安装确认、窗口关闭、旧 session/序列事件的故障矩阵；验收 State/Runtime/HostStore revision 一致。恢复失败冻结后不再执行业务回调；已接受 scope 错误不自动重复事件。
   恢复成功的各拒绝路径断言 `check rt.acceptedRevision == beforeRevision`、`check storeRevision == beforeRevision`；恢复失败后再次派发断言 `check callbackCalls == callsBeforeFreeze`。
-- [ ] **13.2 运行**：`nim c -r --path:src --out:target/nim/test_component_faults tests/nim/test_component_faults.nim`，新故障路径 FAIL。
-- [ ] **13.3 实现/修复** 各自归属模块的问题；扩展真实窗口 fixture 到中文输入、Enter、reset、拒绝恢复、光标/选区、IME 开始/结果/结束、滚动焦点行、resize/隐藏/显示。保留 DPI 和 watch ready/receipt 现有契约。
+- [x] **13.2 运行**：`nim c -r --path:src --out:target/nim/test_component_faults tests/nim/test_component_faults.nim`，新故障路径 FAIL。
+- [x] **13.3 实现/修复** 各自归属模块的问题；扩展真实窗口 fixture 到中文输入、Enter、reset、拒绝恢复、光标/选区、IME 开始/结果/结束、滚动焦点行、resize/隐藏/显示。保留 DPI 和 watch ready/receipt 现有契约。
 - [ ] **13.4 验证**：Linux 上运行 full Nim runner、Rust workspace tests 与 native_test 的兼容矩阵；Windows 上运行 `nim c -r --out:target/nim/test_win32 scripts/test_win32.nim` 并执行 ABI2 GPUI fixture。macOS 未执行时单独标记 NotRun；Win32 runner 在 Linux 返回2只能记 NotRun。没有真实 Windows 环境则保留平台验收阻塞，不签全平台通过。
-- [ ] **13.5 提交**：message `test: verify component commits and native interaction failures`；保存每个命令、退出码、工具链和 fixture 来源，不只保存最终截图。
+- [x] **13.5 提交**：message `test: verify component commits and native interaction failures`；保存每个命令、退出码、工具链和 fixture 来源，不只保存最终截图。
 
 ### Task 14: 结构性性能验收、发布兼容与文档
 
