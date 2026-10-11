@@ -1,0 +1,73 @@
+# Windows 原生表单开发与验收
+
+## 当前范围
+
+A2 提供 Windows x64 原生表单后端：column、row、text、button、input、checkbox、toggle、progress、tag、separator、spinner。toggle 使用系统 checkbox 语义。默认后端仍为 GPUI；项目可在 leaf.json 设置 `"backend": "native"`，命令行 `--backend` 优先。
+
+原生后端支持有限 DIP 线性布局、系统字体测量、稳定控件身份、输入事件排队、受控值结算和递增 `resetToken`。普通同值响应保留编辑选区；组合输入期间延后冲突模型；显式 reset 在接受模型后的安全 turn 取消组合并设置最终值。平台句柄不进入 DSL、JSON 或业务事件。
+
+颜色、字体等装饰受 capability 策略约束；required 能力不足在挂载前拒绝，compatible 可报告装饰降级。A2 不提供列表、导航、Canvas、Android、原生打包或发布能力。`leaf pack --backend native` 会明确拒绝。这些属于后续阶段，不能据此宣布原生迁移全部完成。
+
+## 构建和运行
+
+需要 Windows x64、Nim 2.2.6+、MinGW GCC 与 windres。在项目根目录用 PowerShell 执行；将工具目录加入 PATH，或把 NIM 设置为 nim.exe 的完整路径。
+
+```powershell
+nim c --out:target/leaf.exe src/leaf_cli.nim
+./target/leaf.exe doctor --backend native --target windows
+./target/leaf.exe build examples/native_forms --backend native --target windows
+./target/leaf.exe run examples/native_forms --backend native --target windows
+```
+
+`examples/native_forms/leaf.json` 已选择 native，因此可省略后端参数。原生构建不调用 Cargo、不构建或复制 leaf_gpui.dll，主 EXE 嵌入 Common Controls v6 和 PerMonitorV2 manifest。
+
+纯检查可在支持的主机运行，不加载窗口后端：
+
+```sh
+leaf --check examples/native_forms
+leaf --headless examples/native_forms
+```
+
+这里的 `leaf` 指编译出的 CLI。native 窗口构建要求 Windows x64；未配置跨平台编译会明确报错。native 不支持 `--watch`。已构建的原生程序也可使用 `--check` 或 `--headless`。
+
+## 自动化验证
+
+Windows 根目录执行：
+
+```powershell
+nim c -r --threads:on --path:src scripts/test_win32.nim
+if ($LASTEXITCODE -ne 0) { throw "Windows native tests failed" }
+```
+
+runner 自行生成并链接每个测试 EXE 的 manifest；无需预先生成 `.o`。它实际执行 tests/windows 中的五个套件，覆盖宿主 ABI/线程/关闭、真实 stock HWND、prepare/discard/restore 与失败资源重试、系统字体测量/缓存、事件来源隔离、受控输入及组合消息、完整 native/headless 构建和应用启动/关闭、PE manifest、复杂输出路径及 GPUI 隔离。非 Windows 执行该 runner 输出 NotRun、退出码 2，不能作为 Windows 通过证据。
+
+平台无关回归：
+
+```sh
+NIM=/path/to/nim /path/to/nim c -r scripts/test.nim
+```
+
+自动化 `WM_IME_*` 消息覆盖适配器时序；它不证明真实 IME 或辅助技术体验。失败注入仍调用实际系统 API，只在指定调用点失败，不用假 HWND 替代实际资源。
+
+## 真人验收清单（H 门）
+
+在解锁的普通用户桌面运行同一个 native_forms 示例，记录 Windows/Nim/GCC 版本、用户令牌、输入法版本、实际 DPI、步骤和结果。开发 VM 的 elevated 测试不能代替普通用户验收。
+
+0. 使用“切换输入模式”分别选择 echoValue、rejectValue、trimValue；“组合期间更新冲突模型”开启冲突路径。“尝试失败候选并重置”应被校验拒绝，旧界面保留；随后“恢复候选”以原 token 接受并执行重置。该示例故意保留业务状态修改，以核对 UI 发布和业务回滚的边界。
+1. 使用 Tab / Shift+Tab 在输入、checkbox 和按钮间移动；Space 切换 checkbox，Enter 提交输入。观察计数只增加一次，窗口关闭干净。
+2. 使用 Microsoft Pinyin 和 Microsoft Japanese IME 分别输入、候选选择、确认及取消；组合期间点击重置，确认取消后模型和 EDIT 值一致。同一 resetToken 不重复取消，下一 token 可再次重置。
+3. 输入中文、日文和 emoji，改变光标与选区，执行同值响应；选区和控件身份稳定。业务拒绝/格式化后显示最终模型；快速连续输入不被较早事件覆盖。
+4. 在两个实际不同 DPI 的屏幕之间移动窗口，调整大小、切换系统主题和字体；记录客户端 DIP、像素边界、裁剪和字体变化。不得用向同屏发送 WM_DPICHANGED 代替此项。
+5. 使用 Narrator / Accessibility Insights 检查名称、角色、值、禁用状态、焦点顺序和键盘操作；核对 checkbox/toggle 的系统语义。
+
+任何一项尚未执行都记 NotRun，并保留具体限制；全部 H 项完成并通过独立验收后才可批准 A2 平台支持。
+
+## 本轮自动化证据（2026-10-11）
+
+实际 Docker Windows 11 开发桌面（Session 1，elevated）运行永久 runner，五套 77 项全部通过，退出码 0；运行编号 `3f7fd70997054bf0a8c43300427d2b7d`。其中包括真实 HWND、系统字体和主题、失败清理重试、输入结算与 reset、实际 ABI、移动 Unicode/空格/`$` SDK 路径构建、PE manifest、加载模块及表单启动关闭。当前环境为 Nim 2.2.6、MinGW GCC 16.2.0；链接器报告多 manifest 合并诊断但返回 0，应用实际 resource XML 和 Common Controls v6 检查通过，保留原始日志。
+
+Linux 全量 57 套、511 项通过，5 项已有 Windows 环境测试跳过；另执行 headless 二进制 ldd/nm、链接指令和生成 C 检查，未引入 GPUI/Vulkan/Win32 图形依赖。
+
+完整五套之后，新增恢复身份回归在同一真实 Windows 环境复跑 input 套件，15 项全部通过（运行编号 `d017074ebad94982be7609075e3302c2`）；合计覆盖 78 项。该测试将旧 ID/cookie 与当前真实 HWND 组合，并保留实际旧绑定事件，验证 restore 后隔离；未执行强制操作系统数字句柄复用的压力测试。
+
+这批结果仅作为开发版交付证据。上方 H 清单仍全部 NotRun，后续单独验收；不能据此批准普通用户桌面、真实 IME、跨屏 DPI 或辅助技术支持，也不表示 A3/Android 已完成。

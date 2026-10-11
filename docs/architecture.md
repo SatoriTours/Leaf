@@ -81,4 +81,15 @@ DPI policy 在 HWND 前初始化，保留宿主已选 awareness。标题先检�
 
 `tests/windows/test_win32_host.nim` 实际 Windows 窗口/Session 测试用 Recording Backend 验证 generic lease 集成，Recording 不是 Native 子控件后端。测试内 windows.h/commctrl.h 对 sizeof/alignment/offsetof/WNDPROC/SUBCLASSPROC 做真实 GCC 编译断言；EDIT/BUTTON 仅导航 fixture，由测试显式销毁。Windows runner 的子 suite threads:on、forceBuild 和独立 `LEAF_WIN32_TEST_OUT` cache/out；非 Windows仍明确 NotRun exit2。
 
-Task3-W 当前仅获授权的 elevated DEVELOPMENT 执行证据：真实 Session/Token 值记录在报告，不据此宣布 NativeReady、标准权限或完整 Windows 支持。E3 non-elevated 与真实 IME/多显示器 DPI/accessibility(H) 仍开放；T4 实际控件/编辑/IME未实施。T4 必须在 Native Backend 已取得资源、尚未 bind 的 startup 窗口补最小 hold/lease；未绑定 Host 仅保留关闭意图，不能拿父窗口销毁替代子资源释放。原 T1M2/T5/final 集成义务不由 Host 测试结案。
+Task3-W 当前仅获授权的 elevated DEVELOPMENT 执行证据：真实 Session/Token 值记录在报告，不据此宣布 NativeReady、标准权限或完整 Windows 支持。E3 non-elevated 与真实 IME/多显示器 DPI/accessibility(H) 仍开放；T4–T6 的实际控件和编辑实现见下节；Native Backend 已取得资源、尚未 bind 的 startup 窗口现由确切租约持有，不能拿父窗口销毁替代子资源释放。原 T1M2/T5/final 集成义务由真实控件回归核对，不能仅由 Host 测试结案。
+
+
+## A2 T4–T6：Win32 表单实现与构建入口
+
+`backends/win32/backend.nim` 统一持有 stock HWND、subclass、编辑绑定和批次资源，`measure.nim` 持有系统字体与临时 DC。prepare 只创建隐藏候选，apply 消费候选，accepted 仅发布框架元数据；失败由 Session restore/rebind 恢复。宿主通过 `host_bridge.nim` 的确切启动租约管理尚未返回的 provisional Session，失败清理可重试，不误清其他 owner。
+
+原生回调只捕获完整值与绑定代际并入队；安全 turn 在完整 executionScope 退出后 drain 和结算，不在系统回调里执行业务。per-control setterDepth 只抑制该控件同步 setter 通知，另一控件的真实通知仍可进入队列。EDIT 同值响应不写回；组合冲突延后，已接受的递增 resetToken 在 native tick 执行显式取消和强制同步。容器具有子对话导航语义，重排同步系统 tab 顺序。布局消费真实 GDI 测量及当前字体/DPI的有限缓存，主题/字体/尺寸变化只重新布局，不触发业务 render。
+
+`targets.nim` 统一 backend/target/纯 headless 决策，命令行优先于 leaf.json，未配置默认 GPUI。`runner.nim` 在编译期选择 GPUI、Win32 或纯 headless；`build.nim` 在 native/headless 路径跳过 GPUI 构建和 staging，Windows EXE 仍嵌入 v6/PMv2 manifest。native doctor 不探测 Cargo/GPUI，native pack 在发布实现前明确拒绝。
+
+开发 Windows VM 已用于真实 HWND/输入/宿主/构建测试；这与普通用户、真实中日文 IME、跨不同 DPI 屏幕和辅助技术的 H 验收分别记录。[开发与验收指南](native-win32-validation.md) 给出可复现命令、范围与未关闭的 H 门。A3 列表/导航/Canvas/发布及 Android 后端仍在后续阶段。

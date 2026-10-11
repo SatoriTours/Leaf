@@ -257,8 +257,9 @@ proc restoreViewports(session: BackendSession, candidate: Runtime) =
     if active.len > 0:
       discard candidate.materialize(nodeId, 0, 0, active)
 
-proc attachBackend*(runtime: Runtime, backend: Backend, host: HostContext,
-                    mode = compatible): BackendSession =
+proc attachBackendImpl(runtime: Runtime, backend: Backend, host: HostContext,
+                       mode: CapabilityMode,
+                       onReserved: proc(s: BackendSession) {.closure, raises: [].}): BackendSession =
   ## Validate hooks, host and capabilities before any visible backend apply,
   ## then claim resources and install the committer and viewport preparer.
   ## Cleanup only removes this call's hooks and disposes its own Backend;
@@ -289,6 +290,9 @@ proc attachBackend*(runtime: Runtime, backend: Backend, host: HostContext,
   session.backendToken = backend.reserveSession()
 
   try:
+    # Metadata observer only: exact reservation is established and protected by
+    # this same installation/cleanup path before any native rebind or prepare.
+    if onReserved != nil: onReserved(session)
     # Tell the host its identity before the first prepare, inside this lease.
     if backend.rebind != nil:
       backend.rebind(session.sessionId, session.mountGeneration)
@@ -331,6 +335,19 @@ proc attachBackend*(runtime: Runtime, backend: Backend, host: HostContext,
     error.msg.add(cleanupSuffix(cleanup))
     raise error
   session
+
+proc ownsBackend*(session: BackendSession, backend: Backend): bool {.raises: [].} =
+  session != nil and backend != nil and not session.disposed and
+    session.backend == backend and backend.ownsSession(session.backendToken)
+
+proc attachBackend*(runtime: Runtime, backend: Backend, host: HostContext,
+                    mode = compatible): BackendSession =
+  attachBackendImpl(runtime, backend, host, mode, nil)
+
+proc attachBackendObserved*(runtime: Runtime, backend: Backend, host: HostContext,
+                            mode: CapabilityMode,
+                            onReserved: proc(s: BackendSession) {.closure, raises: [].}): BackendSession =
+  attachBackendImpl(runtime, backend, host, mode, onReserved)
 
 proc requestClose*(session: BackendSession) =
   ## Intent only: invalidate queued/captured event eligibility immediately.
@@ -387,6 +404,12 @@ proc enqueue*(session: BackendSession, envelope: EventEnvelope): bool =
   session.lastQueued = envelope.sequence
   session.queue.add(envelope)
   true
+
+proc faultBackendEffects*(session: BackendSession, backend: Backend, reason: string) =
+  ## Ordinary Nim boundary for an owned backend's asynchronous native failure.
+  if session == nil or not session.ownsBackend(backend): fail("foreign backend effect failure")
+  session.faulted = true
+  session.runtime.freezeEvents(reason)
 
 proc eventEligible(session: BackendSession): bool =
   ## Single eligibility predicate, re-checked before every queued event. A

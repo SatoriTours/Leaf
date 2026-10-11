@@ -160,5 +160,7 @@ proc completeReset*(s: var EditorState, token: uint64) =
   ## Consume the token only after every native effect has fully succeeded.
   if s.pendingReset.isSome and s.pendingReset.get == token and
       token > s.consumedResetToken:
+    # A reset invalidates old binding events; none may keep the editor pending.
+    s.lastSettled = s.latestObserved
     s.consumedResetToken = token
     s.pendingReset = none(uint64)

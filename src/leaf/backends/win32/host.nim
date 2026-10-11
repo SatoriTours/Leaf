@@ -2,7 +2,8 @@
 ## Session; all such work runs after native dispatch at an ordinary Nim boundary.
 import std/[tables, unicode, math, atomics]
 import ../../[core, backend, backend_session, native_layout, windows_dpi]
-import ./[api, calls, host_state]
+import ./[api, calls, host_state, host_bridge]
+export host_bridge
 
 type
   Win32Host* = ref object
@@ -17,6 +18,9 @@ type
     ctx: HostContext
     close: CloseState
     session: BackendSession
+    lease: HostBackendLease
+    bridge: HostBackendBridge
+    startupScope: proc(): bool {.closure, raises: [].}
     scopeBusy: proc(): bool {.closure, raises: [].}
     safeTick: proc() {.closure.}
     dispatchDepth, pumpDepth, tickDepth, releaseDepth: int
@@ -48,6 +52,37 @@ proc ownerCheck(host: Win32Host) =
 proc liveCheck(host: Win32Host) =
   host.ownerCheck()
   if host.window == nil or host.close.complete: fail("Win32 Host window is no longer live")
+proc setStartupScope*(host: Win32Host, scopeBusy: proc(): bool {.closure, raises: [].}) =
+  host.liveCheck()
+  if scopeBusy == nil or host.startupScope != nil or host.lease != nil or host.session != nil:
+    fail("startup Scope guard must be configured exactly once before resource claim")
+  host.startupScope = scopeBusy
+proc claimBackendOwner*(host: Win32Host, bridge: HostBackendBridge): HostBackendLease =
+  host.liveCheck()
+  if host.startupScope == nil: fail("native owner requires a full startup Scope guard")
+  if host.lease != nil or host.session != nil: fail("Host already has a native owner")
+  if bridge.capture == nil or bridge.invalidate == nil or bridge.nativeTick == nil or
+      bridge.localBusy == nil or bridge.resourcesReleased == nil or
+      bridge.matchesSession == nil or bridge.closeStartup == nil:
+    fail("incomplete native owner bridge")
+  result = HostBackendLease()
+  host.bridge = bridge
+  host.lease = result
+proc releaseBackendOwner*(host: Win32Host, lease: HostBackendLease) =
+  host.ownerCheck()
+  if lease == nil or lease != host.lease: fail("foreign native owner lease")
+  if not host.bridge.resourcesReleased() or (host.session != nil and not host.session.disposed):
+    fail("native resources or authoritative Session remain live")
+  host.lease = nil
+  host.bridge = default(HostBackendBridge)
+proc backendOwnerActive*(host: Win32Host, lease: HostBackendLease): bool =
+  host.ownerCheck()
+  lease != nil and host.lease == lease
+proc backendOwnerBound*(host: Win32Host, lease: HostBackendLease, session: BackendSession): bool =
+  host.ownerCheck()
+  host.window != nil and not host.close.pending and lease != nil and host.lease == lease and
+    session != nil and host.session == session and not session.closing and
+    not session.disposed and host.bridge.matchesSession(session)
 proc nativeError(operation: string) {.noreturn.} =
   fail(operation & " failed: Win32 error " & $lastError())
 proc wide(value: string): seq[WCHAR] =
@@ -85,6 +120,8 @@ proc checkCallback(host: Win32Host) =
 proc busy(host: Win32Host): bool =
   if host.dispatchDepth != 0 or host.tickDepth != 0 or host.releaseDepth != 0 or host.pumpDepth > 1:
     return true
+  if host.startupScope != nil and host.startupScope(): return true
+  if host.lease != nil and host.bridge.localBusy(): return true
   if host.scopeBusy != nil and host.scopeBusy(): return true
   if host.session != nil:
     let runtime = host.session.runtime
@@ -151,6 +188,7 @@ proc windowProc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.
         return 0
       of WM_SIZE:
         host.geometry()
+        if host.lease != nil: host.bridge.invalidate(host.ctx, {geometryChanged})
         host.wake()
         return 0
       of WM_DPICHANGED:
@@ -164,8 +202,17 @@ proc windowProc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.
                                   SWP_NOZORDER or SWP_NOACTIVATE) == 0:
             nativeError("SetWindowPos")
         host.geometry()
+        if host.lease != nil: host.bridge.invalidate(host.ctx, {geometryChanged, fontChanged, themeChanged})
         host.wake()
         return 0
+      of WM_SETTINGCHANGE, WM_THEMECHANGED:
+        if host.lease != nil: host.bridge.invalidate(host.ctx, {fontChanged, themeChanged})
+        host.wake()
+      of WM_COMMAND:
+        if host.lease != nil and host.session != nil and not host.close.pending and
+            host.bridge.matchesSession(host.session) and host.bridge.capture(window, message, wp, lp):
+          host.wake()
+          return 0
       of WM_HOST_TICK:
         host.close.posted = host.timer != 0
         host.needsTick = true
@@ -235,6 +282,8 @@ proc finish(host: Win32Host) =
   host.safeTick = nil
   host.scopeBusy = nil
   host.session = nil
+  host.startupScope = nil
+  host.bridge = default(HostBackendBridge)
   host.calls = default(Win32Calls)
   host.needsTick = false
   host.close.closeSucceeded()
@@ -245,6 +294,9 @@ proc release(host: Win32Host) =
     if host.session != nil:
       host.session.dispose()
       if not host.session.disposed: fail("Session release did not complete")
+    elif host.lease != nil:
+      host.bridge.closeStartup()
+    if host.lease != nil: host.releaseBackendOwner(host.lease)
     host.nativeCleanup()
     host.finish()
   finally:
@@ -254,7 +306,9 @@ proc safeTurn(host: Win32Host) =
   host.checkCallback()
   if host.close.complete or host.busy(): return
   var primary: ref CatchableError
-  if not host.close.pending and host.needsTick and host.session != nil and host.safeTick != nil:
+  if not host.close.pending and host.lease != nil: host.bridge.nativeTick()
+  if not host.close.pending and host.needsTick and host.session != nil and host.safeTick != nil and
+      (host.lease == nil or host.bridge.matchesSession(host.session)):
     host.needsTick = false
     inc host.tickDepth
     try: host.safeTick()
@@ -262,7 +316,8 @@ proc safeTurn(host: Win32Host) =
       host.recordError()
       primary = error
     finally: dec host.tickDepth
-  if host.close.pending and host.session != nil and not host.busy() and not host.retryDeferred:
+  if not host.close.pending and host.lease != nil and not host.busy(): host.bridge.nativeTick()
+  if host.close.pending and (host.session != nil or host.lease != nil) and not host.busy() and not host.retryDeferred:
     try:
       host.release()
     except CatchableError as error:
@@ -350,6 +405,8 @@ proc bindSession*(host: Win32Host, session: BackendSession,
   if host.session != nil: fail("Host already has a Session binding")
   if session.disposed or session.sessionId != host.ctx.sessionId:
     fail("Session is disposed or belongs to another Host context")
+  if host.lease != nil and not host.bridge.matchesSession(session):
+    fail("Session does not match native owner binding")
   host.session = session
   host.scopeBusy = scopeBusy
   if host.close.pending: session.requestClose()
@@ -389,7 +446,7 @@ proc pump*(host: Win32Host): int =
   host.checkCallback()
   if host.close.complete: return 0
   let nested = host.pumpDepth != 0 or host.busy() or
-    (host.session == nil and host.close.pending)
+    (host.session == nil and host.lease == nil and host.close.pending)
   inc host.pumpDepth
   var primary: ref CatchableError
   try:
@@ -407,7 +464,7 @@ proc pump*(host: Win32Host): int =
     while not host.close.complete:
       if host.window == nil:
         fail("Host native cleanup is incomplete; call destroyHost to retry")
-      if host.session == nil and host.close.pending: return 0
+      if host.session == nil and host.lease == nil and host.close.pending: return 0
       let status = host.calls.getMessage(addr message, nil, 0, 0)
       if status == -1: nativeError("GetMessageW")
       if status == 0: return int(cast[int32](message.wParam))
@@ -420,7 +477,7 @@ proc pump*(host: Win32Host): int =
   finally:
     dec host.pumpDepth
     if host.pumpDepth == 0 and host.close.pending and not host.close.complete and
-        host.window != nil and host.session != nil:
+        host.window != nil and (host.session != nil or host.lease != nil):
       try: host.delayed()
       except CatchableError as secondary:
         host.recordError()

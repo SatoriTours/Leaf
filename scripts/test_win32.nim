@@ -8,6 +8,13 @@
 ## is not evidence that any Windows host behavior passed.
 when defined(windows):
   import std/[os, osproc, strutils, algorithm]
+  import ../src/leaf/[windows_manifest, windows_paths]
+
+  proc execute(compiler, root: string, args: seq[string]): int =
+    let process = startProcess(compiler, workingDir = root, args = args,
+      options = {poUsePath, poParentStreams})
+    defer: process.close()
+    process.waitForExit()
 
 proc main(): int =
   when defined(windows):
@@ -32,14 +39,26 @@ proc main(): int =
     for test in tests:
       let name = test.extractFilename.changeFileExt(ExeExt)
       let output = outputDirectory / name
-      let process = startProcess(compiler, workingDir = root,
-        args = @["c", "-r", "--threads:on", "--forceBuild:on",
-          "--skipParentCfg:on", "--skipUserCfg:on",
-          "--nimcache:" & outputDirectory / (name & "-cache"),
-          "--passC:-I" & directory, "--path:" & root / "src", "--out:" & output, test],
-        options = {poUsePath, poParentStreams})
-      let code = process.waitForExit()
-      process.close()
+      let cache = compilerPath(outputDirectory / (name & "-cache"))
+      var args = @["c", "--threads:on", "--forceBuild:on",
+        "--skipParentCfg:on", "--skipUserCfg:on",
+        "--nimcache:" & cache.replace("$", "$$"),
+        "--passC:-I" & quoteShell(compilerPath(directory)),
+        "--path:" & compilerPath(root / "src").replace("$", "$$"),
+        "--out:" & compilerPath(output).replace("$", "$$")]
+      let entry = compilerPath(test)
+      # Use Nim's selected compiler, then link the same v6/PMv2 resource as apps.
+      # No generated object in the source checkout is a prerequisite.
+      let discovery = execute(compiler, root, args & @["--compileOnly", entry])
+      if discovery != 0: return discovery
+      try:
+        let gcc = gccFromBuildScript(cache / name.changeFileExt("json"))
+        let resource = compileWindowsManifest(root / "src", cache, gcc)
+        args.add("--passL:" & quoteShell(compilerPath(resource)))
+      except CatchableError as error:
+        stderr.writeLine(error.msg)
+        return 1
+      let code = execute(compiler, root, args & @["-r", entry])
       if code != 0: return code
     stdout.writeLine("Passed all " & $tests.len & " Windows host test suites")
     return 0

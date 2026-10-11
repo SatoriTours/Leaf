@@ -1,6 +1,7 @@
 ## Build-time project configuration and resource paths. No interpreter is used.
 import std/[os, json, strutils, tables, unicode]
-import ./core
+import ./[core, targets]
+export targets
 when defined(windows): import ./windows_paths
 
 const
@@ -12,6 +13,7 @@ type
     binary*, icon*: string
   Project* = object
     root*, entry*, entryRelative*, name*, identifier*, version*, configFile*: string
+    backend*: BackendChoice
     includedPaths*: seq[string]
     platforms*: Table[string, PlatformConfig]
 
@@ -69,7 +71,7 @@ proc readProject*(path: string): Project =
   let config = parseFile(configPath)
   if config.kind != JObject: fail("leaf.json must contain an object")
   for field in config.keys:
-    if field notin ["name", "identifier", "version", "entry", "include", "platforms"]:
+    if field notin ["name", "identifier", "version", "entry", "include", "platforms", "backend"]:
       fail("unknown project field: " & field)
   for field in ["name", "identifier", "version", "entry"]:
     if field notin config or config[field].kind != JString or config[field].getStr.len == 0:
@@ -77,6 +79,9 @@ proc readProject*(path: string): Project =
   result = Project(root: realPath(root), name: config["name"].getStr,
     identifier: config["identifier"].getStr, version: config["version"].getStr,
     configFile: realPath(configPath), entryRelative: config["entry"].getStr)
+  if "backend" in config:
+    if config["backend"].kind != JString: fail("backend must be a string")
+    result.backend = parseBackend(config["backend"].getStr)
   if '/' in result.name: fail("invalid application name")
   discard portableRelative(result.name)
   let components = result.identifier.split('.')

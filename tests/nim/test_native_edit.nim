@@ -218,3 +218,13 @@ suite "Native controlled editor state machine":
     check effects.len == 1
     check effects[0].selection.anchor == 0
     check effects[0].selection.caret == 0
+
+
+suite "reset binding observation retirement":
+  test "successful reset settles the observations invalidated with the old binding":
+    var state = newEditorState(ControlValue(text: "old"))
+    state.observeEditor(ControlValue(text: "queued"), compositionNone, Selection16(), 7)
+    state.acceptModel(ControlValue(text: "reset"), 2, some(1'u64))
+    check state.latestObserved > state.lastSettled
+    state.completeReset(1)
+    check state.lastSettled == state.latestObserved

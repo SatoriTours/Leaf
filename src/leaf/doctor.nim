@@ -1,6 +1,6 @@
 ## Environment inspection never initializes a display or requires a project.
-import std/[os, json, monotimes, times]
-import ./[build, gpui_api, process_io, sdk]
+import std/[os, json, monotimes, times, options]
+import ./[build, gpui_api, process_io, sdk, targets]
 
 proc version(exe: string, args: seq[string]): JsonNode =
   if exe.len == 0 or not fileExists(exe): return newJNull()
@@ -18,10 +18,27 @@ proc version(exe: string, args: seq[string]): JsonNode =
   except ProcessInterruptedError: raise
   except CatchableError as error: result = %error.msg
 
-proc doctorReport*(): JsonNode =
+proc doctorReport*(selection: Option[BuildSelection] = none(BuildSelection)): JsonNode =
   var nim: string
   try: nim = compiler()
   except CatchableError: discard
+  let selected = selection.get(resolveBuild(backendGpui))
+  if selected.backend == backendNative or selected.headlessOnly:
+    let bundled = sdkGcc()
+    let gcc = if bundled.len > 0: bundled else: findExe("gcc")
+    let windres = if gcc.len > 0: gcc.parentDir / "windres".addFileExt(ExeExt) else: ""
+    result = %*{"implementation": "nim", "nim": nim, "cc": gcc,
+      "platform": hostTarget(), "target": selected.target, "architecture": hostCPU,
+      "desktop_backend": (if selected.headlessOnly: "headless" else: "native"),
+      "tools": {"nim": version(nim, @["--version"]), "cc": version(gcc, @["--version"]),
+        "windres": version(windres, @["--version"])}}
+    try:
+      selected.validateHost()
+      result["host_available"] = %true
+    except CatchableError as error:
+      result["host_available"] = %false
+      result["host_error"] = %error.msg
+    return
   let bundledCc = sdkGcc()
   let cc = if bundledCc.len > 0: bundledCc else: findExe("cc")
   result = %*{"implementation": "nim", "nim": nim,

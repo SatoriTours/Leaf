@@ -1,5 +1,5 @@
 ## Developer CLI: native Nim applications are compiled before execution.
-import std/[os, json, strutils, strtabs]
+import std/[os, json, strutils, strtabs, options]
 import leaf/[core, project, build, doctor, developer_options, diagnostics, watch, process_io, pack, scaffold, sdk]
 export build
 
@@ -25,7 +25,8 @@ proc main*(args: seq[string]): int =
   leaf g scaffold MODEL FIELD:TYPE... --project DIRECTORY [--dry-run]
                                    Add a resource with CRUD pages, routes and SQL
   leaf generate scaffold ...       Alias for leaf g scaffold
-  leaf build PROJECT [--output EXE] Compile a release application
+  leaf build PROJECT [--output EXE] [--target windows] [--backend native|gpui]
+  leaf run PROJECT [--target windows] [--backend native|gpui]
   leaf pack PROJECT --target TARGET [--binary EXE] [--output DIR]
   leaf doctor [--json]              Show the local build environment
   leaf --version                   Show SDK version and channel
@@ -56,13 +57,13 @@ Release TARGET: linux, macos, windows or all. Foreign targets need native binari
       initProject(args[1])
     of "pack":
       if args.len < 4: fail("usage: leaf pack PROJECT --target TARGET [--binary EXE] [--output DIR]")
-      var target, binary: string
+      var target, binary, backend: string
       var output = "dist"
       var seen: seq[string]
       var i = 2
       while i < args.len:
         let flag = args[i]
-        if flag notin ["--target", "--binary", "--output"] or flag in seen:
+        if flag notin ["--target", "--binary", "--output", "--backend"] or flag in seen:
           fail("unknown or duplicated pack option: " & flag)
         if i + 1 >= args.len or args[i + 1].len == 0 or args[i + 1].startsWith("--"):
           fail("missing value for " & flag)
@@ -70,31 +71,57 @@ Release TARGET: linux, macos, windows or all. Foreign targets need native binari
         case flag
         of "--target": target = args[i + 1]
         of "--binary": binary = absolutePath(args[i + 1])
+        of "--backend": backend = args[i + 1]
         else: output = args[i + 1]
         i += 2
       if target notin ["linux", "macos", "windows", "all"]: fail("--target must be linux, macos, windows or all")
       if target == "all" and binary.len > 0: fail("--binary requires a single target")
-      for artifact in pack.pack(readProject(args[1]), target, output, binary): stdout.writeLine(artifact)
-    of "doctor":
-      if args.len > 2 or (args.len == 2 and args[1] != "--json"):
-        fail("usage: leaf doctor [--json]")
-      stdout.writeLine(doctorReport().pretty())
-    of "build":
-      if args.len notin [2, 4] or (args.len == 4 and args[2] != "--output"):
-        fail("usage: leaf build PROJECT [--output EXE]")
-      let output = if args.len == 4: args[3] else: ""
-      stdout.writeLine(build(readProject(args[1]), output))
+      for artifact in pack.pack(readProject(args[1]), target, output, binary, backend): stdout.writeLine(artifact)
+    of "doctor", "build", "run":
+      let command = args[0]
+      if command != "doctor" and args.len < 2: fail("missing project path")
+      var target, backend, output: string
+      var seen: seq[string]
+      var i = if command == "doctor": 1 else: 2
+      while i < args.len:
+        let flag = args[i]
+        if flag in seen: fail("duplicated option: " & flag)
+        seen.add(flag)
+        if flag == "--json" and command == "doctor":
+          inc i
+          continue
+        if flag notin ["--target", "--backend", "--output"] or
+            (flag == "--output" and command != "build"):
+          fail("unknown " & command & " option: " & flag)
+        if i+1 >= args.len or args[i+1].len == 0 or args[i+1].startsWith("--"):
+          fail("missing value for " & flag)
+        case flag
+        of "--target": target = args[i+1]
+        of "--backend": backend = args[i+1]
+        else: output = args[i+1]
+        i += 2
+      if command == "doctor":
+        stdout.writeLine(doctorReport(some(resolveBuild(backendGpui, target, backend))).pretty())
+      else:
+        let project = readProject(args[1])
+        let selection = some(resolveBuild(project.backend, target, backend))
+        let binary = build(project, output, selection)
+        if command == "build": stdout.writeLine(binary)
+        else: return execute(binary, @[], project.root)
     else:
       if args[^1].startsWith("--"): fail("missing project path")
       let project = readProject(args[^1])
       let rawArgs: seq[string] = if args.len == 1: @[] else: args[0..^2]
       let options = parseDeveloperOptions(rawArgs, project.root)
+      if options.watching and project.backend == backendNative:
+        fail("native --watch is not supported in this batch")
       if options.watching:
         if options.remaining.len > 0: fail("--watch cannot be combined with headless or event commands")
         let d = options.diagnostics()
         defer: d.close()
         return runWatch(project, d)
-      let binary = build(project)
+      let headless = "--headless" in options.remaining or "--check" in options.remaining
+      let binary = build(project, selection = some(resolveBuild(project.backend, headlessOnly = headless)))
       result = execute(binary, options.launchArgs(), project.root)
   except ProcessInterruptedError:
     result = 130

@@ -113,3 +113,137 @@ proc IsWindow*(window: HWND): BOOL
 proc GetWindowTextW*(window: HWND, text: WidePtr, size: int32): int32
 proc GetWindowTextLengthW*(window: HWND): int32
 {.pop.}
+
+
+# Stock controls and GDI/theme measurement, all native Windows ABI.
+type
+  HFONT* {.importc: "HFONT", header: "<windows.h>".} = ptr object
+  HDC* {.importc: "HDC", header: "<windows.h>".} = ptr object
+  HGDIOBJ* {.importc: "HGDIOBJ", header: "<windows.h>".} = ptr object
+  HRGN* {.importc: "HRGN", header: "<windows.h>".} = ptr object
+  HTHEME* {.importc: "HTHEME", header: "<uxtheme.h>".} = ptr object
+  SIZE* = object
+    cx*, cy*: LONG
+  LOGFONTW* = object
+    lfHeight*, lfWidth*, lfEscapement*, lfOrientation*, lfWeight*: LONG
+    lfItalic*, lfUnderline*, lfStrikeOut*, lfCharSet*: uint8
+    lfOutPrecision*, lfClipPrecision*, lfQuality*, lfPitchAndFamily*: uint8
+    lfFaceName*: array[32, WCHAR]
+  TEXTMETRICW* = object
+    tmHeight*, tmAscent*, tmDescent*, tmInternalLeading*, tmExternalLeading*: LONG
+    tmAveCharWidth*, tmMaxCharWidth*, tmWeight*, tmOverhang*: LONG
+    tmDigitizedAspectX*, tmDigitizedAspectY*: LONG
+    tmFirstChar*, tmLastChar*, tmDefaultChar*, tmBreakChar*: WCHAR
+    tmItalic*, tmUnderlined*, tmStruckOut*, tmPitchAndFamily*, tmCharSet*: uint8
+  NONCLIENTMETRICSW* = object
+    cbSize*: UINT
+    iBorderWidth*, iScrollWidth*, iScrollHeight*, iCaptionWidth*, iCaptionHeight*: int32
+    lfCaptionFont*: LOGFONTW
+    iSmCaptionWidth*, iSmCaptionHeight*: int32
+    lfSmCaptionFont*: LOGFONTW
+    iMenuWidth*, iMenuHeight*: int32
+    lfMenuFont*, lfStatusFont*, lfMessageFont*: LOGFONTW
+    iPaddedBorderWidth*: int32
+  INITCOMMONCONTROLSEX* = object
+    dwSize*, dwICC*: DWORD
+  MARGINS* = object
+    cxLeftWidth*, cxRightWidth*, cyTopHeight*, cyBottomHeight*: int32
+  WNDENUMPROC* = proc(window: HWND, data: LPARAM): BOOL {.stdcall, raises: [].}
+const
+  WM_COMMAND* = 0x0111'u32
+  WM_SETTINGCHANGE* = 0x001A'u32
+  WM_THEMECHANGED* = 0x031A'u32
+  WM_SETFONT* = 0x0030'u32
+  WM_GETFONT* = 0x0031'u32
+  WM_SETTEXT* = 0x000C'u32
+  WS_CHILD* = 0x40000000'u32
+  WS_TABSTOP* = 0x00010000'u32
+  WS_CLIPCHILDREN* = 0x02000000'u32
+  WS_CLIPSIBLINGS* = 0x04000000'u32
+  WS_BORDER* = 0x00800000'u32
+  BS_AUTOCHECKBOX* = 3'u32
+  SS_NOPREFIX* = 0x80'u32
+  SS_ETCHEDHOR* = 0x10'u32
+  PBS_MARQUEE* = 8'u32
+  BM_GETCHECK* = 0x00F0'u32
+  BM_SETCHECK* = 0x00F1'u32
+  BM_CLICK* = 0x00F5'u32
+  BCM_GETIDEALSIZE* = 0x1601'u32
+  EM_GETSEL* = 0x00B0'u32
+  EM_SETSEL* = 0x00B1'u32
+  EM_GETRECT* = 0x00B2'u32
+  EM_GETMARGINS* = 0x00D4'u32
+  EM_SETCUEBANNER* = 0x1501'u32
+  EM_GETCUEBANNER* = 0x1502'u32
+  PBM_SETRANGE32* = 0x0406'u32
+  PBM_SETPOS* = 0x0402'u32
+  PBM_GETPOS* = 0x0408'u32
+  PBM_SETMARQUEE* = 0x040A'u32
+  SW_HIDE* = 0'i32
+  GWL_STYLE* = -16'i32
+  SPI_GETNONCLIENTMETRICS* = 0x0029'u32
+  DT_WORDBREAK* = 0x0010'u32
+  DT_CALCRECT* = 0x0400'u32
+  DT_NOPREFIX* = 0x0800'u32
+  ICC_PROGRESS_CLASS* = 0x20'u32
+  SM_CXBORDER* = 5'i32
+  SM_CYBORDER* = 6'i32
+  SM_CYHSCROLL* = 3'i32
+{.push stdcall, dynlib: "user32.dll", importc, raises: [].}
+proc SetWindowTextW*(window: HWND, text: WidePtr): BOOL
+proc EnableWindow*(window: HWND, enabled: BOOL): BOOL
+proc IsWindowEnabled*(window: HWND): BOOL
+proc IsWindowVisible*(window: HWND): BOOL
+proc GetParent*(window: HWND): HWND
+proc GetDlgCtrlID*(window: HWND): int32
+proc GetWindowRect*(window: HWND, rect: ptr RECT): BOOL
+proc EnumChildWindows*(parent: HWND, callback: WNDENUMPROC, data: LPARAM): BOOL
+proc MapWindowPoints*(source, target: HWND, points: ptr POINT, count: UINT): int32
+proc GetWindowLongW*(window: HWND, index: int32): LONG
+proc GetDC*(window: HWND): HDC
+proc ReleaseDC*(window: HWND, dc: HDC): int32
+proc DrawTextW*(dc: HDC, text: WidePtr, count: int32, rect: ptr RECT, format: UINT): int32
+proc SystemParametersInfoForDpi*(action, param: UINT, value: pointer, flags, dpi: UINT): BOOL
+proc GetSystemMetricsForDpi*(index: int32, dpi: UINT): int32
+proc SetWindowRgn*(window: HWND, region: HRGN, redraw: BOOL): int32
+proc GetGuiResources*(process: HANDLE, flags: DWORD): DWORD
+{.pop.}
+{.push stdcall, dynlib: "gdi32.dll", importc, raises: [].}
+proc CreateFontIndirectW*(font: ptr LOGFONTW): HFONT
+proc DeleteObject*(obj: HGDIOBJ): BOOL
+proc SelectObject*(dc: HDC, obj: HGDIOBJ): HGDIOBJ
+proc GetTextMetricsW*(dc: HDC, metric: ptr TEXTMETRICW): BOOL
+proc GetTextExtentPoint32W*(dc: HDC, text: WidePtr, count: int32, size: ptr SIZE): BOOL
+proc GetObjectW*(obj: HGDIOBJ, size: int32, value: pointer): int32
+proc GetObjectType*(obj: HGDIOBJ): DWORD
+proc CreateRectRgn*(left,top,right,bottom: int32): HRGN
+{.pop.}
+{.push stdcall, dynlib: "comctl32.dll", importc, raises: [].}
+proc SetWindowSubclass*(window: HWND, callback: SUBCLASSPROC, id: UINT_PTR, data: DWORD_PTR): BOOL
+proc RemoveWindowSubclass*(window: HWND, callback: SUBCLASSPROC, id: UINT_PTR): BOOL
+proc GetWindowSubclass*(window: HWND, callback: SUBCLASSPROC, id: UINT_PTR, data: ptr DWORD_PTR): BOOL
+proc DefSubclassProc*(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT
+{.pop.}
+{.push stdcall, dynlib: "uxtheme.dll", importc, raises: [].}
+proc OpenThemeDataForDpi*(window: HWND, classList: WidePtr, dpi: UINT): HTHEME
+proc CloseThemeData*(theme: HTHEME): int32
+proc GetThemePartSize*(theme: HTHEME, dc: HDC, part,state: int32, rect: ptr RECT, mode: int32, size: ptr SIZE): int32
+proc GetThemeMargins*(theme: HTHEME, dc: HDC, part,state,property: int32, rect: ptr RECT, margins: ptr MARGINS): int32
+{.pop.}
+proc GetCurrentProcess*(): HANDLE {.stdcall, dynlib: "kernel32.dll", importc, raises: [].}
+
+const
+  WM_KEYDOWN* = 0x0100'u32
+  WM_CHAR* = 0x0102'u32
+  WM_GETDLGCODE* = 0x0087'u32
+  WM_IME_STARTCOMPOSITION* = 0x010D'u32
+  WM_IME_ENDCOMPOSITION* = 0x010E'u32
+  WM_IME_COMPOSITION* = 0x010F'u32
+type HIMC* = pointer
+{.push stdcall, dynlib: "imm32.dll", importc, raises: [].}
+proc ImmGetContext*(window: HWND): HIMC
+proc ImmReleaseContext*(window: HWND, context: HIMC): BOOL
+proc ImmNotifyIME*(context: HIMC, action, index, value: DWORD): BOOL
+{.pop.}
+
+proc initControls*(init: ptr INITCOMMONCONTROLSEX): BOOL {.stdcall, dynlib: "comctl32.dll", importc: "InitCommonControlsEx", raises: [].}

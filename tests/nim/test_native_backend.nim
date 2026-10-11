@@ -1,5 +1,5 @@
 import std/[unittest, json, tables, options, strutils]
-import leaf/[core, widgets, styles, backend, backend_session]
+import leaf/[core, widgets, styles, backend, backend_session, native_edit]
 import leaf/backends/headless
 
 proc app(render: RenderProc): Application =
@@ -1561,3 +1561,206 @@ suite "Session close intent":
     session.requestClose()
     check session.disposed
     check recording.disposeCalls == 1
+
+
+suite "Observed native session reservation":
+  test "observer sees exact owned ref once before rebind and prepare":
+    let runtime = newRuntime(app(proc(ctx: BuildContext): Node = text("x",key="x")))
+    let recording = newRecordingBackend(fullCapabilities())
+    var seen: BackendSession
+    var order: seq[string]
+    var owned = false
+    let rebind = recording.backend.rebind
+    let prepare = recording.backend.prepare
+    recording.backend.rebind = proc(id, generation: uint64) =
+      order.add("rebind")
+      if rebind != nil: rebind(id,generation)
+    recording.backend.prepare = proc(batch: UpdateBatch) =
+      order.add("prepare")
+      prepare(batch)
+    let session = attachBackendObserved(runtime,recording.backend,makeHost(),compatible,
+      proc(s: BackendSession) {.raises: [].} =
+        seen=s
+        owned=s.ownsBackend(recording.backend)
+        order.add("reserved"))
+    check seen == session
+    check owned
+    check order == @["reserved","rebind","prepare"]
+    check session.ownsBackend(recording.backend)
+    session.dispose()
+    check not session.ownsBackend(recording.backend)
+
+  test "entry rejection and occupied backend never invoke observer":
+    let render: RenderProc = proc(ctx: BuildContext): Node = text("x",key="x")
+    let recording = newRecordingBackend(fullCapabilities())
+    var calls=0
+    let observer=proc(s: BackendSession) {.raises: [].} = inc calls
+    expect UiError: discard attachBackendObserved(nil,recording.backend,makeHost(),compatible,observer)
+    let runtime=newRuntime(app(render))
+    expect UiError: discard attachBackendObserved(runtime,nil,makeHost(),compatible,observer)
+    expect UiError: discard attachBackendObserved(runtime,recording.backend,makeHost(sessionId=0),compatible,observer)
+    check calls==0
+    let owner=attachBackend(runtime,recording.backend,makeHost())
+    expect UiError: discard attachBackendObserved(runtime,recording.backend,makeHost(),compatible,observer)
+    expect UiError: discard attachBackendObserved(newRuntime(app(render)),recording.backend,makeHost(),compatible,observer)
+    check calls==0
+    check recording.disposeCalls==0
+    owner.dispose()
+    let unsupported=newRecordingBackend(fullCapabilities())
+    unsupported.backend.capabilities.kinds.excl(NodeKind.text)
+    expect UiError: discard attachBackendObserved(newRuntime(app(render)),unsupported.backend,makeHost(),compatible,observer)
+    check calls==0
+    check unsupported.prepareCalls==0
+
+  test "ownership compares actual backend reservation not equal SessionId":
+    check not BackendSession(nil).ownsBackend(Backend(nil))
+    let render: RenderProc = proc(ctx:BuildContext):Node=text("x",key="x")
+    let a=newRecordingBackend(fullCapabilities());let b=newRecordingBackend(fullCapabilities())
+    let sa=attachBackend(newRuntime(app(render)),a.backend,makeHost())
+    let sb=attachBackend(newRuntime(app(render)),b.backend,makeHost())
+    check sa.sessionId==sb.sessionId
+    check sa.ownsBackend(a.backend)
+    check not sa.ownsBackend(b.backend)
+    check not sb.ownsBackend(a.backend)
+    sa.dispose()
+    let later=a.backend.reserveSession()
+    check not sa.ownsBackend(a.backend)
+    a.backend.releaseSession(later)
+    sb.dispose()
+
+  test "nil observer shares original attach behavior":
+    let render:RenderProc=proc(ctx:BuildContext):Node=text("x",key="x")
+    let a=newRecordingBackend(fullCapabilities());let b=newRecordingBackend(fullCapabilities())
+    let sa=attachBackend(newRuntime(app(render)),a.backend,makeHost())
+    let sb=attachBackendObserved(newRuntime(app(render)),b.backend,makeHost(),compatible,nil)
+    check a.prepareCalls==b.prepareCalls
+    check a.applyCalls==b.applyCalls
+    check sa.acceptedEntities.len==sb.acceptedEntities.len
+    sa.dispose();sb.dispose()
+    check a.disposeCalls==b.disposeCalls
+
+  test "observed retained hooks keep exact Session for scoped retry without clearing successor":
+    var scopeCalls,failAt:int
+    let cause=newException(IOError,"original cause")
+    let primary=newException(ValueError,"observed install exit")
+    primary.parent=cause
+    proc scope(body:proc(){.closure.}) =
+      inc scopeCalls
+      if failAt!=0 and scopeCalls>failAt:raise newException(UiError,"clear entry refused")
+      body()
+      if scopeCalls==failAt:raise primary
+    let runtime=newRuntime(Application(title:"observed",width:100,height:100,
+      render:proc(ctx:BuildContext):Node=text("x",key="x"),executionScope:scope))
+    let recording=newRecordingBackend(fullCapabilities())
+    var reserved:BackendSession
+    failAt=scopeCalls+2
+    var caught:ref CatchableError
+    try:discard attachBackendObserved(runtime,recording.backend,makeHost(),compatible,
+      proc(s:BackendSession){.raises:[].}=reserved=s)
+    except CatchableError as error:caught=error
+    check caught==primary
+    check caught of ValueError
+    check caught.parent==cause
+    check "clear entry refused" in caught.msg
+    check reserved!=nil
+    check recording.disposeCalls==0
+    check runtime.committerOwner!=0
+    if reserved!=nil:
+      check reserved.ownsBackend(recording.backend)
+      failAt=0
+      reserved.dispose()
+      check reserved.disposed
+      check recording.disposeCalls==1
+      check runtime.committerOwner==0
+      check runtime.preparerOwner==0
+      let next=newRecordingBackend(fullCapabilities())
+      let successor=attachBackend(runtime,next.backend,makeHost())
+      let token=runtime.committerOwner
+      reserved.dispose()
+      check runtime.committerOwner==token
+      check next.disposeCalls==0
+      successor.dispose()
+
+
+suite "Editor state and installation lifecycle integration":
+  test "installation Scope post-error preserves composition conflict and pending reset for retry":
+    var failExit = false
+    var depth = 0
+    proc scope(body: proc() {.closure.}) =
+      inc depth
+      try: body()
+      finally: dec depth
+      if failExit and depth == 0:
+        failExit = false
+        raise newException(UiError, "editor install post-error")
+    var model = "accepted"
+    var token: uint64
+    proc render(ctx: BuildContext): Node =
+      column(@[
+        input(model, key="field", resetToken=token),
+        virtualList("rows", @["a", "b"], proc(index: int): Node =
+          text($index, key="row"))], key="root")
+    let runtime = newRuntime(Application(title:"editor install", width:640, height:480,
+      render:render, executionScope:scope))
+    let recording = newRecordingBackend(fullCapabilities())
+    var editor = newEditorState(ControlValue(text:model))
+    var acceptedCalls = 0
+    recording.backend.accepted = proc(entities: Table[NodeHandle, MountedEntity], revision: uint64) =
+      inc acceptedCalls
+      for entity in entities.values:
+        if entity.kind == NodeKind.input:
+          editor.acceptModel(ControlValue(text:entity.props.control.value.get("")),
+            revision, entity.props.control.resetToken)
+    let session = attachBackend(runtime, recording.backend, makeHost())
+    defer: session.dispose()
+    editor.observeEditor(ControlValue(text:"draft 😀"), compositionUpdate,
+      Selection16(anchor:1, caret:3), 9)
+    model = "accepted conflict"
+    token = 7
+    check runtime.refresh()
+    require editor.conflict.isSome and editor.pendingReset == some(7'u64)
+    let before = editor # every EditorState field, including watermarks/selection
+    let snapshot = runtime.snapshot.toJson()
+    let revision = runtime.acceptedRevision
+    let renders = runtime.stats.renders
+    let notifications = acceptedCalls
+    let generation = session.mountGeneration
+    failExit = true
+    expect UiError:
+      discard runtime.installPreparer(proc(candidate:Runtime) =
+        discard candidate.materialize("rows", 0, 2))
+    check editor == before
+    check acceptedCalls == notifications
+    check runtime.snapshot.toJson() == snapshot
+    check runtime.acceptedRevision == revision
+    check runtime.stats.renders == renders
+    check session.mountGeneration == generation + 1
+    check not session.faulted and not runtime.eventsFrozen
+    check session.acceptedEntities == recording.entities
+    discard runtime.installPreparer(proc(candidate:Runtime) =
+      discard candidate.materialize("rows", 0, 2))
+    check acceptedCalls == notifications + 1
+    var confirmed = before
+    confirmed.acceptedRevision = runtime.acceptedRevision
+    check editor == confirmed
+    check editor.consumedResetToken == 0 and editor.pendingReset == some(token)
+    let effects = editor.resetEffects()
+    require effects.len == 3
+    check effects[0].kind == forceCancelComposition
+    check effects[1].kind == setText and effects[1].value.text == model
+    check effects[2].kind == setSelection
+    # Execute the pure effect contract, then acknowledge the original token.
+    for effect in effects:
+      case effect.kind
+      of forceCancelComposition: editor.phase = compositionNone
+      of setText: editor.native = effect.value
+      of setSelection: editor.selection = effect.selection
+      of setChecked: discard
+    editor.completeReset(token)
+    check editor.native == editor.accepted
+    check editor.phase == compositionNone
+    check editor.selection == Selection16(anchor:model.len, caret:model.len)
+    check editor.latestObserved == 9 and editor.lastSettled == 9
+    check editor.pendingReset.isNone and editor.consumedResetToken == token
+    check editor.resetEffects().len == 0
+    check runtime.stats.renders == renders
