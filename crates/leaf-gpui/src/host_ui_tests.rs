@@ -372,3 +372,140 @@ fn inherited_and_external_invalidations_repaint_fixed_boundaries(cx: &mut gpui::
         assert!(view.read_with(cx, |v, _| v.boundary_renders(2)) > before);
     }
 }
+
+#[gpui::test]
+fn unmounted_boundary_retires_weak_registry_metadata(cx: &mut gpui::TestAppContext) {
+    let mut f = Fixture::new();
+    let (host, _root, cx) = form(&mut f, cx);
+    let coordinator = Rc::new(BoundaryCoordinator::default());
+    let entity = cx.new(|cx| {
+        let mut view = HostView::new(host.store(), 99, host.bridge());
+        view.coordinator = coordinator.clone();
+        coordinator
+            .views
+            .borrow_mut()
+            .insert(99, cx.entity().downgrade());
+        coordinator.renders.borrow_mut().insert(99, 1);
+        view
+    });
+    drop(entity);
+    cx.update(|_, cx| _root.update(cx, |_, cx| cx.notify()));
+    cx.run_until_parked();
+    assert!(!coordinator.views.borrow().contains_key(&99));
+    assert!(!coordinator.renders.borrow().contains_key(&99));
+}
+
+#[gpui::test]
+fn source_replacement_rebinds_focused_input_by_stable_node_id(cx: &mut gpui::TestAppContext) {
+    let mut f = Fixture::new();
+    let (host, view, cx) = form(&mut f, cx);
+    let input = view.read_with(cx, |v, _| v.inputs.borrow()[&2].state.clone());
+    cx.update(|w, cx| input.update(cx, |i, cx| i.focus(w, cx)));
+    // Give the accepted control a stable logical ID, then replace its native
+    // handle as a new list source does while preserving the item's key.
+    let id = b"row/key/input";
+    let update = LeafOp {
+        tag: 2,
+        kind: 4,
+        handle: 2,
+        parent: 1,
+        node_id: LeafSpan {
+            offset: 0,
+            len: id.len() as u64,
+        },
+        props: LeafProps {
+            present: LEAF_P_ENABLED,
+            enabled: 1,
+            event_mask: 6,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let stage = |ops: &[LeafOp], children: &[u64], revision: u64| {
+        let batch = LeafBatch {
+            struct_size: size_of::<LeafBatch>() as u32,
+            abi: 2,
+            session_id: 9,
+            base_revision: revision - 1,
+            next_revision: revision,
+            ops: ops.as_ptr(),
+            ops_len: ops.len() as u64,
+            children: children.as_ptr(),
+            children_len: children.len() as u64,
+            strings: id.as_ptr(),
+            strings_len: id.len() as u64,
+        };
+        assert_eq!(
+            unsafe { (f.api.prepare.unwrap())(f.ctx, &batch, std::ptr::null_mut()) },
+            0
+        );
+        assert_eq!(
+            unsafe { (f.api.apply.unwrap())(f.ctx, std::ptr::null_mut()) },
+            0
+        );
+        unsafe { (f.api.accept.unwrap())(f.ctx, revision) };
+    };
+    stage(&[update], &[], 2);
+    cx.update(|w, cx| view.update(cx, |v, cx| v.sync_inputs(w, cx)));
+    let mut create = update;
+    create.tag = 1;
+    create.handle = 4;
+    stage(
+        &[
+            create,
+            LeafOp {
+                tag: 3,
+                handle: 1,
+                children: LeafSpan { offset: 0, len: 2 },
+                ..Default::default()
+            },
+            LeafOp {
+                tag: 4,
+                handle: 2,
+                ..Default::default()
+            },
+        ],
+        &[4, 3],
+        3,
+    );
+    cx.update(|w, cx| view.update(cx, |v, cx| v.sync_inputs(w, cx)));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.inputs.borrow()[&4].state.entity_id()),
+        input.entity_id()
+    );
+    assert!(!view.read_with(cx, |v, _| v.inputs.borrow().contains_key(&2)));
+    let _ = host;
+}
+
+#[gpui::test]
+fn accepted_model_deferred_during_composition_applies_after_unmark(cx: &mut gpui::TestAppContext) {
+    let mut f = Fixture::new();
+    let (_host, view, cx) = form(&mut f, cx);
+    let input = view.read_with(cx, |v, _| v.inputs.borrow()[&2].state.clone());
+    cx.update(|w, cx| {
+        input.update(cx, |i, cx| {
+            i.focus(w, cx);
+            gpui::EntityInputHandler::replace_and_mark_text_in_range(
+                i,
+                None,
+                "拼",
+                Some(0..1),
+                w,
+                cx,
+            );
+        })
+    });
+    f.value = "accepted model".into();
+    f.publish(false);
+    cx.update(|w, cx| view.update(cx, |v, cx| v.sync_inputs(w, cx)));
+    assert_ne!(
+        input.read_with(cx, |i, _| i.value().to_string()),
+        "accepted model"
+    );
+    cx.update(|w, cx| input.update(cx, |i, cx| gpui::EntityInputHandler::unmark_text(i, w, cx)));
+    cx.update(|w, cx| view.update(cx, |v, cx| v.sync_inputs(w, cx)));
+    assert_eq!(
+        input.read_with(cx, |i, _| i.value().to_string()),
+        "accepted model"
+    );
+}

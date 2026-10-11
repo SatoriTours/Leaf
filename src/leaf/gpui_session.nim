@@ -1,7 +1,7 @@
 ## Typed, synchronous ABI 2 owner. All returned buffers are copied by Rust
 ## before the next request; no exception crosses the C calling convention.
 import std/[options, unicode, os, math, tables, json]
-import ./[core, backend, host_session, gpui_api, gpui_ffi_v2, watch_ipc]
+import ./[core, backend, host_session, gpui_api, gpui_ffi_v2, watch_ipc,managed_runtime]
 type
   GpuiSession* = ref object
     runtime*:Runtime
@@ -13,6 +13,7 @@ type
     running,detached:bool
     lastError,viewportError:string
     readyCalls*:int
+    onFrame*:proc(sample:LeafFrameSample):bool {.closure.}
     preparerToken:uint64
     viewports:Table[string,seq[string]]
     rowKeys:seq[string]
@@ -46,6 +47,7 @@ proc attach(ctx:pointer,api:ptr LeafRendererApi,rendererCtx:pointer,error:ptr Le
     let sink=HostConsumer(sessionId:session.id)
     sink.prepare=proc(batch:HostBatch)=
       var owned=encodeBatch(batch)
+      session.runtime.recordFfiBytes(owned.wireBytes)
       var bytes:array[2048,uint8]
       var error=LeafError(`ptr`:addr bytes[0],capacity:uint64(bytes.len))
       let status=session.renderer.prepare(session.rendererCtx,owned.borrow(),addr error)
@@ -140,6 +142,13 @@ proc request(ctx:pointer,raw:ptr LeafRequest,reply:ptr LeafReply,error:ptr LeafE
       if not (raw.scale>0 and raw.width>0 and raw.height>0) or classify(raw.scale) in {fcNan,fcInf,fcNegInf} or
           classify(raw.width) in {fcNan,fcInf,fcNegInf} or classify(raw.height) in {fcNan,fcInf,fcNegInf}:
         fail("invalid rendering dimensions")
+      if raw.tag==uint32(LEAF_REQUEST_FRAME) and session.onFrame!=nil:
+        if raw.value.len!=uint64(sizeof(LeafFrameSample)) or raw.value.`ptr`==nil:fail("invalid frame sample")
+        var sample:LeafFrameSample
+        copyMem(addr sample,raw.value.`ptr`,sizeof(sample))
+        for n in [sample.elapsed_ms,sample.draw_ms,sample.rust_prepare_ms,sample.rust_apply_ms]:
+          if n<0 or classify(n) in {fcNan,fcInf,fcNegInf}:fail("invalid frame timing")
+        if session.onFrame(sample):reply.flags=1
     else:fail("unknown typed request")
     reply.accepted_revision=session.runtime.acceptedRevision
     int32(reply.status)
@@ -185,6 +194,7 @@ proc run*(session:GpuiSession):int=
   let snapshot=session.runtime.applicationConfig
   var config=LeafConfig(struct_size:uint32(sizeof(LeafConfig)),session_id:session.id,width:uint32(snapshot.width),height:uint32(snapshot.height),
     title:LeafBytes(`ptr`:cast[ptr uint8](snapshot.title.cstring),len:uint64(snapshot.title.len)))
+  if session.onFrame!=nil:config.flags=1
   var callbacks=LeafHostCallbacks(struct_size:uint32(sizeof(LeafHostCallbacks)),attach:attach,request:request,detach:detach)
   var bytes:array[2048,uint8]
   var error=LeafError(`ptr`:addr bytes[0],capacity:uint64(bytes.len))

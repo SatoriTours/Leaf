@@ -121,3 +121,14 @@ suite "component identity and dirty descendants":
     check rt.acceptedRevision==2
     discard rt.flush()
     check rt.acceptedRevision==3
+let BudgetLeaf=defineComponent[int,int]("BudgetLeaf",
+  proc(ctx:MountContext,p:int):int=p,
+  proc(ctx:ComponentContext,p,m:int):UiDescription=host(text($p,key="shared")))
+suite "separate component and host budgets":
+  test "5000 components with 5000 host leaves fit independent limits":
+    var children:seq[UiDescription]
+    for i in 0..<5000:children.add(component(BudgetLeaf,i,key= $i))
+    let rt=newRuntime(componentApplication(hostShell(column(@[]),children),"budget"))
+    check rt.stats.mountedNodes==10001
+    expect UiError:discard rt.find("shared")
+    check rt.snapshot.root.children.len==5000

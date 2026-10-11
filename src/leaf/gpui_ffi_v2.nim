@@ -131,6 +131,9 @@ type
   LeafProtected* {.bycopy.} = object
     index*: uint64
     key*: LeafBytes
+  LeafFrameSample* {.bycopy.} = object
+    elapsed_ms*,draw_ms*,rust_prepare_ms*,rust_apply_ms*:float64
+    host_renders*:uint64
   LeafRequest* {.bycopy.} = object
     struct_size*: uint32
     tag*: uint32

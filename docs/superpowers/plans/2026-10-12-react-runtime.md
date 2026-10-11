@@ -309,14 +309,14 @@ HostChanges 的 upserts 为 seq[HostRecord]，removals 为 seq[NodeHandle]，chi
 
 `src/leaf/performance_report.nim` 新增 `verifyComponentReport(report:JsonNode):seq[string]`，返回空序列才通过；脚本调用此函数并以非零退出报告所有失败项。报告不得接受计数缺失作为零值。
 
-- [ ] **14.1 写失败测试**：构造报告验证计数不随 static=100/1000/5000 增长；故意注入 full Snapshot 导出、额外静态 render、每次分配线性增长时 verifier 必须失败。5000 逆序、100000/50列表、只换callback、连续拒绝/挂卸载都必须有行为校验；缺样本/元数据不能通过。
+- [x] **14.1 写失败测试**：构造报告验证计数不随 static=100/1000/5000 增长；故意注入 full Snapshot 导出、额外静态 render、每次分配线性增长时 verifier 必须失败。5000 逆序、100000/50列表、只换callback、连续拒绝/挂卸载都必须有行为校验；缺样本/元数据不能通过。
   断言 `check verifyComponentReport(validReport).len == 0`、`check verifyComponentReport(reportWithFullTreeExport).len > 0`；另外两种 legacy mode 报告不套用 managed 的计数上限。
-- [ ] **14.2 运行**：编译运行 `tests/nim/test_component_performance.nim`，FAIL。
-- [ ] **14.3 实现** 基准、原生帧计数和严格 verifier；基准模式记录总耗时以及 component/render、FFI/Rust apply、GPUI layout/frame 的分段。计时区间不启动编译器、不序列化日志，不用模拟 backend 的吞吐量替代真实帧。SDK 包含新 Nim 模块及 ABI2 合同，安装后的应用用随包 DLL；不删 ABI1 支持。
-- [ ] **14.4 微基准验证**：`nim c -d:release --mm:orc --path:src --out:target/nim/component_bench benchmarks/components.nim`；同机器每模式 static=100/1000/5000，warmup=50、rounds=3、iterations=200。用相同业务验证结果，计数约束必须通过；报告 median/P95，不用时间阈值掩盖正确性失败。
-- [ ] **14.5 完整验证**：`cargo test --workspace --locked`；`cargo clippy --workspace --all-targets --locked -- -D warnings`；`cargo fmt --all --check`；`nim c -r --out:target/nim/test_runner scripts/test.nim`；任务13真实窗口矩阵；运行原生帧基准及 SDK 搬迁回归。均记录实际结果；软件 GPU、缺平台或测试工具分别列出。
-- [ ] **14.6 写验收记录**：保存 Release 原始样本、平台/编译/commit/库 hash、各分段耗时、稳定内存/峰值、兼容矩阵和未验证项。原始证据放原会话工作区 `/home/jimxl/projects/leaf/target/verification/react-runtime/<run-id>/`，执行 worktree 不删除它；摘要与可复现命令纳入本任务 review 文档。不要把历史 a00191b 的 8.074ms 当当前对照。
-- [ ] **14.7 更新用户文档与示例**：说明 State/普通变量、memo、key、离屏 State 淘汰、Snapshot 导出成本、ABI退回诊断和缓存限制；不默认改写 Router/PageGroup 生命周期。新示例须通过 headless 和真实窗口，旧示例继续运行。
+- [x] **14.2 运行**：编译运行 `tests/nim/test_component_performance.nim`，FAIL。
+- [x] **14.3 实现** 基准、原生帧计数和严格 verifier；基准模式记录总耗时以及 component/render、FFI/Rust apply、GPUI layout/frame 的分段。计时区间不启动编译器、不序列化日志，不用模拟 backend 的吞吐量替代真实帧。SDK 包含新 Nim 模块及 ABI2 合同，安装后的应用用随包 DLL；不删 ABI1 支持。
+- [x] **14.4 微基准验证**：`nim c -d:release --mm:orc --path:src --out:target/nim/component_bench benchmarks/components.nim`；同机器每模式 static=100/1000/5000，warmup=50、rounds=3、iterations=200。用相同业务验证结果，计数约束必须通过；报告 median/P95，不用时间阈值掩盖正确性失败。
+- [x] **14.5 完整验证**：`cargo test --workspace --locked`；`cargo clippy --workspace --all-targets --locked -- -D warnings`；`cargo fmt --all --check`；`nim c -r --out:target/nim/test_runner scripts/test.nim`；任务13真实窗口矩阵；运行原生帧基准及 SDK 搬迁回归。均记录实际结果；软件 GPU、缺平台或测试工具分别列出。
+- [x] **14.6 写验收记录**：保存 Release 原始样本、平台/编译/commit/库 hash、各分段耗时、稳定内存/峰值、兼容矩阵和未验证项。原始证据放原会话工作区 `/home/jimxl/projects/leaf/target/verification/react-runtime/<run-id>/`，执行 worktree 不删除它；摘要与可复现命令纳入本任务 review 文档。不要把历史 a00191b 的 8.074ms 当当前对照。
+- [x] **14.7 更新用户文档与示例**：说明 State/普通变量、memo、key、离屏 State 淘汰、Snapshot 导出成本、ABI退回诊断和缓存限制；不默认改写 Router/PageGroup 生命周期。新示例须通过 headless 和真实窗口，旧示例继续运行。
 - [ ] **14.8 提交**：message `perf: verify incremental runtime and publish migration guidance`；全分支审查后修复对应问题并重复受影响验证。未获合并推送授权时停在已提交、已审查的功能分支，报告证据与阻塞。
 
 ## 规格覆盖与完成判定

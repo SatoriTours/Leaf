@@ -26,18 +26,28 @@ use gpui_kit as gpui;
 #[cfg(feature = "native-test-support")]
 use gpui_kit::test::TestSupportExt;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     ops::Range,
     rc::Rc,
 };
 actions!(leaf_typed, [Quit]);
+#[derive(Clone)]
+struct ListAddress {
+    list: u64,
+    key: String,
+    index: usize,
+}
 struct InputSlot {
+    binding: Rc<Cell<u64>>,
+    identity: String,
+    address: Option<ListAddress>,
     state: Entity<InputState>,
     observed: String,
     model: String,
     placeholder: String,
     reset: u64,
+    pending_model: bool,
     _subscription: Subscription,
 }
 #[derive(Clone)]
@@ -52,6 +62,7 @@ struct ListSlot {
     estimate: f32,
     scroll: Scroll,
     rows: HashMap<usize, (u64, String)>,
+    by_handle: HashMap<u64, (usize, String)>,
     visible: HashSet<usize>,
     painting: HashSet<usize>,
     scheduled: bool,
@@ -67,6 +78,10 @@ impl ListSlot {
         if generation != current || generation != self.generation {
             return false;
         }
+        self.by_handle = rows
+            .iter()
+            .map(|r| (r.handle, (r.index as usize, r.key.clone())))
+            .collect();
         self.rows = rows
             .into_iter()
             .map(|r| (r.index as usize, (r.handle, r.key)))
@@ -99,6 +114,7 @@ impl ListSlot {
                 )
             },
             rows: HashMap::new(),
+            by_handle: HashMap::new(),
             visible: HashSet::new(),
             painting: HashSet::new(),
             scheduled: false,
@@ -108,6 +124,7 @@ impl ListSlot {
 }
 #[derive(Default)]
 struct BoundaryCoordinator {
+    measure: Cell<bool>,
     views: RefCell<HashMap<u64, WeakEntity<HostView>>>,
     renders: RefCell<HashMap<u64, u64>>,
 }
@@ -125,6 +142,7 @@ pub struct HostView {
     error: Option<String>,
     settling: Option<u64>,
     ready_sent: bool,
+    frame_start: Option<std::time::Instant>,
     closing: bool,
     _bounds_subscription: Option<Subscription>,
 }
@@ -144,6 +162,7 @@ impl HostView {
             error: None,
             settling: None,
             ready_sent: false,
+            frame_start: None,
             closing: false,
             _bounds_subscription: None,
         }
@@ -205,10 +224,10 @@ impl HostView {
                 })
                 .clone()
         };
-        if self.cache_enabled {
-            if let Some(style) = boundary_cache_style(props) {
-                return entity.cached(style).into_any_element();
-            }
+        if self.cache_enabled
+            && let Some(style) = boundary_cache_style(props)
+        {
+            return entity.cached(style).into_any_element();
         }
         entity.into_any_element()
     }
@@ -278,6 +297,7 @@ impl HostView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.capture_input_addresses();
         let (enabled, mask, revision) = {
             let store = self.store.borrow();
             let Some(node) = store.node(handle) else {
@@ -311,21 +331,74 @@ impl HostView {
         self.notify_dirty(cx);
         cx.notify();
     }
+    fn input_address(&self, handle: u64) -> Option<ListAddress> {
+        let store = self.store.borrow();
+        let lists = self.lists.borrow();
+        let mut current = handle;
+        while let Some(node) = store.node(current) {
+            if let Some(list) = lists.get(&node.parent) {
+                return list
+                    .by_handle
+                    .get(&current)
+                    .map(|(index, key)| ListAddress {
+                        list: node.parent,
+                        key: key.clone(),
+                        index: *index,
+                    });
+            }
+            if node.parent == 0 {
+                break;
+            }
+            current = node.parent;
+        }
+        None
+    }
+    fn capture_input_addresses(&self) {
+        for (id, slot) in self.inputs.borrow_mut().iter_mut() {
+            if let Some(address) = self.input_address(*id) {
+                slot.address = Some(address);
+            }
+        }
+    }
     fn sync_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The window owner subscribes once. Component owners can unmount while
+        // a keyed list editor survives source-generation handle replacement.
+        if self.boundary_id != 0 {
+            return;
+        }
         let nodes: Vec<HostNode> = self.store.borrow().input_nodes().cloned().collect();
         let live: HashSet<u64> = nodes.iter().map(|node| node.handle).collect();
+        self.capture_input_addresses();
         let mut inputs = self.inputs.borrow_mut();
+        let mut retired: HashMap<String, u64> = inputs
+            .iter()
+            .filter(|(id, slot)| !live.contains(id) && !slot.identity.is_empty())
+            .map(|(id, slot)| (slot.identity.clone(), *id))
+            .collect();
         for node in nodes {
+            if !inputs.contains_key(&node.handle)
+                && let Some(old) = retired.remove(&node.node_id)
+                && let Some(slot) = inputs.remove(&old)
+            {
+                slot.binding.set(node.handle);
+                inputs.insert(node.handle, slot);
+            }
             let reset = node.props.values.reset_token;
             if let Some(slot) = inputs.get_mut(&node.handle) {
+                slot.identity = node.node_id.clone();
+                if let Some(address) = self.input_address(node.handle) {
+                    slot.address = Some(address);
+                }
                 let force = slot.reset != reset;
                 let change = force
+                    || slot.pending_model
                     || slot.model != node.props.text
                     || (self.settling == Some(node.handle) && slot.observed != node.props.text);
                 if change {
                     let composing = slot.state.update(cx, |input, cx| {
                         gpui::EntityInputHandler::marked_text_range(input, window, cx).is_some()
                     });
+                    slot.pending_model = !force && composing;
                     if force || !composing {
                         slot.observed = node.props.text.clone();
                         slot.state.update(cx, |input, cx| {
@@ -349,8 +422,11 @@ impl HostView {
                     input
                 });
                 let id = node.handle;
+                let binding = Rc::new(Cell::new(id));
+                let event_binding = binding.clone();
                 let subscription =
                     cx.subscribe_in(&state, window, move |view, input, event, window, cx| {
+                        let id = event_binding.get();
                         let text = input.read(cx).value().to_string();
                         let mut inputs = view.inputs.borrow_mut();
                         let Some(slot) = inputs.get_mut(&id) else {
@@ -373,18 +449,28 @@ impl HostView {
                 inputs.insert(
                     id,
                     InputSlot {
+                        binding,
+                        identity: node.node_id.clone(),
+                        address: self.input_address(id),
                         state,
                         observed: node.props.text.clone(),
                         model: node.props.text,
                         placeholder: node.props.placeholder,
                         reset,
+                        pending_model: false,
                         _subscription: subscription,
                     },
                 );
             }
         }
         inputs.retain(|id, slot| {
-            live.contains(id) || slot.state.read(cx).focus_handle(cx).is_focused(window)
+            if live.contains(id) {
+                return true;
+            }
+            if slot.state.read(cx).focus_handle(cx).is_focused(window) {
+                window.blur(cx);
+            }
+            false
         });
         let live_lists: HashSet<u64> = self.store.borrow().list_nodes().map(|n| n.handle).collect();
         self.lists
@@ -398,29 +484,12 @@ impl HostView {
         cx: &Context<Self>,
     ) -> Vec<(usize, String)> {
         let mut keys = Vec::new();
-        let store = self.store.borrow();
-        let slots = self.lists.borrow();
-        let Some(list) = slots.get(&list_id) else {
-            return keys;
-        };
-        for (id, slot) in self.inputs.borrow().iter() {
-            if !slot.state.read(cx).focus_handle(cx).is_focused(window) {
-                continue;
-            }
-            let mut current = *id;
-            while let Some(node) = store.node(current) {
-                if node.parent == list_id {
-                    if let Some((index, (_, key))) =
-                        list.rows.iter().find(|(_, (handle, _))| *handle == current)
-                    {
-                        keys.push((*index, key.clone()));
-                    }
-                    break;
-                }
-                if node.parent == 0 {
-                    break;
-                }
-                current = node.parent;
+        for slot in self.inputs.borrow().values() {
+            if slot.state.read(cx).focus_handle(cx).is_focused(window)
+                && let Some(address) = &slot.address
+                && address.list == list_id
+            {
+                keys.push((address.index, address.key.clone()));
             }
         }
         keys
@@ -586,10 +655,10 @@ impl HostView {
                     ptr: key.as_ptr(),
                     len: key.len() as u64,
                 };
-                if let Ok(reply) = self.bridge.request(&request) {
-                    if reply.bounds[0] >= 0.0 {
-                        top.item_ix = reply.bounds[0] as usize;
-                    }
+                if let Ok(reply) = self.bridge.request(&request)
+                    && reply.bounds[0] >= 0.0
+                {
+                    top.item_ix = reply.bounds[0] as usize;
                 }
             }
             top.item_ix = top.item_ix.min((p.list_count as usize).saturating_sub(1));
@@ -809,12 +878,26 @@ impl HostView {
                 );
                 cx.notify();
                 if frames {
-                    view.sample_rendering(window, LEAF_REQUEST_FRAME);
+                    view.coordinator.measure.set(true);
+                    schedule_frame(cx.entity().downgrade(), window);
                 }
             });
         });
     }
 }
+impl Drop for HostView {
+    fn drop(&mut self) {
+        self.coordinator
+            .views
+            .borrow_mut()
+            .remove(&self.boundary_id);
+        self.coordinator
+            .renders
+            .borrow_mut()
+            .remove(&self.boundary_id);
+    }
+}
+
 impl Render for HostView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.closing {
@@ -824,12 +907,14 @@ impl Render for HostView {
             .views
             .borrow_mut()
             .insert(self.boundary_id, cx.entity().downgrade());
-        *self
-            .coordinator
-            .renders
-            .borrow_mut()
-            .entry(self.boundary_id)
-            .or_default() += 1;
+        if cfg!(test) || self.coordinator.measure.get() {
+            *self
+                .coordinator
+                .renders
+                .borrow_mut()
+                .entry(self.boundary_id)
+                .or_default() += 1;
+        }
         self.notify_dirty(cx);
         self.boundaries
             .borrow_mut()
@@ -962,6 +1047,54 @@ pub fn run(store: Rc<RefCell<HostStore>>, bridge: TypedBridge, frames: bool) -> 
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+fn schedule_frame(weak: WeakEntity<HostView>, window: &Window) {
+    window.on_next_frame(move |window, cx| {
+        // An explicit draw measures GPUI layout+paint together; presentation
+        // and scheduling remain included only in event-to-frame elapsed time.
+        let draw_start = std::time::Instant::now();
+        window.draw(cx).clear(cx);
+        let draw_ms = draw_start.elapsed().as_secs_f64() * 1000.0;
+        let _ = weak.update(cx, |view, cx| {
+            let elapsed_ms = view
+                .frame_start
+                .take()
+                .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
+            let (rust_prepare_ms, rust_apply_ms) = view.bridge.take_timings();
+            let host_renders = view.coordinator.renders.borrow().values().sum();
+            view.coordinator.renders.borrow_mut().clear();
+            let sample = LeafFrameSample {
+                elapsed_ms,
+                draw_ms,
+                rust_prepare_ms,
+                rust_apply_ms,
+                host_renders,
+            };
+            let mut request = view.bridge.command(LEAF_REQUEST_FRAME);
+            request.scale = window.scale_factor() as f64;
+            request.width = f32::from(window.viewport_size().width) as f64;
+            request.height = f32::from(window.viewport_size().height) as f64;
+            request.value = LeafBytes {
+                ptr: (&sample as *const LeafFrameSample).cast(),
+                len: size_of::<LeafFrameSample>() as u64,
+            };
+            let start = std::time::Instant::now();
+            match view.bridge.request(&request) {
+                Ok(reply) if reply.flags & 1 == 0 => {
+                    view.frame_start = Some(start);
+                    view.notify_dirty(cx);
+                    cx.notify();
+                    schedule_frame(weak.clone(), window);
+                }
+                Ok(_) => cx.quit(),
+                Err(error) => {
+                    eprintln!("leaf GPUI frame: {error}");
+                    cx.quit();
+                }
+            }
+        });
+    });
 }
 
 #[cfg(test)]

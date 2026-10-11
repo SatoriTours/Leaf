@@ -6,6 +6,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+/* Optional FRAME value payload, only when config flag 1 requests frame callbacks. */
+typedef struct LeafFrameSample { double elapsed_ms, draw_ms, rust_prepare_ms, rust_apply_ms; uint64_t host_renders; } LeafFrameSample;
 #define LEAF_V2_ABI UINT64_C(2)
 #define LEAF_V2_MAX_WIRE_BYTES UINT64_C(67108864)
 #define LEAF_V2_MAX_OPS UINT64_C(40064)

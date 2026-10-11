@@ -197,3 +197,57 @@ proc rssFailures*(samples: JsonNode, limitMiB: float64,
       "post-GC RSS unavailable")
     if (current - initial) / 1024 > limitMiB:
       result.add(required(record, "scenario").getStr & " retained RSS exceeds " & $limitMiB & "MiB budget")
+
+proc verifyComponentReport*(report:JsonNode):seq[string]=
+  ## A distinct report contract. Never turn absent counters into successful zeroes.
+  try:
+    if required(report,"schema").getStr!="leaf-components-1":reject("unsupported component schema")
+    let meta=required(report,"metadata")
+    for key in ["mode","commit","hardware","compiler","platform","scope","allocation_unit"]:
+      let value=required(meta,key)
+      if value.kind!=JString or value.getStr.len==0:reject("missing component metadata: " & key)
+    let mode=meta["mode"].getStr
+    if mode notin ["legacy-json","legacy-typed","managed-typed"]:reject("unknown component mode")
+    if integer(meta,"abi") notin [1,2]:reject("invalid component ABI")
+    if required(meta,"cache").kind!=JBool:reject("invalid cache metadata")
+    if meta["scope"].getStr!="runtime-and-encoding" or meta["allocation_unit"].getStr!="count":reject("invalid microbenchmark scope or allocation unit")
+    let cases=required(report,"cases")
+    if cases.kind!=JArray or cases.len!=3:reject("require static sizes 100/1000/5000")
+    var sizes:HashSet[int]
+    var baseAlloc=0.0
+    var maxima:seq[float64]
+    for c in cases:
+      let size=integer(c,"static")
+      if size notin [100,1000,5000] or size in sizes:reject("duplicate or unsupported static size")
+      sizes.incl(size)
+      let iterations=integer(c,"iterations")
+      let rounds=integer(c,"rounds")
+      if iterations<=0 or iterations>10000 or rounds<=0 or rounds>100 or integer(c,"warmup")<1:reject("invalid component parameters")
+      let checks=required(c,"checks_passed")
+      if checks.kind!=JBool or not checks.getBool:reject("component correctness failed")
+      let samples=required(c,"samples")
+      if samples.kind!=JArray or samples.len!=iterations*rounds:reject("missing component samples")
+      var allocationSum=0.0
+      var maximum=0.0
+      for sample in samples:
+        let total=number(required(sample,"latency_ms"),"latency_ms")
+        let compute=number(required(sample,"compute_ms"),"compute_ms")
+        let encoding=number(required(sample,"encoding_ms"),"encoding_ms")
+        if compute+encoding>total*1.05+0.001:reject("component segments exceed total")
+        let allocation=integer(sample,"allocations")
+        if allocation<0:reject("negative allocation count")
+        allocationSum+=float64(allocation);maximum=max(maximum,float64(allocation))
+        let counters=required(sample,"counters")
+        for name in ["componentRenders","visitedHosts","normalizedHosts","indexEdits","ops","ffiBytes","snapshotExports"]:
+          if integer(counters,name)<0:reject("negative component counter: " & name)
+        if mode=="managed-typed":
+          if integer(counters,"componentRenders")!=1:reject("local update rendered extra components")
+          if integer(counters,"snapshotExports")!=0:reject("local update exported full Snapshot")
+          if integer(counters,"visitedHosts")>8 or integer(counters,"normalizedHosts")>4 or integer(counters,"indexEdits")>8:reject("local host work exceeds affected path")
+          if integer(counters,"ops")!=1 or integer(counters,"ffiBytes")<=0 or integer(counters,"ffiBytes")>4096:reject("local wire batch is not bounded")
+      if size==100:baseAlloc=allocationSum/float64(samples.len)
+      maxima.add(maximum)
+    if mode=="managed-typed":
+      for value in maxima:
+        if value>baseAlloc*2+128:reject("local allocations grow with static tree")
+  except CatchableError as error:result.add(error.msg)

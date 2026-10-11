@@ -36,6 +36,7 @@ pub struct HostReply {
 #[derive(Clone)]
 pub struct TypedBridge {
     callbacks: LeafHostCallbacks,
+    timings: Rc<RefCell<BridgeTimings>>,
     context: *mut c_void,
     active: Rc<Cell<bool>>,
     session: u64,
@@ -64,6 +65,13 @@ unsafe fn text(bytes: LeafBytes) -> Result<String, BridgeError> {
         .map_err(|_| error(1, 0, "invalid reply UTF-8"))
 }
 impl TypedBridge {
+    pub fn take_timings(&self) -> (f64, f64) {
+        let mut t = self.timings.borrow_mut();
+        let value = (t.prepare_ms, t.apply_ms);
+        t.prepare_ms = 0.0;
+        t.apply_ms = 0.0;
+        value
+    }
     pub fn session(&self) -> u64 {
         self.session
     }
@@ -159,7 +167,14 @@ impl TypedBridge {
         }
     }
 }
+#[derive(Default)]
+pub struct BridgeTimings {
+    pub enabled: bool,
+    pub prepare_ms: f64,
+    pub apply_ms: f64,
+}
 struct RendererContext {
+    timings: Rc<RefCell<BridgeTimings>>,
     store: Rc<RefCell<HostStore>>,
     closed: Cell<bool>,
 }
@@ -188,9 +203,15 @@ unsafe extern "C" fn prepare(
             return Err(AbiError("renderer detached".into()));
         }
         let batch = unsafe { batch.as_ref() }.ok_or_else(|| AbiError("null host batch".into()))?;
-        ctx.store
+        let start = ctx.timings.borrow().enabled.then(std::time::Instant::now);
+        let result = ctx
+            .store
             .borrow_mut()
-            .prepare(&unsafe { decode_batch(batch) }?)
+            .prepare(&unsafe { decode_batch(batch) }?);
+        if let Some(start) = start {
+            ctx.timings.borrow_mut().prepare_ms += start.elapsed().as_secs_f64() * 1000.0;
+        }
+        result
     })
 }
 unsafe extern "C" fn apply(ctx: *mut c_void, error: *mut LeafError) -> i32 {
@@ -200,15 +221,20 @@ unsafe extern "C" fn apply(ctx: *mut c_void, error: *mut LeafError) -> i32 {
         if ctx.closed.get() {
             return Err(AbiError("renderer detached".into()));
         }
-        ctx.store.borrow_mut().apply()
+        let start = ctx.timings.borrow().enabled.then(std::time::Instant::now);
+        let result = ctx.store.borrow_mut().apply();
+        if let Some(start) = start {
+            ctx.timings.borrow_mut().apply_ms += start.elapsed().as_secs_f64() * 1000.0;
+        }
+        result
     })
 }
 unsafe extern "C" fn accept(ctx: *mut c_void, revision: u64) {
     // No business/GPUI work or buffer allocation at publication.
-    if let Some(ctx) = unsafe { (ctx as *mut RendererContext).as_ref() } {
-        if !ctx.closed.get() {
-            let _ = ctx.store.borrow_mut().accept(revision);
-        }
+    if let Some(ctx) = unsafe { (ctx as *mut RendererContext).as_ref() }
+        && !ctx.closed.get()
+    {
+        let _ = ctx.store.borrow_mut().accept(revision);
     }
 }
 unsafe extern "C" fn discard(ctx: *mut c_void) {
@@ -241,13 +267,19 @@ impl AttachedHost {
             return Err(error(1, 0, "invalid typed run configuration"));
         }
         unsafe { text(config.title) }?;
+        let timings = Rc::new(RefCell::new(BridgeTimings {
+            enabled: config.flags & 1 != 0,
+            ..Default::default()
+        }));
         let renderer = Box::new(RendererContext {
+            timings: timings.clone(),
             store: Rc::new(RefCell::new(HostStore::new(config.session_id))),
             closed: Cell::new(false),
         });
         let host = Self {
             renderer,
             bridge: TypedBridge {
+                timings,
                 callbacks: *callbacks,
                 context,
                 active: Rc::new(Cell::new(true)),

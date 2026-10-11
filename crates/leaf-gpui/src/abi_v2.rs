@@ -256,8 +256,28 @@ pub struct LeafGpuiApiV2 {
     pub run: LeafRunFn,
 }
 
+/// Optional FRAME value payload. Existing request/reply table layouts stay fixed.
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct LeafFrameSample {
+    pub elapsed_ms: f64,
+    pub draw_ms: f64,
+    pub rust_prepare_ms: f64,
+    pub rust_apply_ms: f64,
+    pub host_renders: u64,
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn optional_frame_payload_layout() {
+        assert_eq!(size_of::<super::LeafFrameSample>(), 40);
+        assert_eq!(align_of::<super::LeafFrameSample>(), 8);
+        assert_eq!(
+            std::mem::offset_of!(super::LeafFrameSample, host_renders),
+            32
+        );
+    }
     use super::*;
     fn empty_batch() -> LeafBatch {
         LeafBatch {

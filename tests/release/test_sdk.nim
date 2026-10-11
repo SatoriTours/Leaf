@@ -174,7 +174,7 @@ suite "SDK archive and native installer":
       let archive = f.package()
       let unpacked = f.base / "unpacked"
       extractTar(archive, unpacked)
-      for item in ["src/leaf.nim", "src/leaf/templates/scaffold/main.nim", "LICENSE",
+      for item in ["include/leaf_gpui_v2.h", "src/leaf/components.nim", "src/leaf/managed_runtime.nim", "src/leaf.nim", "src/leaf/templates/scaffold/main.nim", "LICENSE",
                    "toolchain/nim/lib/system.nim", "src/leaf/vendor/orm/lock.json",
                    "src/leaf/orm_config.nim", "src/leaf/orm_config.nims",
                    "src/leaf/migrations.nim", "src/leaf/migrations/catalog.nim",

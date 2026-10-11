@@ -320,14 +320,13 @@ impl HostStore {
         for id in &relations {
             stats.visited_nodes += 1;
             if let Some(node) = lookup(&self.nodes, &nodes, *id) {
-                if let Some(old) = self.nodes.get(id) {
-                    if old.parent != node.parent
-                        && old.parent != 0
-                        && !orders.contains_key(&old.parent)
-                        && !deletes.contains(&old.parent)
-                    {
-                        return Err(bad("old parent order missing for reparented host"));
-                    }
+                if let Some(old) = self.nodes.get(id)
+                    && old.parent != node.parent
+                    && old.parent != 0
+                    && !orders.contains_key(&old.parent)
+                    && !deletes.contains(&old.parent)
+                {
+                    return Err(bad("old parent order missing for reparented host"));
                 }
                 if node.parent != 0 {
                     let _parent = lookup(&self.nodes, &nodes, node.parent)
@@ -471,13 +470,12 @@ impl HostStore {
         }
         if !deletes.is_empty() || boundaries.values().any(Option::is_none) {
             for (id, boundary) in &self.boundaries {
-                if let Some(final_boundary) = boundary_lookup(id) {
-                    if lookup(&self.nodes, &nodes, final_boundary.root_handle).is_none()
+                if let Some(final_boundary) = boundary_lookup(id)
+                    && (lookup(&self.nodes, &nodes, final_boundary.root_handle).is_none()
                         || (final_boundary.parent != 0
-                            && boundary_lookup(&final_boundary.parent).is_none())
-                    {
-                        return Err(bad("dangling accepted boundary"));
-                    }
+                            && boundary_lookup(&final_boundary.parent).is_none()))
+                {
+                    return Err(bad("dangling accepted boundary"));
                 }
                 let _ = boundary;
             }
@@ -526,21 +524,21 @@ impl HostStore {
         }
         for (id, new) in &boundaries {
             dirty_reasons.insert(*id, DirtyReason::GlobalRefresh);
-            if let (Some(old), Some(new)) = (self.boundaries.get(id), new) {
-                if old.root_handle == new.root_handle {
-                    // Explicit refresh of a retained root invalidates descendants.
-                    for child in self.boundaries.keys() {
-                        let mut ancestor = *child;
-                        for _ in 0..LEAF_V2_MAX_DEPTH {
-                            if ancestor == *id {
-                                dirty.insert(*child);
-                                dirty_reasons.insert(*child, DirtyReason::GlobalRefresh);
-                                break;
-                            }
-                            ancestor = boundary_lookup(&ancestor).map_or(0, |b| b.parent);
-                            if ancestor == 0 {
-                                break;
-                            }
+            if let (Some(old), Some(new)) = (self.boundaries.get(id), new)
+                && old.root_handle == new.root_handle
+            {
+                // Explicit refresh of a retained root invalidates descendants.
+                for child in self.boundaries.keys() {
+                    let mut ancestor = *child;
+                    for _ in 0..LEAF_V2_MAX_DEPTH {
+                        if ancestor == *id {
+                            dirty.insert(*child);
+                            dirty_reasons.insert(*child, DirtyReason::GlobalRefresh);
+                            break;
+                        }
+                        ancestor = boundary_lookup(&ancestor).map_or(0, |b| b.parent);
+                        if ancestor == 0 {
+                            break;
                         }
                     }
                 }

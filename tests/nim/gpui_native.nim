@@ -10,7 +10,7 @@ proc command(exe:string,args:seq[string],root:string):string =
   while not process.poll():
     if getMonoTime()>deadline:raise newException(IOError,"test command timeout")
     sleep(10)
-  require(process.code==0,process.output)
+  require(process.code==0,exe & " " & args.join(" ") & " failed (" & $process.code & "): " & process.output)
   process.output.strip()
 proc main():int =
   when not defined(linux):
@@ -29,20 +29,22 @@ proc main():int =
   env["LEAF_TEST_GEOMETRY"]=directory/"geometry.json"
   env["LEAF_WATCH_READY"]=directory/"ready.json"
   env["LEAF_WATCH_TOKEN"]="native-smoke"
-  block:
-    env["LEAF_TEST_FAIL_LIST"]="1"
-    let failedLog=directory/"failed-events.jsonl"
-    let failed=startManaged(binary,@["--log-file",failedLog],root,env)
-    defer:failed.close()
-    let deadline=getMonoTime()+initDuration(seconds=20)
-    while not failed.poll():
+  let example=getEnv("LEAF_TEST_EXAMPLE")=="1"
+  if not example:
+    block:
+      env["LEAF_TEST_FAIL_LIST"]="1"
+      let failedLog=directory/"failed-events.jsonl"
+      let failed=startManaged(binary,@["--log-file",failedLog],root,env)
+      defer:failed.close()
+      let deadline=getMonoTime()+initDuration(seconds=20)
+      while not failed.poll():
+        require(not fileExists(directory/"ready.json"),"failed viewport published readiness")
+        require(getMonoTime()<deadline,"failed initial viewport did not stop watch candidate")
+        sleep(20)
       require(not fileExists(directory/"ready.json"),"failed viewport published readiness")
-      require(getMonoTime()<deadline,"failed initial viewport did not stop watch candidate")
-      sleep(20)
-    require(not fileExists(directory/"ready.json"),"failed viewport published readiness")
-    require(fileExists(failedLog) and "initial row failed" in readFile(failedLog),
-      "failed candidate did not exercise Nim list callback: " & failed.output)
-    env.del("LEAF_TEST_FAIL_LIST")
+      require(fileExists(failedLog) and "initial row failed" in readFile(failedLog),
+        "failed candidate did not exercise Nim list callback: " & failed.output)
+      env.del("LEAF_TEST_FAIL_LIST")
   let dump=directory/"tree.json"
   let child=startManaged(binary,@["--dump-tree",dump,"--log-file",directory/"events.jsonl"],root,env)
   defer:child.close()
@@ -51,7 +53,7 @@ proc main():int =
     require(not child.poll(),"GPUI window exited before readiness: " & child.output)
     require(getMonoTime()<deadline,"GPUI window readiness timeout")
     sleep(20)
-  let window=command(xdotool,@["search","--name","^Leaf GPUI native smoke$"],root).splitLines()[0]
+  let window=command(xdotool,@["search","--name",(if example:"^Leaf" else:"^Leaf GPUI native smoke$")],root).splitLines()[0]
   discard command(xdotool,@["windowfocus",window],root)
   proc clickTarget(key:string) =
     let deadline=getMonoTime()+initDuration(seconds=5)
@@ -69,7 +71,7 @@ proc main():int =
       sleep(20)
   clickTarget("add")
   proc status():string =
-    try:return parseFile(dump)["root"]["children"][2]["text"].getStr
+    try:return parseFile(dump)["root"]["children"][(if example:1 else:2)]["text"].getStr
     except CatchableError:return ""
   proc awaitStatus(expected:string) =
     let deadline=getMonoTime()+initDuration(seconds=5)
@@ -77,36 +79,42 @@ proc main():int =
       require(getMonoTime()<deadline,"expected " & expected & "; got " & status())
       require(not child.poll(),"GPUI test application exited")
       sleep(20)
-  awaitStatus("1:中文输入:0")
-  clickTarget("entry")
-  discard command(xdotool,@["key","ctrl+a"],root)
-  discard command(xdotool,@["type","--clearmodifiers","--delay","1","nim gpui"],root)
-  awaitStatus("1:nim gpui:0")
-  discard command(xdotool,@["key","Return"],root)
-  awaitStatus("1:nim gpui:1")
-  # A rejected update restores the accepted input; reset replaces its buffer.
-  clickTarget("reject")
-  sleep(100)
-  awaitStatus("1:nim gpui:1")
-  clickTarget("reset")
-  awaitStatus("1:中文输入:1")
-  # Select only the final character. This catches selection loss on model sync.
-  clickTarget("entry")
-  discard command(xdotool,@["key","End","shift+Left"],root)
-  discard command(xdotool,@["type","--clearmodifiers","X"],root)
-  awaitStatus("1:中文输X:1")
-  discard command(xdotool,@["windowsize",window,"800","600"],root)
-  discard command(xdotool,@["windowunmap",window],root)
-  discard command(xdotool,@["windowmap",window,"windowfocus",window],root)
-  clickTarget("add")
-  awaitStatus("2:中文输X:1")
+  if example:
+    awaitStatus("1")
+    clickTarget("reset")
+    awaitStatus("0")
+  else:
+    awaitStatus("1:中文输入:0")
+    clickTarget("entry")
+    discard command(xdotool,@["key","ctrl+a"],root)
+    discard command(xdotool,@["type","--clearmodifiers","--delay","1","nim gpui"],root)
+    awaitStatus("1:nim gpui:0")
+    discard command(xdotool,@["key","Return"],root)
+    awaitStatus("1:nim gpui:1")
+    # A rejected update restores the accepted input; reset replaces its buffer.
+    clickTarget("reject")
+    sleep(100)
+    awaitStatus("1:nim gpui:1")
+    clickTarget("reset")
+    awaitStatus("1:中文输入:1")
+    # Select only the final character. This catches selection loss on model sync.
+    clickTarget("entry")
+    discard command(xdotool,@["key","End","shift+Left"],root)
+    discard command(xdotool,@["type","--clearmodifiers","X"],root)
+    awaitStatus("1:中文输X:1")
+    discard command(xdotool,@["windowsize",window,"800","600"],root)
+    discard command(xdotool,@["windowunmap",window],root)
+    discard command(xdotool,@["windowmap",window,"windowfocus",window],root)
+    clickTarget("add")
+    awaitStatus("2:中文输X:1")
   discard command(xdotool,@["key","ctrl+q"],root)
   let closing=getMonoTime()+initDuration(seconds=5)
   while not child.poll():
     require(getMonoTime()<closing,"GPUI close timeout")
     sleep(20)
   require(child.code==0,"GPUI close failed: " & child.output)
-  echo "Passed real Nim + GPUI + GPUI Kit window, click, input, Enter, ready, failed viewport and close"
+  if example:echo "Passed real component example window, increment, reset, ready and close"
+  else:echo "Passed real Nim + GPUI + GPUI Kit window, click, input, Enter, ready, failed viewport and close"
 when isMainModule:
   try:quit(main())
   except CatchableError as error:stderr.writeLine(error.msg);quit(1)

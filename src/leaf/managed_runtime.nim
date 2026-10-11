@@ -30,9 +30,9 @@ type
     root,nextId:uint64
     instances:Table[uint64,Instance]
     index:Table[string,uint64]
-    keys:Table[string,seq[uint64]]
+    keys:Table[string,HashSet[uint64]]
     invalid:HashSet[uint64]
-    count,bytes:int
+    count,componentCount,bytes:int
     policy:HostStylePolicy
     totals:UpdateStats
     snapshot:Snapshot
@@ -47,7 +47,7 @@ type
     computed,dirty:HashSet[uint64]
     created:seq[uint64]
     root:uint64
-    count,bytes:int
+    count,componentCount,bytes:int
     measurements:UpdateStats
     globalRefresh:bool
 var nextManagedId:uint64
@@ -85,6 +85,7 @@ proc erase(d:ManagedDriver,id:uint64)=
   for child in children:d.erase(child)
   d.edits[id]=nil
   dec d.count;d.bytes-=old.bytes
+  if old.description.kind==DescriptionKind.component:dec d.componentCount
   if old.description.kind==DescriptionKind.host:
     if old.handle!=NoHandle:d.changes.removals.add(old.handle)
   elif old.active:d.changes.boundaries.add(HostBoundary(id:id))
@@ -107,12 +108,14 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
   let oldRoot=if old==nil:NoHandle else:d.hostRoot(old.id)
   let id=if old==nil:d.allocate() else:old.id
   let item=Instance(id:id,parent:parent,owner:owner,depth:depth,path:path,description:desc,parentHost:parentHost,active:true,rowIndex: -1)
-  if old==nil:inc d.count
+  if old==nil:
+    inc d.count
+    if desc.kind==DescriptionKind.component:inc d.componentCount
   else:
     d.bytes-=old.bytes
     item.rowIndex=old.rowIndex
   item.bytes=descriptionBytes(desc,path);d.bytes+=item.bytes
-  if d.count>MaxNodes or d.bytes>MaxTreeBytes:fail("managed description exceeds node/instance/byte budget")
+  if d.count-d.componentCount>MaxNodes or d.componentCount>MaxNodes or d.bytes>MaxTreeBytes:fail("managed description exceeds node/instance/byte budget")
   d.edits[id]=item
   if desc.kind==DescriptionKind.component:
     if old!=nil:item.model=old.model
@@ -282,7 +285,7 @@ method stage*(base:ManagedDriver,forceRoot:bool):RuntimeDriver=
   data.forceRoot=false
   let queued=data.states.pendingOwners()
   if not forceRoot and queued.len==0 and data.invalid.len==0:return nil
-  let d=ManagedDriver(data:data,count:data.count,bytes:data.bytes,root:data.root,globalRefresh:forceRoot)
+  let d=ManagedDriver(data:data,count:data.count,componentCount:data.componentCount,bytes:data.bytes,root:data.root,globalRefresh:forceRoot)
   try:
     d.attempt=data.states.beginAttempt()
     d.dirty=data.invalid
@@ -318,7 +321,7 @@ method stageViewport*(base:ManagedDriver,key:string,first,finish:int,protected:s
     let staged=base.stage(false)
     if staged!=nil:d=ManagedDriver(staged)
     else:
-      d=ManagedDriver(data:base.data,count:base.data.count,bytes:base.data.bytes,root:base.data.root)
+      d=ManagedDriver(data:base.data,count:base.data.count,componentCount:base.data.componentCount,bytes:base.data.bytes,root:base.data.root)
       d.attempt=d.data.states.beginAttempt()
   try:
     var target:Instance
@@ -327,9 +330,8 @@ method stageViewport*(base:ManagedDriver,key:string,first,finish:int,protected:s
     if target==nil:
       var id=d.data.index.getOrDefault(key)
       if id==0:
-        let ids=d.data.keys.getOrDefault(key)
-        if ids.len!=1:fail("unknown or ambiguous list")
-        id=ids[0]
+        if not d.data.keys.hasKey(key) or d.data.keys[key].len!=1:fail("unknown or ambiguous list")
+        for found in d.data.keys[key]:id=found
       target=d.current(id)
     if target==nil or target.description.hostNode.kind!=NodeKind.virtualList:fail("not a virtual list")
     target=target.copyInstance()
@@ -344,11 +346,9 @@ proc removeIndex(data:ManagedStore,item:Instance) {.raises:[].}=
   data.index.del(item.path)
   let key=item.description.key
   if key.len>0:
-    var ids=data.keys.getOrDefault(key)
-    for i in countdown(ids.high,0):
-      if ids[i]==item.id:ids.delete(i)
-    if ids.len==0:data.keys.del(key)
-    else:data.keys[key]=ids
+    if data.keys.hasKey(key):
+      data.keys.mgetOrPut(key,default(HashSet[uint64])).excl(item.id)
+      if data.keys.mgetOrPut(key,default(HashSet[uint64])).len==0:data.keys.del(key)
 method publish*(d:ManagedDriver) {.raises:[].}=
   if d.candidate==nil:return
   let data=d.data
@@ -362,10 +362,10 @@ method publish*(d:ManagedDriver) {.raises:[].}=
     if item!=nil and item.active and item.description.kind==DescriptionKind.host:
       data.index[item.path]=id
       let key=item.description.key
-      if key.len>0:data.keys.mgetOrPut(key,@[]).add(id)
+      if key.len>0:data.keys.mgetOrPut(key,default(HashSet[uint64])).incl(id)
   data.reconciler.publish(d.candidate)
   data.states.publishAttempt(d.attempt)
-  data.root=d.root;data.count=d.count;data.bytes=d.bytes
+  data.root=d.root;data.count=d.count;data.componentCount=d.componentCount;data.bytes=d.bytes
   data.snapshotValid=d.exported.isSome
   if d.exported.isSome:data.snapshot=d.exported.get
   let h=d.candidate.stats
@@ -385,10 +385,9 @@ method reject*(d:ManagedDriver) {.raises:[].}=
 proc lookup(data:ManagedStore,key:string):Instance=
   var id=data.index.getOrDefault(key)
   if id==0:
-    let ids=data.keys.getOrDefault(key)
-    if ids.len==0:fail("node key not found: " & key)
-    if ids.len!=1:fail("ambiguous key: " & key & "; use full node ID")
-    id=ids[0]
+    if not data.keys.hasKey(key):fail("node key not found: " & key)
+    if data.keys[key].len!=1:fail("ambiguous key: " & key & "; use full node ID")
+    for found in data.keys[key]:id=found
   data.instances.getOrDefault(id)
 proc exportNode(d:ManagedDriver,id:uint64,rowIndex= -1):MountedNode=
   let item=d.current(id)
@@ -438,7 +437,7 @@ proc componentApplication*(root:UiDescription,title:string,width=640,height=480,
     let data=ManagedStore(owner:owner,states:newStateStore(nextManagedId),
       reconciler:newHostReconciler(nextManagedId),rootDescription:root,nextId:1,
       instances:initTable[uint64,Instance](MaxNodes*4),index:initTable[string,uint64](MaxNodes*4),
-      keys:initTable[string,seq[uint64]](MaxNodes*4))
+      keys:initTable[string,HashSet[uint64]](MaxNodes*4))
     ManagedDriver(data:data),executionScope)
 proc managed*(runtime:Runtime):bool=runtime.runtimeDriver of ManagedDriver
 proc managedReconciler*(runtime:Runtime):HostReconciler=
@@ -474,3 +473,6 @@ proc listStats*(runtime:Runtime,key:string):tuple[activeRows,warmRows,instances,
         let node=instance.description.hostNode
         for kind in EventKind:
           if node.handler(kind)!=nil:inc result.eventBindings
+
+proc recordFfiBytes*(runtime:Runtime,bytes:uint64) {.raises:[].}=
+  if runtime.managed:ManagedDriver(runtime.runtimeDriver).data.totals.ffiBytes+=bytes

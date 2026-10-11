@@ -93,3 +93,13 @@ Task3-W 当前仅获授权的 elevated DEVELOPMENT 执行证据：真实 Session
 `targets.nim` 统一 backend/target/纯 headless 决策，命令行优先于 leaf.json，未配置默认 GPUI。`runner.nim` 在编译期选择 GPUI、Win32 或纯 headless；`build.nim` 在 native/headless 路径跳过 GPUI 构建和 staging，Windows EXE 仍嵌入 v6/PMv2 manifest。native doctor 不探测 Cargo/GPUI，native pack 在发布实现前明确拒绝。
 
 开发 Windows VM 已用于真实 HWND/输入/宿主/构建测试；这与普通用户、真实中日文 IME、跨不同 DPI 屏幕和辅助技术的 H 验收分别记录。[开发与验收指南](native-win32-validation.md) 给出可复现命令、范围与未关闭的 H 门。A3 列表/导航/Canvas/发布及 Android 后端仍在后续阶段。
+
+## 可选组件运行时与类型化 GPUI
+
+`leaf/components` 提供 React 风格的组件身份、State 队列和更新边界。Nim 拥有组件模型及不可变 UI 描述，提交时只计算脏组件和受影响的宿主路径。接受态是平铺实例表和索引；候选保存局部覆盖，拒绝后释放新实例，成功时替换索引记录。组件及宿主各有 10000 上限，描述深度和总字节预算仍统一检查。
+
+Rust 的 HostStore 保留已接受宿主控件、子项顺序和组件边界，用于后续增量更新及 GPUI 渲染。它保存渲染所需数据；业务回调和 State 留在 Nim。ABI2 使用固定宽度 C 结构与借用缓冲区批量传递 create/update/setChildren/remove；Rust 在同步 prepare 返回前复制需要保留的数据。普通局部更新不生成/解析 JSON，不重新传整棵树。
+
+GPUI 为组件边界持有 Entity，普通宿主叶节点直接从平铺表渲染。只有外部宽高确定的边界启用缓存；内容自动测量、百分比尺寸保守渲染。尺寸、继承样式、主题、窗口变化和全局刷新传播失效。输入 Entity 保持独立寿命，同值模型同步不修改选区或组合态，退出在安全帧先释放平台 IME handler。
+
+虚拟列表按接受的 key/generation 管理活动行和有限暖缓存，离屏行的 State 可能在淘汰后销毁。源替换及 viewport 构建失败保留之前接受的行。Snapshot 是显式兼容导出，按接受 revision 缓存；调用 Snapshot validator、ABI1 或诊断整树导出会承担完整导出的成本。Native Backend 消费类型化宿主操作，Win32 当前仍可执行全量布局，不能据局部 Nim 计数宣称 Win32 帧已完全局部化。

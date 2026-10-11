@@ -60,6 +60,7 @@ proc packageSdk*(options: PackageOptions): string =
   copyFileWithPermissions(options.cli, sdk / ("bin/leaf" & executable))
   copyFileWithPermissions(options.bridge, sdk / "lib" / library)
   copyTree(root / "src", sdk / "src")
+  copyTree(root / "include", sdk / "include")
   copyFileWithPermissions(root / "LICENSE", sdk / "LICENSE")
   copyFileWithPermissions(options.nimRoot / ("bin/nim" & executable), sdk / ("toolchain/nim/bin/nim" & executable))
   for directory in ["lib", "config"]: copyTree(options.nimRoot / directory, sdk / "toolchain/nim" / directory)

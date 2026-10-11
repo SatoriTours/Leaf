@@ -59,3 +59,13 @@ JSONL 的 `dpi` 记录包含 `awareness`、`status` 和 `error_code`。首帧 re
 更新 SDK/框架后应重新编译主 EXE，已有 EXE 不会获得新 manifest。比例仍不符合系统设置时，先查应用属性中的 Windows 高 DPI 兼容性覆盖、启动宿主的 DPI 模式，再用[原生验证步骤](verification.md)核对实际 HWND DPI 和 GPUI 比例。当前 Linux 测试不能证明 Windows 清晰度已改善。
 
 数据库命令在 `target/leaf-db` 编译独立维护入口，不导入应用 UI，也不要求 Cargo 或 GPUI。`db init` 仅安装配置；自定义入口需显式调用 `openApplicationDatabase()`，完整脚手架自动接入。命令、DSL 与多分支规则见[数据库迁移](migrations.md)。
+
+## 组件性能与发布回归
+
+组件 CPU 基准：`nim c -d:release --mm:orc -d:nimAllocStats --path:src --out:target/nim/component_bench benchmarks/components.nim`。分别运行 `--mode legacy-json|legacy-typed|managed-typed --static 100|1000|5000 --iterations 200 --warmup 50 --rounds 3 --output PATH`。计时内不输出报告。分配字段是 Nim allocator 的分配次数；RSS、堆占用与峰值另记，不能把存活堆增量当总分配字节数。
+
+`nim c -r scripts/verify_component_performance.nim MODE-100.json MODE-1000.json MODE-5000.json` 验证元数据、原始样本、业务正确性和局部计数约束；legacy 模式保留完整树成本，不套 managed 上限。CPU 工具只测 Runtime 与编码，Rust apply 和 GPUI 帧字段为空，不能据此推出帧率。
+
+`benchmarks/components_native.nim` 使用真实 GPUI 窗口。设置 `LEAF_GPUI_LIBRARY` 和 `LEAF_BENCH_MODE`，参数由 `LEAF_BENCH_STATIC/ITERATIONS/WARMUP/ROUNDS/OUTPUT` 指定。typed 模式测量 Rust prepare/apply 与显式 GPUI draw（layout+paint 合计），event-to-frame 含调度；纯 layout 无公开独立测量时保留空值。报告必须标明 Rust profile、库 hash、实际 GPU 或软件渲染，不能与 CPU 微基准混算。
+
+SDK 打包复制所有新 Nim 模块及 `include/leaf_gpui_v2.h`。实际搬迁回归应清除 `NIM/LEAF_LIBRARY/LEAF_GPUI_ROOT/LEAF_GPUI_LIBRARY` 覆盖，检查 doctor 指向随包编译器和源码，默认 GPUI build 的 staged DLL hash 与 SDK lib 相同，再运行组件应用。Linux 测试不能替代 Windows ABI、IME、DPI 和窗口验收。
