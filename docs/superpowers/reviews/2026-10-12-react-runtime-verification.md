@@ -1,8 +1,10 @@
 # Leaf 组件与增量宿主最终验证
 
-最终实现提交：`b7c52a1e75ee1d88e241414427c8f4342659e657`；功能分支 `feat/leaf-react-runtime`，基线 `96a2e035b57c8683c73957506c9a4f2a63c9141a`。功能分支保留，未合并或推送。Linux 实现与验证完成；Windows/macOS、真实系统 IME、DPI/跨屏和离屏焦点手势仍未验收。
+主体实现及下述性能/SDK 测量提交：`b7c52a1e75ee1d88e241414427c8f4342659e657`；功能分支 `feat/leaf-react-runtime`，基线 `96a2e035b57c8683c73957506c9a4f2a63c9141a`。功能分支保留，未合并或推送。Linux 实现与验证完成；Windows/macOS、真实系统 IME、DPI/跨屏和离屏焦点手势仍未验收。
 
 审查后的独立证据目录：`/home/jimxl/projects/leaf/target/verification/react-runtime/2026-10-12-reviewed`。原审查报告和审查前样本保留在 `../2026-10-12-final/`；其结论对应修复前代码，不改写为复审通过。本轮按执行约定做一次集中修复与验证，没有第二位审查者。
+
+后续 M2 诊断兼容已补全，见[专项修复与本次回归](2026-10-12-rendering-diagnostics-verification.md)。下方原始测量和封存证据保留其来源版本。
 
 ## 审查问题与修复
 
@@ -64,7 +66,7 @@ managed 每次组件 render、宿主访问/归一化/索引编辑、操作数均
 
 ## 保留的 Minor 与平台门
 
-- M2：类型化 RENDERING 尚未恢复旧 DPI 诊断日志；尺寸请求仍有效，日志兼容后续处理。
+- M2：已在后续专项修复中恢复类型化 RENDERING 日志、去重和诊断错误隔离，见上方专项记录；原测量版本保持不变。
 - M3：审查前 artifact 表中 progress.md 副本 hash 过期；原表和原样本保留并注明。本次单独封存最终证据，索引只引用不再修改的副本。
 - Windows/macOS、真实系统 IME、DPI/跨屏、离屏焦点手势 NotRun。Windows runner 在 Linux 的返回 2 不计通过；计划 13.4 保持未勾选，不签全平台验收。
 
