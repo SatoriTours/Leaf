@@ -54,7 +54,7 @@ nim c --path:src --out:target\dpi-direct.exe tests\nim\windows_dpi_app.nim
 .\target\dpi-direct.exe --trace --log-file .\dpi-direct.jsonl
 ```
 
-JSONL 的 `dpi` 记录包含 `awareness`、`status` 和 `error_code`。首帧 ready 的 `rendering` 记录包含 GPUI 当前窗口实测 `scale_factor` 和 `logical_size`；`device_size_calculated`、`dpi_from_scale_calculated` 为换算值，不是 Win32 DPI 或交换链实测。成功 ready 严格协商 `capabilities.rendering_diagnostics=true` 后，窗口 bounds 变化才继续记录当前比例/尺寸，并去重；不会再次 ready 或改写 watch receipt。旧 Nim 宿主未宣告能力时，新 DLL 禁发新 op，ABI 仍为 1。新 Nim 接受旧 DLL 的无 metadata ready；完整诊断需要重新编译框架/DLL 和应用。
+JSONL 的 `dpi` 记录包含 `awareness`、`status` 和 `error_code`。首帧的 `rendering` 记录包含 GPUI 当前窗口实测 `scale_factor` 和 `logical_size`；`device_size_calculated`、`dpi_from_scale_calculated` 为换算值，不是 Win32 DPI 或交换链实测。ABI1 在成功 ready 严格协商 `capabilities.rendering_diagnostics=true` 后，才在窗口 bounds 变化时继续记录并去重；旧 Nim 宿主未宣告能力时，新 DLL 禁发新 op，新 Nim 仍接受旧 DLL 的无 metadata ready。ABI2 使用类型化 `RENDERING` 请求，在 Nim 侧按比例和逻辑尺寸去重，`FRAME` 采样不重复写尺寸日志；非法尺寸或换算溢出只拒绝该诊断请求，不影响后续 ready。两条路径都不会因尺寸诊断再次 ready 或改写 watch receipt。JSONL 仅为可选日志，不用于 UI 树传输；完整诊断需要重新编译框架/DLL 和应用。
 
 更新 SDK/框架后应重新编译主 EXE，已有 EXE 不会获得新 manifest。比例仍不符合系统设置时，先查应用属性中的 Windows 高 DPI 兼容性覆盖、启动宿主的 DPI 模式，再用[原生验证步骤](verification.md)核对实际 HWND DPI 和 GPUI 比例。当前 Linux 测试不能证明 Windows 清晰度已改善。
 

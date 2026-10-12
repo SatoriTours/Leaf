@@ -1,10 +1,12 @@
 {.define:leafProtocolProbes.}
-import std/[unittest, os, osproc, dynlib]
-import leaf/[core, widgets, backend, gpui_api, gpui_ffi_v2, gpui_session,components,host_reconcile,managed_runtime,watch_ipc]
+import std/[unittest, os, osproc, dynlib, json, tempfiles, math]
+import leaf/[core, widgets, backend, gpui_api, gpui_ffi_v2, gpui_session,components,host_reconcile,managed_runtime,watch_ipc,diagnostics]
 type TestScript=proc(config:ptr LeafConfig,host:ptr LeafHostCallbacks,ctx:pointer,error:ptr LeafError):int32 {.cdecl.}
 var rt:Runtime
 var scenario:int
 var watchStatusPath:string
+var renderingLog,renderingReceipt,receiptBefore,receiptAfter:string
+var renderingStatuses:seq[int32]
 var rejectViewportExit:bool
 proc script(config:ptr LeafConfig,host:ptr LeafHostCallbacks,ctx:pointer,error:ptr LeafError):int32 {.cdecl.}=
   var reply=LeafReply(struct_size:uint32(sizeof(LeafReply)))
@@ -85,6 +87,36 @@ proc script(config:ptr LeafConfig,host:ptr LeafHostCallbacks,ctx:pointer,error:p
     check reply.accepted_revision==before+1
     check reply.rows_len==1
     check rt.find("items").children.len==1
+  elif scenario==7:
+    request.tag=uint32(LEAF_REQUEST_RENDERING)
+    request.scale=1.5;request.width=640;request.height=480
+    check host.request(ctx,addr request,addr reply,error)==0
+    check host.request(ctx,addr request,addr reply,error)==0
+    request.tag=uint32(LEAF_REQUEST_READY)
+    check host.request(ctx,addr request,addr reply,error)==0
+    receiptBefore=readFile(renderingReceipt)
+    request.tag=uint32(LEAF_REQUEST_RENDERING)
+    request.width=800;request.height=600
+    check host.request(ctx,addr request,addr reply,error)==0
+    check host.request(ctx,addr request,addr reply,error)==0
+    request.scale=2
+    check host.request(ctx,addr request,addr reply,error)==0
+    check host.request(ctx,addr request,addr reply,error)==0
+    request.tag=uint32(LEAF_REQUEST_FRAME)
+    request.scale=3;request.width=900;request.height=700
+    check host.request(ctx,addr request,addr reply,error)==0
+    receiptAfter=readFile(renderingReceipt)
+  elif scenario==8:
+    renderingStatuses.setLen(0)
+    request.tag=uint32(LEAF_REQUEST_RENDERING)
+    request.scale=1;request.width=640;request.height=480
+    for invalid in [0.0,NaN,Inf]:
+      request.scale=invalid
+      renderingStatuses.add(host.request(ctx,addr request,addr reply,error))
+    request.scale=1e308;request.width=1e308
+    renderingStatuses.add(host.request(ctx,addr request,addr reply,error))
+    request.scale=1.5;request.width=640
+    renderingStatuses.add(host.request(ctx,addr request,addr reply,error))
   0
 suite "typed requests keep JSON off the bridge":
   test "metadata is tree free, event callback and viewport are typed":
@@ -194,3 +226,65 @@ suite "typed requests keep JSON off the bridge":
     scenario=6
     check openGpuiSession(rt,loadGpui(path)).run()!=0
     check built==1
+
+  test "typed rendering logs compatible dimensions once per change without a tree":
+    let directory=createTempDir("leaf-typed-rendering-","")
+    defer:removeDir(directory)
+    renderingLog=directory/"rendering.jsonl"
+    renderingReceipt=directory/"ready.json"
+    let d=newDiagnostics(logFile=renderingLog)
+    defer:d.close()
+    let path=absolutePath("target/ffi-v2/REQUESTS.so")
+    let library=loadLib(path)
+    defer:unloadLib(library)
+    cast[proc(value:TestScript) {.cdecl.}](symAddr(library,"leaf_test_set_script"))(script)
+    putEnv("LEAF_GPUI_ABI","2")
+    let previous=getEnv("LEAF_WATCH_READY")
+    putEnv("LEAF_WATCH_READY",renderingReceipt)
+    defer:
+      delEnv("LEAF_GPUI_ABI")
+      if previous.len==0:delEnv("LEAF_WATCH_READY")
+      else:putEnv("LEAF_WATCH_READY",previous)
+    rt=newRuntime(componentApplication(host(text("accepted UI")),"rendering"),diagnostics=d)
+    scenario=7
+    let session=openGpuiSession(rt,loadGpui(path))
+    let before=rt.updateStats()
+    let jsonBefore=snapshotJsonCalls
+    check session.run()==0
+    check session.readyCalls==2
+    check receiptAfter==receiptBefore
+    var samples:seq[JsonNode]
+    for line in lines(renderingLog):
+      let entry=parseJson(line)
+      if entry["phase"].getStr=="rendering":
+        check entry["status"].getStr=="ok"
+        samples.add(entry["details"])
+    check samples.len==3
+    if samples.len==3:
+      for i,expected in [(1.5,640.0,480.0,960.0,720.0,144.0),
+          (1.5,800.0,600.0,1200.0,900.0,144.0),(2.0,800.0,600.0,1600.0,1200.0,192.0)]:
+        let sample=samples[i]
+        check sample.len==4
+        check sample["scale_factor"].getFloat==expected[0]
+        check sample["logical_size"]["width"].getFloat==expected[1]
+        check sample["logical_size"]["height"].getFloat==expected[2]
+        check sample["device_size_calculated"]["width"].getFloat==expected[3]
+        check sample["device_size_calculated"]["height"].getFloat==expected[4]
+        check sample["dpi_from_scale_calculated"].getFloat==expected[5]
+    check rt.updateStats().componentRenders==before.componentRenders
+    check rt.updateStats().snapshotExports==before.snapshotExports
+    check snapshotJsonCalls==jsonBefore
+
+  test "malformed typed rendering cannot poison subsequent readiness":
+    let path=absolutePath("target/ffi-v2/REQUESTS.so")
+    let library=loadLib(path)
+    defer:unloadLib(library)
+    cast[proc(value:TestScript) {.cdecl.}](symAddr(library,"leaf_test_set_script"))(script)
+    putEnv("LEAF_GPUI_ABI","2")
+    defer:delEnv("LEAF_GPUI_ABI")
+    rt=newRuntime(componentApplication(host(text("accepted UI")),"invalid rendering"))
+    scenario=8
+    let session=openGpuiSession(rt,loadGpui(path))
+    check session.run()==0
+    check session.readyCalls==1
+    check renderingStatuses == @[5'i32,5,5,5,0]

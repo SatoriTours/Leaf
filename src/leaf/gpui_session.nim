@@ -12,6 +12,8 @@ type
     id:uint64
     running,detached:bool
     lastError,viewportError,externalError:string
+    renderingRecorded:bool
+    lastRendering:tuple[scale,width,height:float64]
     readyCalls*:int
     onFrame*:proc(sample:LeafFrameSample):bool {.closure.}
     preparerToken:uint64
@@ -157,6 +159,21 @@ proc request(ctx:pointer,raw:ptr LeafRequest,reply:ptr LeafReply,error:ptr LeafE
       if not (raw.scale>0 and raw.width>0 and raw.height>0) or classify(raw.scale) in {fcNan,fcInf,fcNegInf} or
           classify(raw.width) in {fcNan,fcInf,fcNegInf} or classify(raw.height) in {fcNan,fcInf,fcNegInf}:
         fail("invalid rendering dimensions")
+      if raw.tag==uint32(LEAF_REQUEST_RENDERING):
+        let deviceWidth=raw.width*raw.scale
+        let deviceHeight=raw.height*raw.scale
+        let dpi=96.0*raw.scale
+        for n in [deviceWidth,deviceHeight,dpi]:
+          if not (n>0) or classify(n) in {fcNan,fcInf,fcNegInf}:fail("invalid calculated rendering dimensions")
+        let dimensions=(scale:raw.scale,width:raw.width,height:raw.height)
+        if not session.renderingRecorded or dimensions!=session.lastRendering:
+          session.runtime.diagnostic("rendering","ok",%*{
+            "scale_factor":raw.scale,
+            "logical_size":{"width":raw.width,"height":raw.height},
+            "device_size_calculated":{"width":deviceWidth,"height":deviceHeight},
+            "dpi_from_scale_calculated":dpi})
+          session.lastRendering=dimensions
+          session.renderingRecorded=true
       if raw.tag==uint32(LEAF_REQUEST_FRAME) and session.onFrame!=nil:
         if raw.value.len!=uint64(sizeof(LeafFrameSample)) or raw.value.`ptr`==nil:fail("invalid frame sample")
         var sample:LeafFrameSample
@@ -169,13 +186,14 @@ proc request(ctx:pointer,raw:ptr LeafRequest,reply:ptr LeafReply,error:ptr LeafE
     int32(reply.status)
   except Exception as failure:
     if session!=nil:
-      try:session.runtime.diagnostic("gpui","error",%*{"message":failure.msg})
+      let phase=if raw!=nil and raw.tag==uint32(LEAF_REQUEST_RENDERING):"rendering" else:"gpui"
+      try:session.runtime.diagnostic(phase,"error",%*{"message":failure.msg})
       except Exception:discard
     writeError(error,failure.msg)
     var status=uint32(LEAF_STATUS_REJECTED)
     if session!=nil:
       if raw!=nil and raw.tag==uint32(LEAF_REQUEST_VIEWPORT):session.viewportError=failure.msg
-      else:session.lastError=failure.msg
+      elif raw==nil or raw.tag!=uint32(LEAF_REQUEST_RENDERING):session.lastError=failure.msg
       if session.runtime.acceptedRevision>before:
         status=uint32(LEAF_STATUS_ACCEPTED_SCOPE_ERROR)
         if raw!=nil and reply!=nil and raw.tag==uint32(LEAF_REQUEST_VIEWPORT):

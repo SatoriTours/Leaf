@@ -63,6 +63,38 @@ proc main():int =
     sleep(20)
   let window=command(xdotool,@["search","--name",(if example:"^Leaf" else:"^Leaf GPUI native smoke$")],root).splitLines()[0]
   discard command(xdotool,@["windowfocus",window],root)
+  if getEnv("LEAF_TEST_RENDERING")=="1":
+    let receipt=readFile(directory/"ready.json")
+    proc renderingSamples():seq[JsonNode]=
+      for line in lines(directory/"events.jsonl"):
+        let entry=parseJson(line)
+        if entry["phase"].getStr=="rendering" and entry["status"].getStr=="ok":
+          result.add(entry["details"])
+    require(renderingSamples().len>0,"initial rendering diagnostic missing")
+    discard command(xdotool,@["windowsize",window,"800","600"],root)
+    let until=getMonoTime()+initDuration(seconds=5)
+    while true:
+      let samples=renderingSamples()
+      if samples.len>0 and samples[^1]["logical_size"]["width"].getFloat==800 and
+          samples[^1]["logical_size"]["height"].getFloat==600:break
+      require(getMonoTime()<until,"resized rendering diagnostic missing")
+      sleep(20)
+    sleep(200)
+    let before=renderingSamples()
+    discard command(xdotool,@["windowsize",window,"800","600"],root)
+    sleep(200)
+    require(renderingSamples()==before,"identical window size duplicated rendering diagnostics")
+    for i,sample in before:
+      let scale=sample["scale_factor"].getFloat
+      require(scale>0,"invalid rendering scale")
+      require(sample["device_size_calculated"]["width"].getFloat==sample["logical_size"]["width"].getFloat*scale,
+        "invalid calculated device width")
+      require(sample["device_size_calculated"]["height"].getFloat==sample["logical_size"]["height"].getFloat*scale,
+        "invalid calculated device height")
+      require(sample["dpi_from_scale_calculated"].getFloat==96*scale,"invalid calculated DPI")
+      if i>0:require(sample!=before[i-1],"consecutive rendering diagnostics were not deduplicated")
+    require(readFile(directory/"ready.json")==receipt,"resize rewrote readiness receipt")
+    echo "Passed native rendering diagnostics: initial, resize, deduplication and unchanged ready receipt"
   proc clickTarget(key:string) =
     let deadline=getMonoTime()+initDuration(seconds=5)
     while true:
