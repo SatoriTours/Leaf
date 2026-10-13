@@ -49,6 +49,8 @@ let PerfPageC = defineComponent[int, State[int]]("PerfPageC",
 
 var rootStateA, rootStateB: State[int]
 var rootInitA, rootInitB = 0
+var failReplace = false
+var showReplace = true
 
 let RootA = defineComponent[int, State[int]]("PerfRootA",
   proc(ctx: MountContext, p: int): State[int] =
@@ -64,6 +66,7 @@ let RootB = defineComponent[int, State[int]]("PerfRootB",
     result = ctx.state(0)
     rootStateB = result,
   proc(ctx: ComponentContext, p: int, s: State[int]): UiDescription =
+    if failReplace: fail("replacement render failed")
     host(text("root-b" & $ctx.value(s), key="root-b")))
 
 let perfRoutes = @[
@@ -96,10 +99,14 @@ let PerfShell = defineComponent[int, int]("PerfShell",
 var replaceRouter: ComponentRouter
 let replaceRoutes = @[
   Route(name: "v1", path: "/", page: "p", view: "v1"),
-  Route(name: "v2", path: "/v2", page: "p", view: "v2")]
-let replacePages = @[ComponentPageDefinition(name: "p", views: @["v1", "v2"],
-  build: proc(view: string): UiDescription =
-    if view == "v1": component(RootA, 0) else: component(RootB, 0))]
+  Route(name: "v2", path: "/v2", page: "p", view: "v2"),
+  Route(name: "q", path: "/q", page: "q", view: "main")]
+let replacePages = @[
+  ComponentPageDefinition(name: "p", views: @["v1", "v2"],
+    build: proc(view: string): UiDescription =
+      if view == "v1": component(RootA, 0) else: component(RootB, 0)),
+  ComponentPageDefinition(name: "q", views: @["main"], retention: PageRetention.disposeOnLeave,
+    build: proc(view: string): UiDescription = component(RootA, 0))]
 
 let ReplaceHost = defineComponent[int, int]("PerfReplaceHost",
   proc(ctx: MountContext, p: int): int =
@@ -107,6 +114,12 @@ let ReplaceHost = defineComponent[int, int]("PerfReplaceHost",
     p,
   proc(ctx: ComponentContext, p: int, m: int): UiDescription =
     renderPage(ctx, replaceRouter))
+
+let ReplaceShell = defineComponent[int, int]("PerfReplaceShell",
+  proc(ctx: MountContext, p: int): int = p,
+  proc(ctx: ComponentContext, p: int, m: int): UiDescription =
+    if showReplace: hostShell(column(@[], key="replace-shell"), @[component(ReplaceHost, 0)])
+    else: host(text("empty-replace", key="empty-replace")))
 
 proc captureConsumer(sessionId: uint64): HostConsumer =
   HostConsumer(sessionId: sessionId,
@@ -167,6 +180,18 @@ suite "managed routing structural work":
       check uint64(rootHandle) != 0
       let staticHandles = staticHandleSnapshot(session, rt)
       for handle in staticHandles: staticSet.incl(handle)
+      # Collect the known boundary component ids from a warm A->B->A pair so
+      # the measured navigation can be checked against exact page/ancestor ids.
+      var knownBoundaries: HashSet[uint64]
+      batches.setLen(0)
+      go(rt, "b")
+      go(rt, "a")
+      for batch in batches:
+        for op in batch.ops:
+          if op.kind == HostOpKind.boundary:
+            knownBoundaries.incl(uint64(op.boundary.id))
+      check knownBoundaries.len >= 1
+      check rt.find("perf-a").node.text == "perf-a11"
       let leavingA = session.handleFor(rt.find("perf-a").id)
       # Measure one A -> B navigation against the full static/oracle set.
       batches.setLen(0)
@@ -192,17 +217,26 @@ suite "managed routing structural work":
             if uint64(op.handle) != uint64(rootHandle): inc staticTargetOps
           of HostOpKind.boundary:
             inc boundaryOps
-            if uint64(op.boundary.root) in staticSet: inc staticTargetOps
+            if uint64(op.boundary.id) notin knownBoundaries: inc staticTargetOps
+            # A removal boundary carries root 0; otherwise the boundary must
+            # point at the leaving/entering page or a required ancestor.
+            let root=uint64(op.boundary.root)
+            if root!=0 and root!=uint64(leavingA) and root!=uint64(enteringB) and
+                root!=uint64(rootHandle):
+              inc staticTargetOps
+            if root in staticSet: inc staticTargetOps
           of HostOpKind.window: inc windowOps
           if op.kind in {HostOpKind.create, HostOpKind.update, HostOpKind.remove} and
               uint64(op.parent) in staticSet:
             inc staticTargetOps
+      let totalOps = createOps + removeOps + updateOps + setChildrenOps + boundaryOps
       check staticTargetOps == 0
       check createOps == 1
       check removeOps == 1
       check updateOps == 0
       check setChildrenOps == 1
-      check boundaryOps >= 1
+      check boundaryOps == 3
+      check totalOps == 6
       check windowOps == 0
       check childEntries == count + 1
       # Every static handle stays stable (shared-parent children may reference them).
@@ -210,12 +244,13 @@ suite "managed routing structural work":
       check afterHandles == staticHandles
       check staticRenders == initialRenders
       check rt.updateStats().snapshotExports == exports
-      echo "perf size=", count, " ops=", createOps + removeOps + updateOps + setChildrenOps + boundaryOps,
+      echo "perf size=", count, " ops=", totalOps,
         " create=", createOps, " remove=", removeOps, " update=", updateOps,
         " setChildren=", setChildrenOps, " boundary=", boundaryOps,
         " childEntries=", childEntries, " childArrayBytes=", childEntries * 8,
         " childEntriesPerSet=", (if setChildrenOps == 0: 0 else: childEntries div setChildrenOps),
-        " staticRenders=", staticRenders, " snapshotDelta=", rt.updateStats().snapshotExports - exports
+        " staticRendersInitial=", initialRenders, " staticRenderDelta=", staticRenders - initialRenders,
+        " snapshotDelta=", rt.updateStats().snapshotExports - exports
       # 100 complete A -> B -> A roundtrips (200 legs) preserve State identity,
       # values, retention size and static isolation.
       for i in 0 ..< 100:
@@ -265,7 +300,8 @@ suite "managed routing structural work":
   test "same_page_root_replacement_keeps_registry_cost_stable":
     rootInitA = 0; rootInitB = 0
     rootStateA = default(State[int]); rootStateB = default(State[int])
-    let rt = newRuntime(componentApplication(component(ReplaceHost, 0), "replace"))
+    failReplace = false; showReplace = true
+    let rt = newRuntime(componentApplication(component(ReplaceShell, 0), "replace"))
     let session = attachHostSession(rt, captureConsumer(82'u64))
     check rootInitA == 1
     let firstA = rootStateA
@@ -287,4 +323,59 @@ suite "managed routing structural work":
       check rt.stats.treeBytes == bytesAfterFirst
     check rootInitA == 26
     check rootInitB == 26
+    session.close()
+
+  test "registry_add_delete_rollback_and_unmount_baseline":
+    rootInitA = 0; rootInitB = 0
+    rootStateA = default(State[int]); rootStateB = default(State[int])
+    failReplace = false
+    # Measured empty Shell baseline with the owner absent.
+    showReplace = false
+    let emptyRt = newRuntime(componentApplication(component(ReplaceShell, 0), "replace-empty"))
+    let emptyBytes = emptyRt.stats.treeBytes
+    # Real owner: page p (retainState, RootA) plus a disposeOnLeave page q.
+    showReplace = true
+    let rt = newRuntime(componentApplication(component(ReplaceShell, 0), "replace"))
+    let session = attachHostSession(rt, captureConsumer(83'u64))
+    check rootInitA == 1
+    let savedA = rootStateA
+    check savedA.set(5) == StateWriteResult.queued
+    check rt.flush()
+    let baselineP = rt.stats.treeBytes
+    # Visit q: an absent key adds its entry fee and subtree.
+    discard navigate(replaceRouter, "q")
+    check rt.flush()
+    check rootInitA == 2
+    check rt.stats.treeBytes > baselineP
+    # Return to p: disposeOnLeave erases q, restoring the exact baseline.
+    discard navigate(replaceRouter, "v1")
+    check rt.flush()
+    check savedA.read() == 5
+    check rt.stats.treeBytes == baselineP
+    # A rejected same-page root replacement keeps route, value and cost and
+    # disposes the real candidate State.
+    failReplace = true
+    let beforeReject = rt.stats.treeBytes
+    discard navigate(replaceRouter, "v2")
+    expect UiError:
+      discard rt.flush()
+    check currentRoute(replaceRouter).view == "v1"
+    check savedA.read() == 5
+    check rt.stats.treeBytes == beforeReject
+    check rootInitB == 1
+    check rootStateB.set(0) == StateWriteResult.disposed
+    # Legal replacement succeeds at the same cost (equal-size key and text).
+    failReplace = false
+    discard navigate(replaceRouter, "v2")
+    check rt.flush()
+    check rt.stats.treeBytes == beforeReject
+    check rootInitB == 2
+    let acceptedB = rootStateB
+    check savedA.set(7) == StateWriteResult.disposed
+    # Removing the owner restores the measured empty baseline exactly.
+    showReplace = false
+    rt.invalidateRoot()
+    check rt.flush()
+    check rt.stats.treeBytes == emptyBytes
+    check acceptedB.set(8) == StateWriteResult.disposed
     session.close()

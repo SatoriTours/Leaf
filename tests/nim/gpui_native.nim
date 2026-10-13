@@ -208,7 +208,14 @@ proc main():int =
     awaitPages("draft-edit:中文草稿")
     clickTarget("draft-input")
     discard command(xdotool,@["key","ctrl+a"],root)
-    discard command(xdotool,@["type","--clearmodifiers","--delay","1","页面草稿"],root)
+    # Type one Chinese character per xdotool command and await the accepted
+    # growing caption, so a rapid multi-character type cannot collapse to the
+    # last glyph. The final assertion stays the full retained Chinese draft.
+    var typed = ""
+    for character in ["页", "面", "草", "稿"]:
+      discard command(xdotool,@["type","--clearmodifiers","--delay","1",character],root)
+      typed.add(character)
+      awaitPages("draft-edit:" & typed)
     awaitPages("draft-edit:页面草稿")
     clickTarget("go-main")
     awaitPages("main:0:中文草稿:1")
