@@ -330,6 +330,65 @@ suite "Relocated SDK real path boundaries":
       createSymlink(sibling/"nim",sdk/"escaped-file")
       check not within(sdk/"escaped-file",sdk)
 
+suite "Relocated SDK isolated fixture compile":
+  test "standalone fixture compiles and runs from a Unicode SDK path":
+    let compiler=getEnv("NIM", findExe("nim"))
+    let nimRoot=if compiler.len>0: compiler.parentDir.parentDir else: ""
+    # The official Nim prefix keeps its stdlib at lib/system.nim; other layouts
+    # (for example a distro /usr/bin/nim) must not be copied into the fixture.
+    let hasPrefix=compiler.len>0 and fileExists(nimRoot/"lib/system.nim")
+    when defined(windows):
+      let ccRoot=getEnv("LEAF_CC_ROOT")
+      let toolchainReady=hasPrefix and ccRoot.len>0 and dirExists(ccRoot)
+    else:
+      let toolchainReady=hasPrefix
+    if not toolchainReady:
+      # CI ships the official Nim prefix and, on Windows, LEAF_CC_ROOT.
+      # `skip()` records the case but does NOT return, so every step below
+      # stays inside this branch to keep unsupported layouts inert.
+      skip()
+    else:
+      let base=createTempDir("leaf isolated 中文 spaces ", "")
+      let sdk=base/"SDK 中文 with spaces"
+      let project=base/"smoke app"
+      let mingw=sdk/"toolchain/mingw"
+      defer:
+        # Unlink the toolchain junction before removing the Unicode fixture tree.
+        if symlinkExists(mingw):removeFixtureDirectoryLink(mingw)
+        removeDir(base)
+      createDir(project/"target")
+      createDir(project/"tests")
+      writeFile(project/"tests"/"test_home.nim",
+        "import std/os\ndoAssert fileExists(getAppFilename())\necho \"isolated fixture ok\"\n")
+      # The isolated command references SDK framework and ORM source paths.
+      createDir(sdk/"src")
+      for package in ["norm", "lowdb", "db_connector"]:
+        createDir(sdk/"src/leaf/vendor/orm"/package/"src")
+      # A real toolchain under the Unicode prefix; only the short-path alias
+      # lets the ANSI MinGW gcc open its own and Nim's lib directories.
+      createDir(sdk/"toolchain/nim/bin")
+      copyFileWithPermissions(compiler, sdk/"toolchain/nim/bin"/("nim".addFileExt(ExeExt)))
+      copyDir(nimRoot/"lib", sdk/"toolchain/nim/lib")
+      if dirExists(nimRoot/"config"): copyDir(nimRoot/"config", sdk/"toolchain/nim/config")
+      when defined(windows):
+        # Without the bundled gcc the isolated command must fail loudly instead
+        # of silently using the runner's global gcc from PATH.
+        expect ValueError:
+          discard isolatedFixtureCommand(sdk, project, "test_home")
+        let linked=runCommand("cmd.exe",@["/d","/c","mklink","/J",mingw,ccRoot])
+        # Abort this test on failure (unittest's require would quit the whole
+        # binary and skip the junction teardown below).
+        if linked.exitCode!=0:
+          raise newException(ValueError, "mingw junction failed: " & linked.output)
+      var environment=processEnvironment()
+      for key in ["NIM", "LEAF_LIBRARY", "LEAF_GPUI_ROOT", "LEAF_GPUI_LIBRARY"]: environment.del(key)
+      let command=isolatedFixtureCommand(sdk, project, "test_home")
+      let compiled=runCommand(command.exe, command.args, project, environment)
+      checkpoint compiled.output
+      if compiled.exitCode!=0:
+        raise newException(ValueError, "isolated fixture compile failed")
+      check "isolated fixture ok" in compiled.output
+
 suite "SDK fixture safety and diagnostics":
   test "directory link cleanup preserves an outside target and rejects ordinary directories":
     let base=createTempDir("leaf cleanup 中文 space ", "")

@@ -69,6 +69,32 @@ proc within*(path, directory: string): bool =
   except OSError:
     result = false
 
+proc isolatedFixtureCommand*(sdk, project, test: string): tuple[exe: string, args: seq[string]] =
+  ## Standalone fixture compile against SDK-relative paths only. On Windows the
+  ## bundled ANSI MinGW toolchain cannot open Unicode SDK directories, so reuse
+  ## the product build's short-path aliases for every path it consumes.
+  var sources = sdk / "src"
+  var cache = project / "target/isolated-cache"
+  var output = project / "target" / test.addFileExt(ExeExt)
+  var entry = project / "tests" / (test & ".nim")
+  result.exe = sdk / "toolchain/nim/bin" / "nim".addFileExt(ExeExt)
+  when defined(windows):
+    result.exe = windows_paths.compilerPath(result.exe)
+    sources = windows_paths.compilerPath(sources)
+    cache = windows_paths.compilerPath(cache)
+    output = windows_paths.compilerPath(output)
+    entry = windows_paths.compilerPath(entry)
+  result.args = @["c", "-r", "--skipUserCfg:on", "--skipParentCfg:on", "--skipProjCfg:on", "--noNimblePath",
+    "--path:" & sources, "--nimcache:" & cache, "--out:" & output]
+  result.args.add(ormCompilerArgs(sources))
+  when defined(windows):
+    # The relocated SDK ships MinGW at toolchain/mingw; never let the smoke
+    # fall back to the runner's global gcc.
+    let gcc = windows_paths.compilerPath(sdk / "toolchain/mingw/bin/gcc".addFileExt(ExeExt))
+    require(fileExists(gcc), "bundled SDK gcc is missing: " & gcc)
+    result.args.add(@["--cc:gcc", "--gcc.exe:" & gcc, "--gcc.linkerexe:" & gcc])
+  result.args.add(entry)
+
 proc smokeSdk*(sdkPath: string, headlessOnly = false) =
   let sdk = absolutePath(sdkPath)
   let cli = sdk / (when defined(windows): "bin/leaf.exe" else: "bin/leaf")
@@ -116,12 +142,8 @@ proc smokeSdk*(sdkPath: string, headlessOnly = false) =
     "--change", "notes_field_title", noteText, "--click", "notes_save")
   require(noteText in run("--headless", "--click", "nav_notes"), "Note was not persisted")
   for test in ["test_home", "test_notes"]:
-    var args = @["c", "-r", "--skipUserCfg:on", "--skipParentCfg:on", "--skipProjCfg:on", "--noNimblePath",
-      "--path:" & sdk / "src", "--nimcache:" & project / "target/isolated-cache",
-      "--out:" & project / "target" / test.addFileExt(ExeExt)]
-    args.add(ormCompilerArgs(sdk / "src"))
-    args.add(project / "tests" / (test & ".nim"))
-    discard checkedCommand(sdk / "toolchain/nim/bin" / "nim".addFileExt(ExeExt), args, project, environment)
+    let fixture = isolatedFixtureCommand(sdk, project, test)
+    discard checkedCommand(fixture.exe, fixture.args, project, environment)
   let otherProject = root / "other-app"
   environment["LEAF_DATABASE_PATH"] = root / "other.sqlite3"
   createDir(otherProject)
