@@ -89,14 +89,14 @@
 
 **Files:** Modify `component_routing.nim`, `components.nim`, `component_state.nim`, `component_description.nim`, `managed_runtime.nim`; Create `tests/nim/test_component_routing.nim`。
 
-**Interfaces:** `renderPage(ctx:ComponentContext,router:ComponentRouter,key="page-outlet"):UiDescription`；消费Task1候选route/owner与Task2出口，不在构造时执行页面build。内部增加`requireInitializing(store:StateStore)`、`accountOwnedDescriptionBytes(ctx:MountContext,bytes:int)`、`ownedDescriptionBytes(ctx:MountContext):int`；只供组件初始化与运行时计量，不从components导出。
+**Interfaces:** `renderPage(ctx:ComponentContext,router:ComponentRouter,key="page-outlet"):UiDescription`；消费Task1候选route/owner与Task2出口，不在构造时执行页面build。内部增加`requireInitializing(store:StateStore)`、`accountOwnedDescriptionBytes(ctx:MountContext,bytes:int)`、`ownedDescriptionBytes(ctx:MountContext):int`及初始化结束标记；初始化成功或异常退出都关闭ctx，readonly费用仍可查询。只供组件初始化与运行时计量，不从components导出。
 
-- [ ] **3.1 失败测试**：真实Runtime夹具由专门Router组件持有controller，页面返回计数/文本；`public_navigation_preserves_page_state`覆盖name/path导航、同page两view、两次导航合并、同地址不刷新。`owner_and_single_outlet_are_enforced`覆盖跨Runtime、错误owner、同router两个出口；错误发生后原页面和State不变。
-- [ ] **3.2 失败测试**：`router_key_change_and_parent_removal_dispose_all_pages` 更换出口key使旧页实例释放；随后父移除router时当前及保留页State均disposed；同事件先navigate再移除不会复活旧页。
-- [ ] **3.3 RED**：`nim c -r --path:src --out:target/nim/test_component_routing tests/nim/test_component_routing.nim`。
-- [ ] **3.4 实现**：renderPage校验controller/ctx归属，创建包含候选page/view与惰性build的出口；newComponentRouter在MountContext中登记配置字节，Managed Instance把它计入所属组件bytes并在保留/恢复中维持、销毁时扣除；renderPage的configurationBytes设0以避免重计。补同owner和不同owner已初始化但未显示的多controller总预算、重复render只计一次及销毁释放的测试。components只导出规格公开类型/API，避免加载桌面模块。
-- [ ] **3.5 GREEN**：重复3.3；旧test_routing和test_component_compat退出0；加入ABI1的已接受Snapshot仅含当前页对照。
-- [ ] **3.6 提交与窄审查**：`feat: expose managed page navigation and outlets`；核对公开行为与既有Router兼容。
+- [x] **3.1 失败测试**：真实Runtime夹具由专门Router组件持有controller，页面返回计数/文本；`public_navigation_preserves_page_state`覆盖name/path导航、同page两view、两次导航合并、同地址不刷新。`owner_and_single_outlet_are_enforced`覆盖跨Runtime、错误owner、同router两个出口；错误发生后原页面和State不变。
+- [x] **3.2 失败测试**：`router_key_change_and_parent_removal_dispose_all_pages` 更换出口key使旧页实例释放；随后父移除router时当前及保留页State均disposed；同事件先navigate再移除不会复活旧页。
+- [x] **3.3 RED**：`nim c -r --path:src --out:target/nim/test_component_routing tests/nim/test_component_routing.nim`。
+- [x] **3.4 实现**：renderPage校验controller/ctx归属，创建包含候选page/view与惰性build的出口；newComponentRouter在MountContext中登记配置字节，Managed Instance把它计入所属组件bytes并在保留/恢复中维持、销毁时扣除；renderPage的configurationBytes设0以避免重计。补同owner和不同owner已初始化但未显示的多controller总预算、重复render只计一次及销毁释放的测试。components只导出规格公开类型/API，避免加载桌面模块。
+- [x] **3.5 GREEN**：重复3.3；旧test_routing和test_component_compat退出0；加入ABI1的已接受Snapshot仅含当前页对照。
+- [x] **3.6 提交与窄审查**：`feat: expose managed page navigation and outlets`；核对公开行为与既有Router兼容。
 
 ## Task 4：拒绝、预算与嵌套页面回归
 
@@ -140,4 +140,4 @@
 
 ## 计划审阅与交付
 
-本计划已获用户认可。Task1及Task2实现和修复已独立审查通过；后续按复用的Paseo角色与相关会话连续实施。范围裁定、命令/退出码与任务进度见本计划独立SDD ledger，常规实现选择不重复询问。
+本计划已获用户认可。Task1至Task3实现和修复已独立审查通过；后续按复用的Paseo角色与相关会话连续实施。范围裁定、命令/退出码与任务进度见本计划独立SDD ledger，常规实现选择不重复询问。
