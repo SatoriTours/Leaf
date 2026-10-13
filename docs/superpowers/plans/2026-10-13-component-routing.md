@@ -1,6 +1,6 @@
 # Leaf 托管组件路由实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 本计划仍待用户审阅；执行方式沿用 Paseo 既有分工，不在计划未审阅时修改产品代码。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 用户已于2026-10-14审阅认可，按既有Paseo分工连续执行。
 
 **Goal:** 多页面应用使用托管 State 导航，框架自动维护页面保留与释放，提交失败时地址、组件和宿主保持一致。
 
@@ -51,25 +51,25 @@
 
 ## Task 1：不可变配置与托管导航 State
 
-**Files:** Create `src/leaf/component_routing.nim`, `tests/nim/test_component_routing_state.nim`; Modify `component_description.nim`, `component_state.nim`。
+**Files:** Create `src/leaf/component_routing.nim`, `tests/nim/test_component_routing_state.nim`; Modify `component_description.nim`, `component_state.nim`, `components.nim`（仅排除新内部查询导出）。
 
 **Interfaces:**
 
 - 在component_description定义 `PageRetention {.pure.} = enum retainState, disposeOnLeave`；ComponentPageDefinition/ComponentRouter在component_routing定义，字段合同遵照规格。
 - 实现 `newComponentRouter(ctx:MountContext,routes:seq[Route],pages:seq[ComponentPageDefinition],initial=""):ComponentRouter`、`routes(router):seq[Route]`、`navigate(router,target:string):StateWriteResult`、`currentRoute(router):Route`、`currentRoute(ctx:ComponentContext,router):Route`；此任务不添加renderPage占位函数。
 - State内部查询 `stateAlive[T](state:State[T]):bool`、`stateOwnerMatches[T](state:State[T],store:StateStore,owner:uint64):bool`；上下文提供 `ownsState[T](ctx:ComponentContext,state:State[T]):bool`。仅用于内部校验，不导出到components公共汇总。
-- controller保存不可变配置、State[int]和线程本地单调非零router token；溢出明确拒绝。route/page/view声明条目总数不超过MaxNodes；配置按固定元数据与UTF-8字符串保守计量，至少覆盖全部字符串字节，Task3将该值计入出口预算。配置无单独、无界的缓存账本。
+- controller保存不可变配置、State[int]和线程本地单调非零router token；溢出明确拒绝。route/page/view声明条目总数不超过MaxNodes；配置按固定元数据与UTF-8字符串保守计量，包含definitions/names/paths自有键并在累加时检查上限；Task3将该值计入所属组件预算。配置无单独、无界的缓存账本。
 
-- [ ] **1.1 失败测试**：直接用StateStore/MountContext夹具验证配置与队列，不依赖尚未实现的出口。`configuration_is_validated_before_mount` 覆盖空路由、重复name/path/page/view、无build、未知page/view/initial、非绝对path、名称以/开头、非法UTF-8、单字段超过MaxStringBytes、条目超过MaxNodes、总配置超过MaxTreeBytes；factory调用数保持0。
-- [ ] **1.2 失败测试**：`configuration_is_detached_from_callers` 修改原始配置和返回seq后，`check router.currentRoute.path == "/"`；`navigation_joins_state_attempt` 中navigate到B后accepted仍A、candidate是B，reject后accepted仍A；两次navigate最终接受最后地址；同地址不产生dirty owner；disposeOwner后 `check router.navigate("missing") == StateWriteResult.disposed`。渲染期写入与跨Runtime/owner读取拒绝。
-- [ ] **1.3 RED**：`nim c -r --path:src --out:target/nim/test_component_routing_state tests/nim/test_component_routing_state.nim`，确认新接口缺失/断言失败而非工具链故障。
-- [ ] **1.4 实现**：配置深复制与索引、State[int]导航、owner查询和ctx候选读取。未知地址不排队，disposed优先返回；State引用snapshot政策不改变。
-- [ ] **1.5 GREEN**：重复1.3并执行 `tests/nim/test_component_state.nim`、`tests/nim/test_components.nim`、`tests/nim/test_routing.nim`，各用 `nim c -r --path:src --out:target/nim/<name> <file>`，全部退出0。
-- [ ] **1.6 提交与窄审查**：`feat: add transactional component route state`；审查配置隔离、队列和owner，不提前验收出口。
+- [x] **1.1 失败测试**：直接用StateStore/MountContext夹具验证配置与队列，不依赖尚未实现的出口。`configuration_is_validated_before_mount` 覆盖空路由、重复name/path/page/view、无build、未知page/view/initial、非绝对path、名称以/开头、非法UTF-8、单字段超过MaxStringBytes、条目超过MaxNodes、总配置超过MaxTreeBytes；factory调用数保持0。
+- [x] **1.2 失败测试**：`configuration_is_detached_from_callers` 修改原始配置和返回seq后，`check router.currentRoute.path == "/"`；`navigation_joins_state_attempt` 中navigate到B后accepted仍A、candidate是B，reject后accepted仍A；两次navigate最终接受最后地址；同地址不产生dirty owner；disposeOwner后 `check router.navigate("missing") == StateWriteResult.disposed`。渲染期写入与跨Runtime/owner读取拒绝。
+- [x] **1.3 RED**：`nim c -r --path:src --out:target/nim/test_component_routing_state tests/nim/test_component_routing_state.nim`，确认新接口缺失/断言失败而非工具链故障。
+- [x] **1.4 实现**：配置深复制与索引、State[int]导航、owner查询和ctx候选读取。未知地址不排队，disposed优先返回；State引用snapshot政策不改变。
+- [x] **1.5 GREEN**：重复1.3并执行 `tests/nim/test_component_state.nim`、`tests/nim/test_components.nim`、`tests/nim/test_routing.nim`，各用 `nim c -r --path:src --out:target/nim/<name> <file>`，全部退出0。
+- [x] **1.6 提交与窄审查**：`feat: add transactional component route state`；审查配置隔离、队列和owner，不提前验收出口。
 
 ## Task 2：页面出口与自动保留生命周期
 
-**Files:** Modify `component_description.nim`, `managed_runtime.nim`; Create `tests/nim/test_component_routing_outlet.nim`。
+**Files:** Modify `component_description.nim`, `managed_runtime.nim`, `components.nim`（仅排除新内部出口导出）; Create `tests/nim/test_component_routing_outlet.nim`。
 
 **Interfaces:**
 
@@ -87,14 +87,14 @@
 
 ## Task 3：公共出口 API 与完整组件导航
 
-**Files:** Modify `component_routing.nim`, `components.nim`; Create `tests/nim/test_component_routing.nim`。
+**Files:** Modify `component_routing.nim`, `components.nim`, `component_state.nim`, `component_description.nim`, `managed_runtime.nim`; Create `tests/nim/test_component_routing.nim`。
 
-**Interfaces:** `renderPage(ctx:ComponentContext,router:ComponentRouter,key="page-outlet"):UiDescription`；消费Task1候选route/owner与Task2出口，不在构造时执行页面build。
+**Interfaces:** `renderPage(ctx:ComponentContext,router:ComponentRouter,key="page-outlet"):UiDescription`；消费Task1候选route/owner与Task2出口，不在构造时执行页面build。内部增加`requireInitializing(store:StateStore)`、`accountOwnedDescriptionBytes(ctx:MountContext,bytes:int)`、`ownedDescriptionBytes(ctx:MountContext):int`；只供组件初始化与运行时计量，不从components导出。
 
 - [ ] **3.1 失败测试**：真实Runtime夹具由专门Router组件持有controller，页面返回计数/文本；`public_navigation_preserves_page_state`覆盖name/path导航、同page两view、两次导航合并、同地址不刷新。`owner_and_single_outlet_are_enforced`覆盖跨Runtime、错误owner、同router两个出口；错误发生后原页面和State不变。
 - [ ] **3.2 失败测试**：`router_key_change_and_parent_removal_dispose_all_pages` 更换出口key使旧页实例释放；随后父移除router时当前及保留页State均disposed；同事件先navigate再移除不会复活旧页。
 - [ ] **3.3 RED**：`nim c -r --path:src --out:target/nim/test_component_routing tests/nim/test_component_routing.nim`。
-- [ ] **3.4 实现**：renderPage校验controller/ctx归属，创建包含候选page/view与惰性build的出口；统计配置字节一次；components只导出规格公开类型/API，避免加载桌面模块。
+- [ ] **3.4 实现**：renderPage校验controller/ctx归属，创建包含候选page/view与惰性build的出口；newComponentRouter在MountContext中登记配置字节，Managed Instance把它计入所属组件bytes并在保留/恢复中维持、销毁时扣除；renderPage的configurationBytes设0以避免重计。补同owner和不同owner已初始化但未显示的多controller总预算、重复render只计一次及销毁释放的测试。components只导出规格公开类型/API，避免加载桌面模块。
 - [ ] **3.5 GREEN**：重复3.3；旧test_routing和test_component_compat退出0；加入ABI1的已接受Snapshot仅含当前页对照。
 - [ ] **3.6 提交与窄审查**：`feat: expose managed page navigation and outlets`；核对公开行为与既有Router兼容。
 
@@ -140,4 +140,4 @@
 
 ## 计划审阅与交付
 
-本计划产品任务均未执行。请用户审阅是否准确表达已确认规格；执行沿用已有Paseo角色分工和相关会话。计划获认可后，逐任务连续实施，不再为常规实现选择或每一步完成重复询问。
+本计划已获用户认可。Task1实现及预算修复经独立审查通过；后续按复用的Paseo角色与相关会话连续实施。范围裁定、命令/退出码与任务进度见本计划独立SDD ledger，常规实现选择不重复询问。
