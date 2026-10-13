@@ -92,7 +92,8 @@ proc isolatedFixtureCommand*(sdk, project, test: string): tuple[exe: string, arg
     # fall back to the runner's global gcc.
     let gcc = windows_paths.compilerPath(sdk / "toolchain/mingw/bin/gcc".addFileExt(ExeExt))
     require(fileExists(gcc), "bundled SDK gcc is missing: " & gcc)
-    result.args.add(@["--cc:gcc", "--gcc.exe:" & gcc, "--gcc.linkerexe:" & gcc])
+    let configuredGcc = gcc.replace("$", "$$")
+    result.args.add(@["--cc:gcc", "--gcc.exe:" & configuredGcc, "--gcc.linkerexe:" & configuredGcc])
   result.args.add(entry)
 
 proc smokeSdk*(sdkPath: string, headlessOnly = false) =
