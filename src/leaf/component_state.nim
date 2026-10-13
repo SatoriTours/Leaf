@@ -133,6 +133,15 @@ proc cellFor[T](state:State[T]):StateCell[T]=
   if cell==nil or cell.disposed or cell.owner!=state.owner or cell.generation!=state.generation:return nil
   if not (cell of StateCell[T]):fail("State slot type mismatch")
   StateCell[T](cell)
+proc stateAlive*[T](state:State[T]):bool=
+  ## Internal validity query: the handle still names a live slot in its store.
+  if state.store==nil:return false
+  state.cellFor()!=nil
+proc stateOwnerMatches*[T](state:State[T],store:StateStore,owner:uint64):bool=
+  ## Internal ownership query for runtime and context validation only.
+  if store==nil or owner==0 or state.store==nil:return false
+  store.uiThread()
+  state.store==store and state.owner==owner and state.cellFor()!=nil
 proc writable[T](state:State[T]):StateCell[T]=
   result=state.cellFor()
   if result==nil:return

@@ -7,6 +7,7 @@ export component_state.State,component_state.StateWriteResult,
 
 type
   DescriptionKind* {.pure.} = enum host,component
+  PageRetention* {.pure.} = enum retainState, disposeOnLeave
   MountContext* = ref object
     store:StateStore
     owner:uint64
@@ -76,6 +77,10 @@ proc newMountContext*(store:StateStore,owner:uint64):MountContext=MountContext(s
 proc newComponentContext*(store:StateStore,attempt:StateAttempt,owner:uint64,
     invalidateOwner:proc(owner:uint64) {.closure.}=nil):ComponentContext=
   ComponentContext(store:store,attempt:attempt,owner:owner,invalidateOwner:invalidateOwner)
+proc ownsState*[T](ctx: ComponentContext, state: State[T]): bool =
+  ## Internal context/owner validation; excluded from the components aggregate.
+  if ctx == nil: return false
+  stateOwnerMatches(state, ctx.store, ctx.owner)
 proc state*[T](ctx:MountContext,initial:T,equal:StateEqual[T]=nil,snapshot:StateSnapshot[T]=nil):State[T]=
   if ctx==nil or ctx.store.phase!=StatePhase.initializing:fail("State slots require mount initialization")
   ctx.store.allocateState(ctx.owner,initial,equal,snapshot)
