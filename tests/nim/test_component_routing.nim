@@ -17,6 +17,8 @@ var bigRouterCount = 1
 var savedCtx, failedCtx: MountContext
 var borrowSavedCtx = false
 var showBorrower = false
+var ctxMode = 0
+var ctxFreshInit = 0
 var ctxState: State[int]
 
 let PageA = defineComponent[int, State[int]]("PublicPageA",
@@ -114,26 +116,39 @@ let CtxBorrower = defineComponent[int, int]("CtxBorrower",
   proc(ctx: ComponentContext, p: int, m: int): UiDescription =
     host(text("ctx-b", key="ctx-b")))
 
-let CtxShell = defineComponent[int, int]("CtxShell",
-  proc(ctx: MountContext, p: int): int = p,
-  proc(ctx: ComponentContext, p: int, m: int): UiDescription =
-    var children = @[component(CtxOwner, 0)]
-    if showBorrower: children.add(component(CtxBorrower, 0))
-    hostShell(column(@[], key="ctx-shell"), children))
-
-let CtxFails = defineComponent[int, int]("CtxFails",
+let CtxFailer = defineComponent[int, int]("CtxFailer",
   proc(ctx: MountContext, p: int): int =
     failedCtx = ctx
     fail("initializer failed"),
   proc(ctx: ComponentContext, p: int, m: int): UiDescription =
     host(text("ctx-f", key="ctx-f")))
 
-let CtxTryFailed = defineComponent[int, int]("CtxTryFailed",
+let CtxBorrowFailed = defineComponent[int, int]("CtxBorrowFailed",
   proc(ctx: MountContext, p: int): int =
     discard newComponentRouter(failedCtx, smallRoutes, smallPages, "small")
     p,
   proc(ctx: ComponentContext, p: int, m: int): UiDescription =
-    host(text("ctx-tf", key="ctx-tf")))
+    host(text("ctx-bf", key="ctx-bf")))
+
+let CtxFresh = defineComponent[int, int]("CtxFresh",
+  proc(ctx: MountContext, p: int): int =
+    inc ctxFreshInit
+    discard newComponentRouter(ctx, smallRoutes, smallPages, "small")
+    p,
+  proc(ctx: ComponentContext, p: int, m: int): UiDescription =
+    host(text("ctx-fresh", key="ctx-fresh")))
+
+let CtxShell = defineComponent[int, int]("CtxShell",
+  proc(ctx: MountContext, p: int): int = p,
+  proc(ctx: ComponentContext, p: int, m: int): UiDescription =
+    var children = @[component(CtxOwner, 0)]
+    if showBorrower: children.add(component(CtxBorrower, 0))
+    case ctxMode
+    of 1: children.add(component(CtxFailer, 0))
+    of 2: children.add(component(CtxBorrowFailed, 0))
+    of 3: children.add(component(CtxFresh, 0))
+    else: discard
+    hostShell(column(@[], key="ctx-shell"), children))
 
 proc consumer(sessionId: uint64): HostConsumer =
   HostConsumer(sessionId: sessionId,
@@ -152,6 +167,8 @@ proc reset() =
   failedCtx = nil
   borrowSavedCtx = false
   showBorrower = false
+  ctxMode = 0
+  ctxFreshInit = 0
   ctxState = default(State[int])
   stateA = default(State[int]); stateB = default(State[int])
   router = default(ComponentRouter)
@@ -400,10 +417,36 @@ suite "public managed page navigation":
     check rt.find("ctx-b") != nil
     session.close()
 
-  test "failed_initializer_seals_its_context":
+  test "failed_initializer_seals_its_context_for_the_same_store":
     reset()
+    ctxMode = 0
+    let rt = newRuntime(componentApplication(component(CtxShell, 0), "ctx-exc"))
+    let session = attachHostSession(rt, consumer(41'u64))
+    let revision = rt.acceptedRevision
+    let aCharge = ownedDescriptionBytes(savedCtx)
+    # A candidate child initializer saves its context and throws.
+    ctxMode = 1
+    rt.invalidateRoot()
     expect UiError:
-      discard newRuntime(componentApplication(component(CtxFails, 0), "ctx-fail"))
+      discard rt.flush()
     check failedCtx != nil
+    check rt.acceptedRevision == revision
+    check ctxState.read() == 0
+    check rt.find("ctx-a") != nil
+    # The same Runtime is still usable. In the next candidate a sibling
+    # initializer borrows the failed context while this same store is in the
+    # initializing phase, so only the seal can reject it.
+    ctxMode = 2
+    rt.invalidateRoot()
     expect UiError:
-      discard newRuntime(componentApplication(component(CtxTryFailed, 0), "ctx-try"))
+      discard rt.flush()
+    check rt.acceptedRevision == revision
+    check ownedDescriptionBytes(savedCtx) == aCharge
+    check rt.find("ctx-a") != nil
+    # A legitimate fresh-context initializer still succeeds afterwards.
+    ctxMode = 3
+    rt.invalidateRoot()
+    check rt.flush()
+    check ctxFreshInit == 1
+    check rt.find("ctx-fresh") != nil
+    session.close()
