@@ -33,9 +33,24 @@ jobs:
       - name: 真实 Nim + GPUI 窗口交互
         env:
           LIBGL_ALWAYS_SOFTWARE: '1'
-        run: nim c -r --out:target/nim/native_test scripts/native_test.nim
+          LEAF_GPUI_LIBRARY: ${{ github.workspace }}/target/debug/libleaf_gpui.so
+          LEAF_TEST_APP: tests/nim/component_native_app.nim
+          LEAF_TEST_RENDERING: '1'
+          LEAF_TEST_WATCH_STATUS: '1'
+        run: |
+          cargo build --locked -p leaf-gpui --features native-test-support
+          for mode in legacy managed; do
+            for abi in 1 2; do
+              for cache in 0 1; do
+                echo "Native interaction: mode=$mode abi=$abi cache=$cache"
+                LEAF_TEST_MODE="$mode" LEAF_GPUI_ABI="$abi" LEAF_GPUI_CACHE="$cache" \
+                  nim c -r --out:target/nim/native_test scripts/native_test.nim
+              done
+            done
+          done
       - name: 示例与发布包
         run: |
+          cargo build --locked -p leaf-gpui
           nim c -r examples/counter.nim --headless --click add
           nim c -r example/main.nim --check
           export PATH="$PWD/target/nim:$PATH"

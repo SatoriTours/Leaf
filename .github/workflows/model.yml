@@ -23,12 +23,10 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: 同连接 ORM、Model、应用上下文和脚手架
         run: |
-          export NIM="$(command -v nim)"
           nim c -r --out:target/nim/model_runner scripts/test.nim --model-only
       - name: 无 Git 源码归档自测
         run: |
           mkdir -p target/model-source-archive
           git archive HEAD | tar -x -C target/model-source-archive
           cd target/model-source-archive
-          export NIM="$(command -v nim)"
           nim c -r --skipUserCfg:on --skipParentCfg:on --nimcache:target/nim/runner-cache --out:target/nim/model_runner scripts/test.nim --model-only

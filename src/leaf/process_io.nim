@@ -139,7 +139,11 @@ when defined(posix):
       if errno == EINTR: return -1
       raise newException(OSError, "cannot inspect the owned command")
     if info.si_pid == 0: return -1
-    if info.si_code == childExited: int(info.si_status)
+    # Darwin reports the whole 32-bit exit value for CLD_EXITED
+    # (WEXITSTATUS(p_xstat) | p_xhighbits << 24), so exitCli's quit(-126)
+    # arrives as -126 or 0x00FFFF82. Only the low eight bits are the status;
+    # decode exactly like the waitpid path.
+    if info.si_code == childExited: int(info.si_status) and 0xff
     else: 128 + int(info.si_status)
 
   proc guardianExitCode(status: cint): int =

@@ -3,9 +3,16 @@ import ./cleanup_support
 import std/[monotimes, os, strutils, tempfiles, times, unittest]
 import leaf/process_io
 when defined(posix): import std/posix
+# The fault and Darwin-waitid wrappers live in one test-only C translation unit;
+# each build enables only the link injections it declared.
 when defined(leafSplitFaultTest) and defined(linux):
-  {.compile: "split_process_faults.c".}
+  {.passC: "-DLEAF_SPLIT_FAULT_TEST".}
   {.passL: "-Wl,--wrap=waitpid -Wl,--wrap=read".}
+when defined(leafSplitDarwinWaitid) and defined(linux):
+  {.passC: "-DLEAF_SPLIT_DARWIN_WAITID".}
+  {.passL: "-Wl,--wrap=waitid".}
+when defined(linux) and (defined(leafSplitFaultTest) or defined(leafSplitDarwinWaitid)):
+  {.compile: "split_process_faults.c".}
 
 let args = commandLineParams()
 if args == @["--burst"]:
@@ -18,6 +25,12 @@ if args == @["--burst"]:
 if args == @["--sleep"]:
   sleep(60_000)
   quit(0)
+if args == @["--negative-exit"]:
+  # Mirrors leaf_cli.exitCli's POSIX convention: the conventional 130 status is
+  # emitted through Nim's int8-saturating quit as quit(-126). Darwin's waitid
+  # reports that whole 32-bit value in si_status, while Linux encodes the low
+  # eight bits, so the owner must normalize both to 130.
+  quit(130 - 256)
 if args.len == 2 and args[0] == "--nested":
   let child = startSplitManaged(getAppFilename(), @["--sleep"], getCurrentDir())
   writeFile(args[1], $child.splitPid())
@@ -59,6 +72,32 @@ suite "Split subprocess lifecycle":
       child.closeSplit()
       check child.code == 127
       check not child.cleanupUnconfirmed
+
+  test "a full width POSIX exit keeps its conventional eight bit status":
+    when defined(posix):
+      # leaf_cli.exitCli reports conventional 130 through Nim's int8-saturating
+      # quit as quit(-126). Darwin's waitid returns the whole 32-bit value, so
+      # the owner sees either -126 (p_xhighbits still set) or, after the kernel
+      # clears them even under WNOWAIT, 0x00FFFF82. Both must normalize to 130.
+      # LEAF_SPLIT_WAITID_FORM only steers the test-only Darwin replay wrapper,
+      # so both forms are asserted independently with real guardian processes.
+      for form in ["sign", "cleared"]:
+        block:
+          let previousForm = getEnv("LEAF_SPLIT_WAITID_FORM")
+          if form == "cleared": putEnv("LEAF_SPLIT_WAITID_FORM", "cleared")
+          else: delEnv("LEAF_SPLIT_WAITID_FORM")
+          defer:
+            if previousForm.len > 0: putEnv("LEAF_SPLIT_WAITID_FORM", previousForm)
+            else: delEnv("LEAF_SPLIT_WAITID_FORM")
+          let child = startSplitManaged(getAppFilename(), @["--negative-exit"], root)
+          # A timeout in finish must never leak the owner or the replay mode.
+          defer: child.closeSplit()
+          child.finish()
+          child.closeSplit()
+          checkpoint "form=" & form
+          check child.code == 130
+          check not child.protocolError
+          check not child.cleanupUnconfirmed
 
   test "closing one split leaves its sibling usable":
     let one = startSplitManaged(getAppFilename(), @["--sleep"], root)

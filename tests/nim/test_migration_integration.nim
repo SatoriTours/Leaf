@@ -572,7 +572,10 @@ echo "caller ok"
     check upgraded["resources"][0]["custom"].getStr == "kept"
     check upgraded["resources"][0]["migration"].kind == JString
     check fileExists(app / "target/leaf-migration-generation.lock")
-    check initializeDatabaseProject(readProject(app)) == @["initialized " & app]
+    # On Windows `app` may be a short 8.3 temp path (RUNNER~1), while the
+    # initializer reports the expanded canonical long path, so compare
+    # against realPath(app) instead of `app` itself.
+    check initializeDatabaseProject(readProject(app)) == @["initialized " & realPath(app)]
 
   test "resource generation preserves allowed manifest metadata":
     let app = base / "f6-metadata"
@@ -717,7 +720,7 @@ echo "staging ok"
     let before = snapshotTree(app)
     discard initializeDatabaseProject(readProject(app), dryRun = true)
     check snapshotTree(app) == before
-    check initializeDatabaseProject(readProject(app)) == @["initialized " & app]
+    check initializeDatabaseProject(readProject(app)) == @["initialized " & realPath(app)]
     check snapshotTree(app) == before
     let legacy = base / "f7-init-dryrun"
     copyDir(fixture, legacy)

@@ -27,6 +27,9 @@ jobs:
       - name: Linux 验证便携 POSIX 监督路径
         if: runner.os == 'Linux'
         run: nim c -r -d:leafPortableSplit --out:target/nim/test_portable_split tests/nim/test_split_process.nim
+      - name: Linux 验证 Darwin 完整退出值
+        if: runner.os == 'Linux'
+        run: nim c -r -d:leafPortableSplit -d:leafSplitDarwinWaitid --out:target/nim/test_darwin_waitid tests/nim/test_split_process.nim
       - name: Linux 验证实际系统调用错误清理
         if: runner.os == 'Linux'
         run: nim c -r -d:leafSplitFaultTest --out:target/nim/test_split_faults tests/nim/test_split_process.nim
