@@ -42,27 +42,46 @@ type RouterConfiguration = object
   initialIndex: int
   entries, bytes: int
 
+proc charge(configuration: var RouterConfiguration, bytes: int) =
+  ## Check the running total before any oversized entry is retained.
+  configuration.bytes += bytes
+  if configuration.bytes > MaxTreeBytes:
+    fail("router configuration exceeds 16 MiB")
+
+proc charge(configuration: var RouterConfiguration, value: string) =
+  ## Every stored string, including an index's own key, owns its bytes.
+  charge(configuration, RouterMetadataBytes + value.len)
+
+proc countEntry(configuration: var RouterConfiguration) =
+  inc configuration.entries
+  if configuration.entries > MaxNodes:
+    fail("router configuration exceeds 10000 entries")
+
 proc validateConfiguration(routes: seq[Route], pages: seq[ComponentPageDefinition],
     initial: string): RouterConfiguration =
   ## Validate and copy the address configuration before any page is mounted.
-  ## Page build callbacks are never invoked here.
+  ## Page build callbacks are never invoked here. The bounded ledger counts
+  ## every string the controller retains, including copied table keys, so it
+  ## can never hide more bytes than the MaxTreeBytes budget allows.
   result.initialIndex = 0
-  result.entries = pages.len
   for page in pages:
     validField(page.name, "page name")
     if page.name.len == 0: fail("page definition requires a name")
     if page.name in result.definitions: fail("duplicate page: " & page.name)
     if page.build == nil: fail("page definition requires a build function: " & page.name)
     if page.views.len == 0: fail("page definition requires at least one view: " & page.name)
+    result.countEntry()
+    # The definition value and its table key each retain a copy of the name.
+    result.charge(page.name)
+    result.charge(page.name)
     var seen: HashSet[string]
     for view in page.views:
       validField(view, "page view")
       if view.len == 0: fail("empty page view: " & page.name)
       if view in seen: fail("duplicate page view: " & page.name & "." & view)
       seen.incl(view)
-      inc result.entries
-      result.bytes += RouterMetadataBytes + view.len
-    result.bytes += RouterMetadataBytes + page.name.len
+      result.countEntry()
+      result.charge(view)
     result.definitions[page.name] = ComponentPageDefinition(name: page.name,
       views: page.views, build: page.build, retention: page.retention)
   if routes.len == 0: fail("router needs at least one route")
@@ -79,19 +98,22 @@ proc validateConfiguration(routes: seq[Route], pages: seq[ComponentPageDefinitio
     if route.page notin result.definitions: fail("unknown route page: " & route.page)
     if route.view notin result.definitions[route.page].views:
       fail("unknown route view: " & route.page & "." & route.view)
+    result.countEntry()
+    # The registered route and the name/path index keys each retain a copy.
+    result.charge(route.name)
+    result.charge(route.name)
+    result.charge(route.path)
+    result.charge(route.path)
+    result.charge(route.page)
+    result.charge(route.view)
     result.names[route.name] = result.registered.len
     result.paths[route.path] = result.registered.len
     result.registered.add(route)
-    result.bytes += RouterMetadataBytes + route.name.len + route.path.len +
-      route.page.len + route.view.len
   if initial.len > 0:
     validField(initial, "initial route")
     if initial in result.names: result.initialIndex = result.names[initial]
     elif initial in result.paths: result.initialIndex = result.paths[initial]
     else: fail("unknown initial route: " & initial)
-  result.entries += result.registered.len
-  if result.entries > MaxNodes: fail("router configuration exceeds 10000 entries")
-  if result.bytes > MaxTreeBytes: fail("router configuration exceeds 16 MiB")
 
 proc newComponentRouter*(ctx: MountContext, routes: seq[Route],
     pages: seq[ComponentPageDefinition], initial = ""): ComponentRouter =

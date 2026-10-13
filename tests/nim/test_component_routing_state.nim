@@ -80,6 +80,22 @@ suite "immutable component routing configuration":
     rejected(bigRoutes, testPages)
     check buildCalls == 0
 
+  test "configuration_budget_counts_its_own_index_keys":
+    buildCalls = 0
+    # Field-only accounting stays under 16 MiB, but the configuration owns
+    # copied index keys too; the same bounded ledger must refuse this.
+    var indexRoutes: seq[Route]
+    for i in 0 ..< 9:
+      let prefix = "/k" & $i
+      indexRoutes.add(Route(name: "key" & $i,
+        path: prefix & repeat("p", MaxStringBytes - prefix.len),
+        page: "home", view: "main"))
+    rejected(indexRoutes, @[page("home", @["main"])])
+    # A small configuration inside both tallies still mounts and calls no factory.
+    let accepted = fixture()
+    check accepted.router.currentRoute().path == "/"
+    check buildCalls == 0
+
   test "configuration_is_detached_from_callers":
     var routes = testRoutes
     var pages = testPages
