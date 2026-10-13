@@ -78,12 +78,12 @@
 - 出口实例维护按page key定位的保留记录与当前子实例；候选变更使用覆盖层，重复routerId出口在接受前拒绝。保留映射容量在接受前准备。
 - 正常返回已访问页不复制整套已保留组件/State图；首次登记可能需要扩容轻量页面索引，需记录成本，不承诺所有导航O(1)。
 
-- [ ] **2.1 失败测试**：低层出口夹具使用现有defineComponent和State选择A/B；`retention_remounts_hosts_without_reinitializing_state` 断言A计数为3后离开再返回仍3、初始化次数不增、宿主句柄更换、旧事件拒绝；`dispose_on_leave_reinitializes` 断言旧State.set返回disposed、返回初值。
-- [ ] **2.2 失败测试**：`inactive_state_accepts_without_rendering` 离开A后写A State并flush，值接受且A render计数不变；恢复显示新值。`outlet_walkers_export_only_active_page` 验证Snapshot/find/祖先根变更/hostRoot/retainedDescription；两页相同局部key不会混淆。
-- [ ] **2.3 RED**：`nim c -r --path:src --out:target/nim/test_component_routing_outlet tests/nim/test_component_routing_outlet.nim`。
-- [ ] **2.4 实现**：补齐所有host/component二分遍历，建立专用出口分支；复用停用底层逻辑，列表暖行128策略不改。保留页宿主、边界和活动索引撤销；恢复重建宿主。卸载遍历当前children及保留页/暖行去重全集。
-- [ ] **2.5 GREEN**：重复2.3；跑test_components、test_component_view、test_component_lists、test_component_compat、test_component_commit，各退出0。包括逻辑出口根嵌套、当前页根kind更换及同页view换组件type/key。
-- [ ] **2.6 提交与窄审查**：`feat: retain inactive component pages without host controls`；核对生命周期、活动索引和所有第三类描述分支。
+- [x] **2.1 失败测试**：低层出口夹具使用现有defineComponent和State选择A/B；`retention_remounts_hosts_without_reinitializing_state` 断言A计数为3后离开再返回仍3、初始化次数不增、宿主句柄更换、旧事件拒绝；`dispose_on_leave_reinitializes` 断言旧State.set返回disposed、返回初值。
+- [x] **2.2 失败测试**：`inactive_state_accepts_without_rendering` 离开A后写A State并flush，值接受且A render计数不变；恢复显示新值。`outlet_walkers_export_only_active_page` 验证Snapshot/find/祖先根变更/hostRoot/retainedDescription；两页相同局部key不会混淆。
+- [x] **2.3 RED**：`nim c -r --path:src --out:target/nim/test_component_routing_outlet tests/nim/test_component_routing_outlet.nim`。
+- [x] **2.4 实现**：补齐所有host/component二分遍历，建立专用出口分支；复用停用底层逻辑，列表暖行128策略不改。保留页宿主、边界和活动索引撤销；恢复重建宿主。卸载遍历当前children及保留页/暖行去重全集。
+- [x] **2.5 GREEN**：重复2.3；跑test_components、test_component_view、test_component_lists、test_component_compat、test_component_commit，各退出0。包括逻辑出口根嵌套、当前页根kind更换及同页view换组件type/key。
+- [x] **2.6 提交与窄审查**：`feat: retain inactive component pages without host controls`；核对生命周期、活动索引和所有第三类描述分支。
 
 ## Task 3：公共出口 API 与完整组件导航
 
@@ -140,4 +140,4 @@
 
 ## 计划审阅与交付
 
-本计划已获用户认可。Task1实现及预算修复经独立审查通过；后续按复用的Paseo角色与相关会话连续实施。范围裁定、命令/退出码与任务进度见本计划独立SDD ledger，常规实现选择不重复询问。
+本计划已获用户认可。Task1及Task2实现和修复已独立审查通过；后续按复用的Paseo角色与相关会话连续实施。范围裁定、命令/退出码与任务进度见本计划独立SDD ledger，常规实现选择不重复询问。
