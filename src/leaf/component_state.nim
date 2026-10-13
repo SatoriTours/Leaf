@@ -61,6 +61,12 @@ proc requireIdle*(store:StateStore)=
   if executionRuntimeIdentity()!=0 and executionRuntimeIdentity()!=store.runtimeId:
     fail("State belongs to another executing Runtime")
   if store.phase!=StatePhase.idle or store.active!=nil:fail("cannot queue during component computation or commit")
+proc requireInitializing*(store:StateStore)=
+  ## Owner-accounting guard: UI thread and initializing phase. A normal component
+  ## initialization runs inside an active StateAttempt, which is allowed here.
+  store.uiThread()
+  if store.phase!=StatePhase.initializing:
+    fail("owned description bytes require component initialization")
 proc dirtyOwners*(attempt:StateAttempt):seq[uint64]=attempt.dirty
 proc pendingOwners*(store:StateStore):seq[uint64]=
   store.uiThread()

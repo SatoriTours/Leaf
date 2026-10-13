@@ -26,6 +26,7 @@ type
     currentPage:string
     currentRetention:PageRetention
     retained:ref Table[string,uint64]
+    ownedBytes:int
   ManagedStore=ref object
     owner:Runtime
     states:StateStore
@@ -172,11 +173,22 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
   d.edits[id]=item
   case desc.kind
   of DescriptionKind.component:
-    if old!=nil:item.model=old.model
+    if old!=nil:
+      item.model=old.model
+      item.ownedBytes=old.ownedBytes
     else:
       d.data.states.setPhase(StatePhase.initializing)
-      try:item.model=desc.erased.instantiate(newMountContext(d.data.states,id))
+      try:
+        let mount=newMountContext(d.data.states,id)
+        item.model=desc.erased.instantiate(mount)
+        item.ownedBytes=ownedDescriptionBytes(mount)
       finally:d.data.states.setPhase(StatePhase.idle)
+    # Owned configuration/description bytes are charged once, before children.
+    if item.ownedBytes!=0:
+      if item.ownedBytes > MaxTreeBytes - d.bytes:
+        fail("managed description exceeds node/instance/byte budget")
+      d.bytes+=item.ownedBytes
+      item.bytes+=item.ownedBytes
     if old!=nil and old.active and id notin d.dirty and desc.erased.equalProps(old.description.erased):
       item.children=old.children
       return id

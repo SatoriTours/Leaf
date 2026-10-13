@@ -119,6 +119,7 @@ proc newComponentRouter*(ctx: MountContext, routes: seq[Route],
     pages: seq[ComponentPageDefinition], initial = ""): ComponentRouter =
   if ctx == nil: fail("component router requires a mount context")
   let configuration = validateConfiguration(routes, pages, initial)
+  ctx.accountOwnedDescriptionBytes(configuration.bytes)
   result.registered = configuration.registered
   result.definitions = configuration.definitions
   result.names = configuration.names
@@ -149,3 +150,18 @@ proc currentRoute*(ctx: ComponentContext, router: ComponentRouter): Route =
   if ctx == nil: fail("current route requires a component context")
   if not ctx.ownsState(router.route): fail("router State is not owned by this component")
   router.registered[ctx.value(router.route)]
+
+proc renderPage*(ctx: ComponentContext, router: ComponentRouter,
+    key = "page-outlet"): UiDescription =
+  ## Public outlet for the candidate page/view. Owner and Runtime are validated
+  ## through the router State, and the page callback stays lazy: the closure
+  ## captures only the selected build and view, never the router configuration.
+  if ctx == nil: fail("renderPage requires a component context")
+  let route = currentRoute(ctx, router)
+  let definition = router.definitions.getOrDefault(route.page)
+  if definition.build == nil: fail("route page is not defined: " & route.page)
+  let build = definition.build
+  let view = route.view
+  pageOutlet(PageOutletSpec(routerId: router.token, page: route.page, view: view,
+    retention: definition.retention, configurationBytes: 0,
+    build: proc(): UiDescription = build(view)), key)
