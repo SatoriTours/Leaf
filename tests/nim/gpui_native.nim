@@ -160,6 +160,8 @@ proc main():int =
         clickTarget("row-" & $index)
         awaitCaption("row-" & $index,$index & ":1")
     echo "Passed batched variable-height viewport, independent Counter, visible row State and scrolling"
+  elif pages:
+    discard  # the pages fixture starts on its own main page; no initial counter click
   else:
     clickTarget("add")
   proc status():string =
@@ -197,8 +199,9 @@ proc main():int =
     awaitPages("main:1:中文草稿:0")
     clickTarget("go-unknown")
     awaitPages("main:1:中文草稿:1")
+    # reset clears count and draft, not the diagnostic error counter.
     clickTarget("reset")
-    awaitPages("main:0:中文草稿:0")
+    awaitPages("main:0:中文草稿:1")
     clickTarget("go-draft")
     awaitPages("draft:中文草稿")
     clickTarget("go-edit")
@@ -208,15 +211,18 @@ proc main():int =
     discard command(xdotool,@["type","--clearmodifiers","--delay","1","页面草稿"],root)
     awaitPages("draft-edit:页面草稿")
     clickTarget("go-main")
-    awaitPages("main:0:中文草稿:0")
+    awaitPages("main:0:中文草稿:1")
     clickTarget("go-draft")
     awaitPages("draft:页面草稿")
+    # go-scratch only exists on the main page, so return before navigating.
+    clickTarget("go-main")
+    awaitPages("main:0:中文草稿:1")
     clickTarget("go-scratch")
     awaitPages("scratch:0")
     clickTarget("scratch-add")
     awaitPages("scratch:1")
     clickTarget("go-main")
-    awaitPages("main:0:中文草稿:0")
+    awaitPages("main:0:中文草稿:1")
     clickTarget("go-scratch")
     awaitPages("scratch:0")
   else:

@@ -285,12 +285,15 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
           d.deactivate(leaving)
       let existing=item.retained.getOrDefault(spec.page)
       childId=d.reconcile(built,existing,id,owner,parentHost,pagePath,depth+1)
-    # The registry keeps every visited page (active or inactive); it changes
-    # only on first registration, disposal or an actual root-id replacement.
-    if item.retained.getOrDefault(spec.page)!=childId:
+    # The registry keeps every visited page (active or inactive). An absent key
+    # adds one entry charge; an existing page whose root id is replaced keeps
+    # the same registry entry and only updates its value.
+    let previous=item.retained.getOrDefault(spec.page)
+    if previous!=childId:
       ownRegistry()
       item.retained[spec.page]=childId
-      item.registryBytes+=outletRegistrationBytes(spec.page)
+      if previous==0:
+        item.registryBytes+=outletRegistrationBytes(spec.page)
       when defined(leafProtocolProbes):inc outletRegistryEdits
     item.currentPage=spec.page
     item.currentRetention=spec.retention

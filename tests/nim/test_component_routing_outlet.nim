@@ -1,6 +1,6 @@
 ## Task 2: low-level page outlets and retained page lifecycle. Uses the managed
 ## runtime directly; the public renderPage/router API belongs to Task 3.
-import std/[unittest, tables, options]
+import std/[unittest, options]
 import leaf/[core, widgets, components, host_session]
 import leaf/component_description
 import leaf/managed_runtime
