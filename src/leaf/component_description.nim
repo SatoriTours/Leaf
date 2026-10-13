@@ -1,13 +1,19 @@
 ## Immutable host/component descriptions. Erased models remain in Nim; neither
 ## component definitions nor callbacks are part of the host wire protocol.
-import std/[options,tables,sets,macros]
+import std/[options,tables,sets,macros,unicode]
 import ./[core,component_state]
 export component_state.State,component_state.StateWriteResult,
   component_state.StateEqual,component_state.StateSnapshot
 
 type
-  DescriptionKind* {.pure.} = enum host,component
+  DescriptionKind* {.pure.} = enum host,component,pageOutlet
   PageRetention* {.pure.} = enum retainState, disposeOnLeave
+  PageOutletSpec* = object
+    routerId*: uint64
+    page*,view*: string
+    retention*: PageRetention
+    configurationBytes*: int
+    build*: proc():UiDescription {.closure.}
   MountContext* = ref object
     store:StateStore
     owner:uint64
@@ -41,6 +47,7 @@ type
     instance:ErasedComponent
     instanceKey:string
     rowFactory:proc(index:int):UiDescription {.closure.}
+    outlet:PageOutletSpec
 
 var componentDeclarations {.compileTime.}:Table[string,string]
 macro componentIdentity(name:static[string],file:static[string],line,column:static[int],P,M:typedesc):untyped=
@@ -65,7 +72,9 @@ proc typeId*(definition:ErasedComponent):string=definition.identity
 proc revision*(definition:ErasedComponent):Option[uint64]=definition.version
 proc kind*(description:UiDescription):DescriptionKind=description.descriptionKind
 proc key*(description:UiDescription):string=
-  if description.descriptionKind==DescriptionKind.component:description.instanceKey else:description.node.key
+  case description.descriptionKind
+  of DescriptionKind.component,DescriptionKind.pageOutlet:description.instanceKey
+  of DescriptionKind.host:description.node.key
 proc hostNode*(description:UiDescription):Node=
   if description==nil or description.descriptionKind!=DescriptionKind.host:fail("description is not a host")
   description.node
@@ -81,6 +90,24 @@ proc ownsState*[T](ctx: ComponentContext, state: State[T]): bool =
   ## Internal context/owner validation; excluded from the components aggregate.
   if ctx == nil: return false
   stateOwnerMatches(state, ctx.store, ctx.owner)
+proc validOutletString(value, what: string) =
+  if value.len > MaxStringBytes: fail(what & " exceeds 1 MiB")
+  if validateUtf8(value) != -1: fail(what & " is not valid UTF-8")
+proc pageOutlet*(spec: PageOutletSpec, key = ""): UiDescription =
+  ## Low-level outlet entry; not part of the components aggregate.
+  if spec.routerId == 0: fail("page outlet requires a nonzero router identity")
+  validOutletString(spec.page, "page outlet page")
+  if spec.page.len == 0: fail("page outlet requires a page name")
+  validOutletString(spec.view, "page outlet view")
+  if spec.view.len == 0: fail("page outlet requires a view name")
+  if spec.configurationBytes < 0: fail("page outlet configuration bytes cannot be negative")
+  if spec.build == nil: fail("page outlet requires a page build")
+  if key.len > 0: validOutletString(key, "page outlet key")
+  UiDescription(descriptionKind: DescriptionKind.pageOutlet, outlet: spec, instanceKey: key)
+proc outletSpec*(description: UiDescription): PageOutletSpec =
+  if description == nil or description.descriptionKind != DescriptionKind.pageOutlet:
+    fail("description is not a page outlet")
+  description.outlet
 proc state*[T](ctx:MountContext,initial:T,equal:StateEqual[T]=nil,snapshot:StateSnapshot[T]=nil):State[T]=
   if ctx==nil or ctx.store.phase!=StatePhase.initializing:fail("State slots require mount initialization")
   ctx.store.allocateState(ctx.owner,initial,equal,snapshot)

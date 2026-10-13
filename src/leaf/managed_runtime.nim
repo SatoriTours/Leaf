@@ -22,6 +22,10 @@ type
     rowIndex:int
     rows:Table[string,RowSlot]
     rowClock:uint64
+    outlet:PageOutletSpec
+    currentPage:string
+    currentRetention:PageRetention
+    retained:ref Table[string,uint64]
   ManagedStore=ref object
     owner:Runtime
     states:StateStore
@@ -32,6 +36,7 @@ type
     instances:Table[uint64,Instance]
     index:Table[string,uint64]
     keys:Table[string,HashSet[uint64]]
+    outlets:Table[uint64,uint64]
     invalid:HashSet[uint64]
     count,componentCount,bytes:int
     policy:HostStylePolicy
@@ -51,20 +56,34 @@ type
     count,componentCount,bytes:int
     measurements:UpdateStats
     globalRefresh:bool
+    preparedOutlets:Table[uint64,uint64]
 var nextManagedId:uint64
 proc current(d:ManagedDriver,id:uint64):Instance=
   if d.edits.hasKey(id):d.edits.getOrDefault(id) else:d.data.instances.getOrDefault(id)
 proc hostRoot(d:ManagedDriver,id:uint64):NodeHandle=
   let item=d.current(id)
   if item==nil:return NoHandle
-  if item.description.kind==DescriptionKind.host:return item.handle
-  if item.children.len>0:return d.hostRoot(item.children[0])
+  case item.description.kind
+  of DescriptionKind.host:return item.handle
+  of DescriptionKind.component,DescriptionKind.pageOutlet:
+    if item.children.len>0:return d.hostRoot(item.children[0])
 proc segment(desc:UiDescription,index:int):string=
   let key=desc.key
   if key.len==0:"i:" & $index else:"k:" & $key.len & ":" & key
+const OutletRegistrationBytes=64
+proc newOutletRegistry():ref Table[string,uint64]=
+  new(result)
+  result[]=initTable[string,uint64]()
+proc cloneOutletRegistry(source:ref Table[string,uint64]):ref Table[string,uint64]=
+  result=newOutletRegistry()
+  if source!=nil:result[]=source[]
+proc outletRegistryBytes(registry:ref Table[string,uint64]):int=
+  if registry==nil:return 0
+  for key in registry.keys:result+=OutletRegistrationBytes+key.len
 proc descriptionBytes(desc:UiDescription,path:string):int=
   result=128+path.len+desc.key.len
-  if desc.kind==DescriptionKind.host:
+  case desc.kind
+  of DescriptionKind.host:
     let node=desc.hostNode
     result+=node.text.len+node.placeholder.len
     for styles in [node.styles,node.attributes]:
@@ -73,23 +92,34 @@ proc descriptionBytes(desc:UiDescription,path:string):int=
       let source=node.listSource
       result+=source.len*16
       for i in 0..<source.len:result+=source.itemKey(i).len
+  of DescriptionKind.component:discard
+  of DescriptionKind.pageOutlet:
+    let spec=desc.outletSpec
+    result+=32+spec.page.len+spec.view.len+spec.configurationBytes
 proc copyInstance(item:Instance):Instance=
   result=Instance()
   result[]=item[]
 proc materializeList(d:ManagedDriver,item:Instance,first,finish:int,protected:seq[int])
+proc deactivate(d:ManagedDriver,id:uint64)
 proc erase(d:ManagedDriver,id:uint64)=
   let old=d.current(id)
   if old==nil:return
   var children=old.children
   for slot in old.rows.values:
     if slot.id notin children:children.add(slot.id)
+  if old.description.kind==DescriptionKind.pageOutlet and old.retained!=nil:
+    for page,root in old.retained:
+      if root!=0 and root notin children:children.add(root)
   for child in children:d.erase(child)
   d.edits[id]=nil
   dec d.count;d.bytes-=old.bytes
-  if old.description.kind==DescriptionKind.component:dec d.componentCount
-  if old.description.kind==DescriptionKind.host:
+  case old.description.kind
+  of DescriptionKind.component:
+    dec d.componentCount
+    if old.active:d.changes.boundaries.add(HostBoundary(id:id))
+  of DescriptionKind.host:
     if old.handle!=NoHandle:d.changes.removals.add(old.handle)
-  elif old.active:d.changes.boundaries.add(HostBoundary(id:id))
+  of DescriptionKind.pageOutlet:discard
 proc allocate(d:ManagedDriver):uint64=
   if d.data.nextId==high(uint64):fail("component identity exhausted")
   result=d.data.nextId;inc d.data.nextId
@@ -109,8 +139,10 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
   if depth>MaxDepth:fail("managed description exceeds depth 64")
   var old=d.current(oldId)
   let same=old!=nil and old.description.kind==desc.kind and old.description.key==desc.key and
-    (if desc.kind==DescriptionKind.component:old.description.erased.typeId==desc.erased.typeId
-     else:old.description.hostNode.kind==desc.hostNode.kind)
+    (case desc.kind
+     of DescriptionKind.component:old.description.erased.typeId==desc.erased.typeId
+     of DescriptionKind.host:old.description.hostNode.kind==desc.hostNode.kind
+     of DescriptionKind.pageOutlet:true)
   if not same:
     if old!=nil:d.erase(old.id)
     old=nil
@@ -123,10 +155,23 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
   else:
     d.bytes-=old.bytes
     item.rowIndex=old.rowIndex
-  item.bytes=descriptionBytes(desc,path);d.bytes+=item.bytes
+  if desc.kind==DescriptionKind.pageOutlet:
+    if old!=nil:
+      item.outlet=old.outlet
+      item.retained=old.retained
+      item.currentPage=old.currentPage
+      item.currentRetention=old.currentRetention
+      item.children=old.children
+    else:
+      item.retained=newOutletRegistry()
+      item.currentPage=""
+      item.currentRetention=PageRetention.retainState
+  let registryBefore=if desc.kind==DescriptionKind.pageOutlet:outletRegistryBytes(item.retained) else:0
+  item.bytes=descriptionBytes(desc,path)+registryBefore;d.bytes+=item.bytes
   if d.count-d.componentCount>MaxNodes or d.componentCount>MaxNodes or d.bytes>MaxTreeBytes:fail("managed description exceeds node/instance/byte budget")
   d.edits[id]=item
-  if desc.kind==DescriptionKind.component:
+  case desc.kind
+  of DescriptionKind.component:
     if old!=nil:item.model=old.model
     else:
       d.data.states.setPhase(StatePhase.initializing)
@@ -149,7 +194,7 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
     let root=d.hostRoot(id)
     if old==nil or root!=oldRoot or d.globalRefresh:
       d.changes.boundaries.add(HostBoundary(id:id,root:root,parent:owner))
-  else:
+  of DescriptionKind.host:
     item.handle=if old==nil or old.handle==NoHandle:d.data.reconciler.reserveHandle() else:old.handle
     let node=desc.hostNode
     item.description=desc.hostOnly()
@@ -192,6 +237,44 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
     for part,childId in previous:
       if part notin seen:d.erase(childId)
     d.changes.children.add(HostChildren(parent:item.handle,children:order))
+  of DescriptionKind.pageOutlet:
+    let spec=desc.outletSpec
+    item.outlet=spec
+    let built=spec.build()
+    if built==nil:fail("page outlet build returned nil")
+    let pagePath=path & "/p:" & $spec.page.len & ":" & spec.page
+    var registryOwned=old==nil
+    template ownRegistry() =
+      if not registryOwned:
+        item.retained=cloneOutletRegistry(item.retained);registryOwned=true
+    var childId:uint64
+    if item.currentPage==spec.page and item.children.len>0:
+      childId=d.reconcile(built,item.children[0],id,owner,parentHost,pagePath,depth+1)
+    else:
+      if item.currentPage.len>0 and item.children.len>0:
+        let leaving=item.children[0]
+        if item.currentRetention==PageRetention.disposeOnLeave:
+          d.erase(leaving)
+          if item.retained.getOrDefault(item.currentPage)!=0:
+            ownRegistry()
+            item.retained.del(item.currentPage)
+        else:
+          d.deactivate(leaving)
+      let existing=item.retained.getOrDefault(spec.page)
+      childId=d.reconcile(built,existing,id,owner,parentHost,pagePath,depth+1)
+    # The registry keeps every visited page (active or inactive); it changes
+    # only on first registration, disposal or an actual root-id replacement.
+    if item.retained.getOrDefault(spec.page)!=childId:
+      ownRegistry()
+      item.retained[spec.page]=childId
+    item.currentPage=spec.page
+    item.currentRetention=spec.retention
+    item.children= @[childId]
+    let registryAfter=outletRegistryBytes(item.retained)
+    if registryAfter!=registryBefore:
+      item.bytes+=registryAfter-registryBefore
+      d.bytes+=registryAfter-registryBefore
+      if d.bytes>MaxTreeBytes:fail("managed description exceeds node/instance/byte budget")
   id
 proc repairAncestors(d:ManagedDriver,id:uint64)=
   var child=id
@@ -200,7 +283,8 @@ proc repairAncestors(d:ManagedDriver,id:uint64)=
   while parent!=0:
     let ancestor=d.current(parent)
     if ancestor==nil:return
-    if ancestor.description.kind==DescriptionKind.host:
+    case ancestor.description.kind
+    of DescriptionKind.host:
       var order:seq[NodeHandle]
       for child in ancestor.children:order.add(d.hostRoot(child))
       var replaced=false
@@ -208,24 +292,37 @@ proc repairAncestors(d:ManagedDriver,id:uint64)=
         if existing.parent==ancestor.handle:existing.children=order;replaced=true
       if not replaced:d.changes.children.add(HostChildren(parent:ancestor.handle,children:order))
       return
-    d.changes.boundaries.add(HostBoundary(id:parent,root:d.hostRoot(child),parent:ancestor.owner))
+    of DescriptionKind.component:
+      d.changes.boundaries.add(HostBoundary(id:parent,root:d.hostRoot(child),parent:ancestor.owner))
+    of DescriptionKind.pageOutlet:discard
     child=parent;parent=ancestor.parent
 proc retainedDescription(d:ManagedDriver,id:uint64):UiDescription=
   let item=d.current(id)
-  if item.description.kind==DescriptionKind.component:return item.description
-  var children:seq[UiDescription]
-  for child in item.children:children.add(d.retainedDescription(child))
-  hostShell(item.description.hostNode,children)
+  case item.description.kind
+  of DescriptionKind.component:return item.description
+  of DescriptionKind.pageOutlet:
+    if item.children.len==0:fail("page outlet has no active page")
+    let active=d.retainedDescription(item.children[0])
+    var spec=item.description.outletSpec
+    spec.build=proc():UiDescription=active
+    return pageOutlet(spec,item.description.key)
+  of DescriptionKind.host:
+    var children:seq[UiDescription]
+    for child in item.children:children.add(d.retainedDescription(child))
+    hostShell(item.description.hostNode,children)
 proc deactivate(d:ManagedDriver,id:uint64)=
   let old=d.current(id)
   if old==nil or not old.active:return
   let item=old.copyInstance()
   item.active=false
   for child in item.children:d.deactivate(child)
-  if item.description.kind==DescriptionKind.host:
+  case item.description.kind
+  of DescriptionKind.host:
     if item.handle!=NoHandle:d.changes.removals.add(item.handle)
     item.handle=NoHandle
-  else:d.changes.boundaries.add(HostBoundary(id:id))
+  of DescriptionKind.component:
+    d.changes.boundaries.add(HostBoundary(id:id))
+  of DescriptionKind.pageOutlet:discard
   d.edits[id]=item
 proc materializeList(d:ManagedDriver,item:Instance,first,finish:int,protected:seq[int])=
   let source=item.description.hostNode.listSource
@@ -268,7 +365,22 @@ proc materializeList(d:ManagedDriver,item:Instance,first,finish:int,protected:se
     d.erase(slot.id);item.rows.del(key)
   d.edits[item.id]=item
   d.changes.children.add(HostChildren(parent:item.handle,children:handles))
+proc survivingOutlets(d:ManagedDriver):Table[uint64,uint64]=
+  ## Final-candidate router identity check. A key change creates the new outlet
+  ## before the old one is erased, so only outlets that survive the candidate
+  ## may claim one route identity.
+  for token,ownerId in d.data.outlets:
+    let item=d.current(ownerId)
+    if item!=nil and item.description.kind==DescriptionKind.pageOutlet and item.outlet.routerId==token:
+      result[token]=ownerId
+  for id,item in d.edits:
+    if item==nil or item.description.kind!=DescriptionKind.pageOutlet:continue
+    let token=item.outlet.routerId
+    if result.hasKey(token) and result[token]!=id:
+      fail("duplicate page outlet route identity")
+    result[token]=id
 proc prepareHost(d:ManagedDriver)=
+  d.preparedOutlets=d.survivingOutlets()
   var changes=HostChanges(window:d.changes.window)
   var upserts:Table[NodeHandle,HostRecord]
   var orders:Table[NodeHandle,HostChildren]
@@ -374,6 +486,7 @@ method publish*(d:ManagedDriver) {.raises:[].}=
       if key.len>0:data.keys.mgetOrPut(key,default(HashSet[uint64])).incl(id)
   data.reconciler.publish(d.candidate)
   data.states.publishAttempt(d.attempt)
+  data.outlets=move(d.preparedOutlets)
   data.root=d.root;data.count=d.count;data.componentCount=d.componentCount;data.bytes=d.bytes
   data.snapshotValid=d.exported.isSome
   if d.exported.isSome:data.snapshot=d.exported.get
@@ -391,6 +504,7 @@ method reject*(d:ManagedDriver) {.raises:[].}=
   d.data.invalid.clear()
   for owner in d.created:d.data.states.disposeOwner(owner)
   d.edits.clear();d.candidate=nil;d.attempt=nil;d.created.setLen(0)
+  d.preparedOutlets.clear()
 proc lookup(data:ManagedStore,key:string):Instance=
   var id=data.index.getOrDefault(key)
   if id==0:
@@ -401,10 +515,15 @@ proc lookup(data:ManagedStore,key:string):Instance=
 proc exportNode(d:ManagedDriver,id:uint64,rowIndex= -1):MountedNode=
   let item=d.current(id)
   let index=if rowIndex>=0:rowIndex else:item.rowIndex
-  if item.description.kind==DescriptionKind.component:return d.exportNode(item.children[0],index)
-  var children:seq[MountedNode]
-  for child in item.children:children.add(d.exportNode(child))
-  mountedDescription(item.description.hostNode,item.path,children,itemIndex=index)
+  case item.description.kind
+  of DescriptionKind.component:return d.exportNode(item.children[0],index)
+  of DescriptionKind.pageOutlet:
+    if item.children.len==0:fail("page outlet has no active page")
+    return d.exportNode(item.children[0],index)
+  of DescriptionKind.host:
+    var children:seq[MountedNode]
+    for child in item.children:children.add(d.exportNode(child))
+    mountedDescription(item.description.hostNode,item.path,children,itemIndex=index)
 method exportSnapshot*(d:ManagedDriver):Snapshot=
   if d.candidate!=nil:
     let config=d.data.owner.applicationConfig
@@ -446,7 +565,7 @@ proc componentApplication*(root:UiDescription,title:string,width=640,height=480,
     let data=ManagedStore(owner:owner,states:newStateStore(owner.runtimeIdentity),
       reconciler:newHostReconciler(nextManagedId),rootDescription:root,nextId:1,
       instances:initTable[uint64,Instance](MaxNodes*4),index:initTable[string,uint64](MaxNodes*4),
-      keys:initTable[string,HashSet[uint64]](MaxNodes*4))
+      keys:initTable[string,HashSet[uint64]](MaxNodes*4),outlets:initTable[uint64,uint64](1024))
     ManagedDriver(data:data),executionScope)
 proc managed*(runtime:Runtime):bool=runtime.runtimeDriver of ManagedDriver
 proc managedReconciler*(runtime:Runtime):HostReconciler=
