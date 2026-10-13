@@ -142,6 +142,8 @@ suite "managed page navigation rejection":
       check acceptedA.read() == valueA
       check retainedR.read() == 2
       check rt.stats.treeBytes == bytes0
+      # The visible accepted page text still belongs to A, not a leaked candidate.
+      check rt.find("shared").node.text == ("a" & $valueA)
       if mode == scopeEntry:
         # Scope entry fails before the stage, so no candidate State exists.
         check initB == 0
@@ -155,6 +157,7 @@ suite "managed page navigation rejection":
       check currentRoute(router).name == "home"
       check rt.acceptedRevision == rtRev
       check navCalls == (if mode == scopeEntry: 0 else: 1)
+      check rt.find("shared").node.text == ("a" & $valueA)
       # The old accepted host handle still routes exactly one business event.
       check session.dispatch(aHandle, 1, rt.acceptedRevision, 1, 1, Event(kind: click))
       check clicksA == 1
