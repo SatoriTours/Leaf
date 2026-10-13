@@ -123,7 +123,7 @@
 - [x] **5.4 主会话集成验证**：`nim c -r --out:target/nim/test_runner scripts/test.nim`、`cargo test --workspace --locked`、`cargo fmt --all --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`nim c -r --out:target/nim/check_gpui_v2_abi scripts/check_gpui_v2_abi.nim`、git diff-check。上述Nim/ABI检查针对最终代码实际执行；Rust检查执行一次，或在Rust源码/锁文件/工具链身份一致且已有成功证据时复用最近结果，明确记录哪些未重跑及准确来源。
 - [x] **5.5 真实窗口矩阵**：使用单独native-test-support桥接构建和显式LEAF_GPUI_LIBRARY，分别ABI=1/2、CACHE=0/1运行 `LEAF_TEST_APP=tests/nim/component_pages_native_app.nim nim c -r --out:target/nim/native_test scripts/native_test.nim`；配置现有Xvfb/xdotool依赖。发行SDK前恢复默认桥接，测试专用probe不进入包。
 - [x] **5.6 SDK与文档**：跑 `scripts/test.nim --release-only` 并核对包内含component_routing模块；对移动SDK中的页面示例做headless/构建回归。文档讲清自动维护、隐藏State、销毁策略、不可保留控件编辑态、低层枚举case迁移和各平台实际结果；SDK发布只沿用既有授权与流程。
-- [ ] **5.7 验收记录与最终审查**：证据保存原目录 `target/verification/component-routing/<run-id>/`，含提交/源和库hash、命令/退出码、结构性计数与未执行项。全分支审查后修复并重复受影响验证，提交 `feat: document and verify managed page routing`。
+- [x] **5.7 验收记录与最终审查**：证据保存原目录 `target/verification/component-routing/<run-id>/`，含提交/源和库hash、命令/退出码、结构性计数与未执行项。全分支审查后修复并重复受影响验证，提交 `feat: document and verify managed page routing`。
 
 ## 规格覆盖与完成判定
 

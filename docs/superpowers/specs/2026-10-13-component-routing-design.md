@@ -1,6 +1,6 @@
 # Leaf 托管组件路由设计草案
 
-状态：已按用户认可规格实施，任务门禁已通过；已执行平台证据见验证记录，整分支最终审查随后完成。基线 `f427bad02ae799a6169008975d505ee00e3d28be`。
+状态：已按用户认可规格实施，任务门禁已通过；已执行平台证据见验证记录，整分支最终审查已通过。基线 `f427bad02ae799a6169008975d505ee00e3d28be`。
 
 ## 1. 目标与本轮范围
 
@@ -51,7 +51,7 @@ proc renderPage(ctx: ComponentContext, router: ComponentRouter,
   key = "page-outlet"): UiDescription
 ```
 
-上述类型字段及函数实施时按 Nim 公开符号规则加 `*`；此处省略标记便于阅读。API 仍待本草案批准，不提前写占位模块。
+上述类型字段及函数实施时按 Nim 公开符号规则加 `*`；此处省略标记便于阅读。API 已按用户认可的规格实现，并完成任务及整分支独立审查。
 
 - 在组件 initialize 中创建 router；其 active route 为 State[int]，归创建它的组件所有。
 - navigate 校验 name/path 后排队修改 State；与现有事件、uiTask、batch 和 flush 共用接受门禁。在router仍有效时，未知地址抛UiError且不排队；已销毁router优先按StateWriteResult.disposed返回，不访问已释放页面资源。
