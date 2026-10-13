@@ -14,6 +14,10 @@ var outletKey = "page-outlet"
 var showNav = true
 var duplicateOutlet = false
 var bigRouterCount = 1
+var savedCtx, failedCtx: MountContext
+var borrowSavedCtx = false
+var showBorrower = false
+var ctxState: State[int]
 
 let PageA = defineComponent[int, State[int]]("PublicPageA",
   proc(ctx: MountContext, p: int): State[int] =
@@ -87,6 +91,50 @@ let BigHost = defineComponent[int, int]("BigRouterHost",
   proc(ctx: ComponentContext, p: int, m: int): UiDescription =
     host(text("big", key="big")))
 
+let smallRoutes = @[Route(name: "small", path: "/", page: "small", view: "main")]
+let smallPages = @[ComponentPageDefinition(name: "small", views: @["main"],
+  build: proc(view: string): UiDescription = host(text("small", key="small")))]
+
+let CtxOwner = defineComponent[int, State[int]]("CtxOwner",
+  proc(ctx: MountContext, p: int): State[int] =
+    savedCtx = ctx
+    discard newComponentRouter(ctx, smallRoutes, smallPages, "small")
+    result = ctx.state(0)
+    ctxState = result,
+  proc(ctx: ComponentContext, p: int, s: State[int]): UiDescription =
+    host(text("ctx-a", key="ctx-a")))
+
+let CtxBorrower = defineComponent[int, int]("CtxBorrower",
+  proc(ctx: MountContext, p: int): int =
+    if borrowSavedCtx:
+      discard newComponentRouter(savedCtx, bigRoutes(), bigPages, "big0")
+    else:
+      discard newComponentRouter(ctx, smallRoutes, smallPages, "small")
+    p,
+  proc(ctx: ComponentContext, p: int, m: int): UiDescription =
+    host(text("ctx-b", key="ctx-b")))
+
+let CtxShell = defineComponent[int, int]("CtxShell",
+  proc(ctx: MountContext, p: int): int = p,
+  proc(ctx: ComponentContext, p: int, m: int): UiDescription =
+    var children = @[component(CtxOwner, 0)]
+    if showBorrower: children.add(component(CtxBorrower, 0))
+    hostShell(column(@[], key="ctx-shell"), children))
+
+let CtxFails = defineComponent[int, int]("CtxFails",
+  proc(ctx: MountContext, p: int): int =
+    failedCtx = ctx
+    fail("initializer failed"),
+  proc(ctx: ComponentContext, p: int, m: int): UiDescription =
+    host(text("ctx-f", key="ctx-f")))
+
+let CtxTryFailed = defineComponent[int, int]("CtxTryFailed",
+  proc(ctx: MountContext, p: int): int =
+    discard newComponentRouter(failedCtx, smallRoutes, smallPages, "small")
+    p,
+  proc(ctx: ComponentContext, p: int, m: int): UiDescription =
+    host(text("ctx-tf", key="ctx-tf")))
+
 proc consumer(sessionId: uint64): HostConsumer =
   HostConsumer(sessionId: sessionId,
     prepare: proc(batch: HostBatch) = discard,
@@ -100,6 +148,11 @@ proc reset() =
   showNav = true
   duplicateOutlet = false
   bigRouterCount = 1
+  savedCtx = nil
+  failedCtx = nil
+  borrowSavedCtx = false
+  showBorrower = false
+  ctxState = default(State[int])
   stateA = default(State[int]); stateB = default(State[int])
   router = default(ComponentRouter)
 
@@ -321,3 +374,36 @@ suite "public managed page navigation":
     check "b0" in rejected
     check "a0" notin rejected
     session.close()
+
+  test "sealed_mount_context_cannot_charge_a_later_initialization":
+    reset()
+    showBorrower = false
+    borrowSavedCtx = true
+    let rt = newRuntime(componentApplication(component(CtxShell, 0), "ctx-frame"))
+    let session = attachHostSession(rt, consumer(40'u64))
+    let aCharge = ownedDescriptionBytes(savedCtx)
+    check aCharge > 0
+    let revision = rt.acceptedRevision
+    showBorrower = true
+    rt.invalidateRoot()
+    expect UiError:
+      discard rt.flush()
+    check rt.acceptedRevision == revision
+    check ownedDescriptionBytes(savedCtx) == aCharge
+    check ctxState.read() == 0
+    check rt.find("ctx-a") != nil
+    # The same Runtime continues; B may use its own fresh initialization frame.
+    borrowSavedCtx = false
+    rt.invalidateRoot()
+    check rt.flush()
+    check rt.acceptedRevision == revision + 1
+    check rt.find("ctx-b") != nil
+    session.close()
+
+  test "failed_initializer_seals_its_context":
+    reset()
+    expect UiError:
+      discard newRuntime(componentApplication(component(CtxFails, 0), "ctx-fail"))
+    check failedCtx != nil
+    expect UiError:
+      discard newRuntime(componentApplication(component(CtxTryFailed, 0), "ctx-try"))

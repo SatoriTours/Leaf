@@ -177,12 +177,17 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
       item.model=old.model
       item.ownedBytes=old.ownedBytes
     else:
+      var mount:MountContext
       d.data.states.setPhase(StatePhase.initializing)
       try:
-        let mount=newMountContext(d.data.states,id)
+        mount=newMountContext(d.data.states,id)
         item.model=desc.erased.instantiate(mount)
-        item.ownedBytes=ownedDescriptionBytes(mount)
-      finally:d.data.states.setPhase(StatePhase.idle)
+      finally:
+        # Close the accounting frame on both the success and the exception exit;
+        # the readonly scalar is read once after the frame is closed.
+        if mount!=nil:sealMountContext(mount)
+        d.data.states.setPhase(StatePhase.idle)
+      item.ownedBytes=ownedDescriptionBytes(mount)
     # Owned configuration/description bytes are charged once, before children.
     if item.ownedBytes!=0:
       if item.ownedBytes > MaxTreeBytes - d.bytes:

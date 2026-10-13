@@ -18,6 +18,7 @@ type
     store:StateStore
     owner:uint64
     ownedBytes:int
+    sealed:bool
   ComponentContext* = ref object
     store:StateStore
     attempt:StateAttempt
@@ -89,13 +90,20 @@ proc newComponentContext*(store:StateStore,attempt:StateAttempt,owner:uint64,
   ComponentContext(store:store,attempt:attempt,owner:owner,invalidateOwner:invalidateOwner)
 proc accountOwnedDescriptionBytes*(ctx: MountContext, bytes: int) =
   ## Initialization-only charge for configuration/description bytes owned by the
-  ## component being mounted. Subtraction keeps the check overflow-free.
+  ## component being mounted. Subtraction keeps the check overflow-free. A
+  ## context closed when its initializer returned can never charge again, even
+  ## while another owner's initialization keeps the store phase open.
   if ctx == nil: fail("missing mount context")
+  if ctx.sealed: fail("mount context is already closed")
   requireInitializing(ctx.store)
   if bytes < 0: fail("owned description bytes cannot be negative")
   if bytes > MaxTreeBytes - ctx.ownedBytes:
     fail("owned description bytes exceed 16 MiB")
   ctx.ownedBytes += bytes
+proc sealMountContext*(ctx: MountContext) =
+  ## Runtime-internal: close this initialization frame on both the success and
+  ## the exception exit of the initializer.
+  if ctx != nil: ctx.sealed = true
 proc ownedDescriptionBytes*(ctx: MountContext): int =
   ## Read-only accumulated owner cost, usable after initialization returns.
   if ctx == nil: return 0

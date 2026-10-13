@@ -3,7 +3,7 @@ import ./core
 import ./[component_description,component_view]
 # ownsState, outlet internals and owner-accounting hooks stay runtime-internal.
 export component_description except ownsState,pageOutlet,outletSpec,PageOutletSpec,
-  accountOwnedDescriptionBytes,ownedDescriptionBytes
+  accountOwnedDescriptionBytes,ownedDescriptionBytes,sealMountContext
 export component_view
 import ./component_routing
 export component_routing
