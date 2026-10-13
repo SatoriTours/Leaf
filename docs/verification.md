@@ -107,10 +107,10 @@ Linux 实际窗口：先 `cargo build -p leaf-gpui --features native-test-suppor
 
 ## 组件页面路由（2026-10-13）
 
-运行 `nim c -r --path:src tests/nim/test_component_routing_performance.nim`（结构性计数）与 `-d:leafProtocolProbes` 变体（registry 工作量计数）。`navigation_work_is_independent_of_static_siblings` 设 100/1000/5000 个静态兄弟：导航后静态组件 render 次数为 0、静态宿主句柄不变、`snapshotExports` 不变；捕获 batch 的宿主操作不涉及静态句柄。页面根句柄变化时共享父宿主产生一次 `setChildren`，其子句柄数组为兄弟数 +1（101/1001/5001），与操作数分开报告。往返 100 次后 `mountedNodes`/`treeBytes` 与预热值相等（保留不增长）。`-d:leafProtocolProbes` 下 `warm_revisits_do_not_edit_or_rescan_the_registry` 证明三页各访问一次后 100 次重访不新增 registry 登记、不改变预算。
+托管路由、自动State保留/销毁、配置与注册表计费、故障回滚及虚拟列表回归已通过独立任务审查。实际生产输入一致的bade396完成官方91个Nim套件和独立4个发布套件；后续bb2e981仅补性能测试围栏，普通3项/probes4项退出0。ABI布局157项通过；Rust43测试及fmt/clippy在输入和工具链一致核对后复用本轮成功结果。
 
-这些是结构性计数，不是恒定 CPU 时间或 FFI 字节的证明；宽父宿主的 `setChildren` 体积随未变兄弟线性增长。显式 `runtime.snapshot` 在计时与计数检查之外。
+Linux私有Xvfb/软件渲染的ABI1/2×CACHE0/1四组真实页面窗口均退出0，覆盖计数、重置、未知地址、完整中文草稿编辑及往返保留、disposeOnLeave和正常关闭。使用独立native-test-support桥接库；发行SDK搬迁验证使用普通桥接库。SDK在仓库外的中文/空格/`$`路径完成八条实际命令及行为断言，包内新模块和生产源码SHA一致。
 
-功能与故障回归：`test_component_routing`、`test_component_routing_state`、`test_component_routing_outlet`、`test_component_routing_faults`、`test_component_routing_limits`、`test_component_faults`、`test_component_lists`、`test_host_reconcile` 在 Linux/ORC headless 全部退出 0。示例 `examples/component_pages.nim` 通过 `--check` 与 `--headless --click go-draft --click go-edit`；`tests/nim/component_pages_native_app.nim` 与 `tests/nim/gpui_native.nim` 的 `LEAF_TEST_PAGES=1` 分支编译通过，真实 X11 四组 ABI/CACHE 窗口执行由主会话按既有 frozen native-test 桥接完成。
+100/1000/5000静态兄弟的导航均为静态render增量0、Snapshot导出增量0、6个宿主操作。共享父setChildren分别携带101/1001/5001个句柄（raw child payload808/8008/40008字节），这些样本不证明恒定CPU或总FFI字节。100完整往返保留A11/B22/C33及初始化身份；同页更换根不重复计费，prepare拒绝后验证旧registry映射仍可恢复。
 
-未执行（NotRun）：真实 Windows/macOS 窗口、系统 IME 组合阶段、跨 DPI/多屏以及发行 SDK 安装后的页面回归；这些不由 Linux headless 或 X11 模拟输入替代。最终全 Nim/Rust、四组窗口和 SDK 结果由主会话在代码冻结后统一记录。
+[完整验证记录](superpowers/reviews/2026-10-13-component-routing-verification.md)列明每项实际提交、命令、身份复用、证据及范围裁定。真实Windows/macOS桌面、系统IME组合阶段和跨屏DPI仍为NotRun，旧React计划13.4保持未关闭。
