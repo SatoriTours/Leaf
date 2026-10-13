@@ -365,22 +365,41 @@ proc materializeList(d:ManagedDriver,item:Instance,first,finish:int,protected:se
     d.erase(slot.id);item.rows.del(key)
   d.edits[item.id]=item
   d.changes.children.add(HostChildren(parent:item.handle,children:handles))
-proc survivingOutlets(d:ManagedDriver):Table[uint64,uint64]=
-  ## Final-candidate router identity check. A key change creates the new outlet
-  ## before the old one is erased, so only outlets that survive the candidate
-  ## may claim one route identity.
-  for token,ownerId in d.data.outlets:
-    let item=d.current(ownerId)
-    if item!=nil and item.description.kind==DescriptionKind.pageOutlet and item.outlet.routerId==token:
-      result[token]=ownerId
+when defined(leafProtocolProbes):
+  var outletIndexLookups*:uint64
+  var outletIndexEdits*:uint64
+proc prepareOutlets(d:ManagedDriver)=
+  ## Incremental router-identity overlay. Only tokens touched by this candidate
+  ## are checked, and only their final owner (or a removal encoded as 0) enters
+  ## the delta; an unrelated local update scans or copies no index entries.
+  d.preparedOutlets.clear()
+  var touched:HashSet[uint64]
+  var candidateOwners:Table[uint64,uint64]
   for id,item in d.edits:
-    if item==nil or item.description.kind!=DescriptionKind.pageOutlet:continue
-    let token=item.outlet.routerId
-    if result.hasKey(token) and result[token]!=id:
-      fail("duplicate page outlet route identity")
-    result[token]=id
+    let accepted=d.data.instances.getOrDefault(id)
+    if accepted!=nil and accepted.description.kind==DescriptionKind.pageOutlet:
+      touched.incl(accepted.outlet.routerId)
+    if item!=nil and item.description.kind==DescriptionKind.pageOutlet:
+      let token=item.outlet.routerId
+      touched.incl(token)
+      if candidateOwners.hasKey(token) and candidateOwners[token]!=id:
+        fail("duplicate page outlet route identity")
+      candidateOwners[token]=id
+  if touched.len==0:return
+  for token in touched:
+    var owner=0'u64
+    if candidateOwners.hasKey(token):owner=candidateOwners[token]
+    when defined(leafProtocolProbes):inc outletIndexLookups
+    let acceptedOwner=d.data.outlets.getOrDefault(token)
+    if acceptedOwner!=0:
+      let survivor=d.current(acceptedOwner)
+      if survivor!=nil and survivor.description.kind==DescriptionKind.pageOutlet and survivor.outlet.routerId==token:
+        if owner!=0 and owner!=acceptedOwner:fail("duplicate page outlet route identity")
+        if owner==0:owner=acceptedOwner
+    d.preparedOutlets[token]=owner
+    when defined(leafProtocolProbes):inc outletIndexEdits
 proc prepareHost(d:ManagedDriver)=
-  d.preparedOutlets=d.survivingOutlets()
+  d.prepareOutlets()
   var changes=HostChanges(window:d.changes.window)
   var upserts:Table[NodeHandle,HostRecord]
   var orders:Table[NodeHandle,HostChildren]
@@ -486,7 +505,10 @@ method publish*(d:ManagedDriver) {.raises:[].}=
       if key.len>0:data.keys.mgetOrPut(key,default(HashSet[uint64])).incl(id)
   data.reconciler.publish(d.candidate)
   data.states.publishAttempt(d.attempt)
-  data.outlets=move(d.preparedOutlets)
+  # Apply only the prepared token delta; unrelated registrations are untouched.
+  for token,owner in d.preparedOutlets:
+    if owner==0:data.outlets.del(token)
+    else:data.outlets[token]=owner
   data.root=d.root;data.count=d.count;data.componentCount=d.componentCount;data.bytes=d.bytes
   data.snapshotValid=d.exported.isSome
   if d.exported.isSome:data.snapshot=d.exported.get
@@ -565,7 +587,7 @@ proc componentApplication*(root:UiDescription,title:string,width=640,height=480,
     let data=ManagedStore(owner:owner,states:newStateStore(owner.runtimeIdentity),
       reconciler:newHostReconciler(nextManagedId),rootDescription:root,nextId:1,
       instances:initTable[uint64,Instance](MaxNodes*4),index:initTable[string,uint64](MaxNodes*4),
-      keys:initTable[string,HashSet[uint64]](MaxNodes*4),outlets:initTable[uint64,uint64](1024))
+      keys:initTable[string,HashSet[uint64]](MaxNodes*4),outlets:initTable[uint64,uint64](MaxNodes*2))
     ManagedDriver(data:data),executionScope)
 proc managed*(runtime:Runtime):bool=runtime.runtimeDriver of ManagedDriver
 proc managedReconciler*(runtime:Runtime):HostReconciler=

@@ -101,6 +101,7 @@ proc pageOutlet*(spec: PageOutletSpec, key = ""): UiDescription =
   validOutletString(spec.view, "page outlet view")
   if spec.view.len == 0: fail("page outlet requires a view name")
   if spec.configurationBytes < 0: fail("page outlet configuration bytes cannot be negative")
+  if spec.configurationBytes > MaxTreeBytes: fail("page outlet configuration bytes exceed 16 MiB")
   if spec.build == nil: fail("page outlet requires a page build")
   if key.len > 0: validOutletString(key, "page outlet key")
   UiDescription(descriptionKind: DescriptionKind.pageOutlet, outlet: spec, instanceKey: key)
