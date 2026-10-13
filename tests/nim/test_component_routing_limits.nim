@@ -15,6 +15,7 @@ var bigGroups = 0
 var bigDepth = 0
 var bigState: State[int]
 var bigInit = 0
+var failedBig: seq[State[int]]
 
 proc bigText(): string =
   if bigChinese: repeat("中", bigNodeText div 3)
@@ -93,18 +94,25 @@ proc resetLimits() =
   bigDepth = 0
   bigState = default(State[int])
   bigInit = 0
+  failedBig.setLen(0)
 
 proc newLimitsRt(sessionId = 70'u64): tuple[rt: Runtime, session: HostSession] =
   let rt = newRuntime(componentApplication(component(LimitsShell, 0), "limits"))
   (rt, attachHostSession(rt, consumer(sessionId)))
 
-proc rejected(rt: Runtime, revision: uint64, page, activeKey: string) =
+proc rejected(rt: Runtime, revision: uint64, page, activeKey, activePage: string) =
+  ## Every rejection must actually initialize a fresh candidate page and then
+  ## dispose that candidate State; the accepted ledger must not move.
+  let before = bigInit
   discard navigate(router, page)
   expect UiError:
     discard rt.flush()
   check rt.acceptedRevision == revision
-  check currentRoute(router).name == (if activeKey == "home": "home" else: "big")
+  check currentRoute(router).name == activePage
   check rt.find(activeKey) != nil
+  check bigInit == before + 1
+  failedBig.add(bigState)
+  check failedBig[^1].set(0) == StateWriteResult.disposed
 
 suite "managed routing budgets":
   test "node_budget_rejects_aggregate_growth":
@@ -113,7 +121,7 @@ suite "managed routing budgets":
     let revision = rt.acceptedRevision
     bigNodes = 10005
     bigNodeText = 1
-    rejected(rt, revision, "big", "home")
+    rejected(rt, revision, "big", "home", "home")
     bigNodes = 100
     discard navigate(router, "big")
     check rt.flush()
@@ -127,7 +135,7 @@ suite "managed routing budgets":
     let revision = rt.acceptedRevision
     # 5001 Pair -> Leaf -> host groups: 10002 components, only ~5000 hosts.
     bigGroups = 5001
-    rejected(rt, revision, "big", "home")
+    rejected(rt, revision, "big", "home", "home")
     bigGroups = 100
     discard navigate(router, "big")
     check rt.flush()
@@ -142,7 +150,7 @@ suite "managed routing budgets":
     bigChinese = true
     bigNodeText = 1048576
     bigNodes = 17
-    rejected(rt, revision, "big", "home")
+    rejected(rt, revision, "big", "home", "home")
     bigNodes = 5
     discard navigate(router, "big")
     check rt.flush()
@@ -155,7 +163,7 @@ suite "managed routing budgets":
     let (rt, session) = newLimitsRt(73'u64)
     let revision = rt.acceptedRevision
     bigDepth = 200
-    rejected(rt, revision, "big", "home")
+    rejected(rt, revision, "big", "home", "home")
     bigDepth = 5
     discard navigate(router, "big")
     check rt.flush()
@@ -183,16 +191,35 @@ suite "managed routing budgets":
     check rt.flush()
     check acceptedBig.read() == 7
     let revision = rt.acceptedRevision
+    let bytesBig = rt.stats.treeBytes
     # A second large page is rejected by the shared budget while big is retained.
-    rejected(rt, revision, "big2", "home")
+    rejected(rt, revision, "big2", "home", "home")
     check acceptedBig.read() == 7
+    check rt.stats.treeBytes == bytesBig
     discard navigate(router, "big")
     check rt.flush()
     check rt.acceptedRevision == revision + 1
     check acceptedBig.read() == 7
-    # Repeated rejections do not accumulate candidate cost.
+    let bytesRestored = rt.stats.treeBytes
+    # Repeated rejections each create and dispose a fresh candidate State,
+    # leave the accepted page/route/revision/cost untouched, and never
+    # accumulate candidate owner cost.
     for i in 0 ..< 5:
-      rejected(rt, revision + 1, "big2", "n0")
+      rejected(rt, revision + 1, "big2", "n0", "big")
+      check acceptedBig.read() == 7
+      check rt.stats.treeBytes == bytesRestored
+      check currentRoute(router).name == "big"
+    check failedBig.len == 6
+    # A legal recovery update and navigation still succeed afterwards.
+    check acceptedBig.set(9) == StateWriteResult.queued
+    check rt.flush()
+    check acceptedBig.read() == 9
+    discard navigate(router, "home")
+    check rt.flush()
+    check currentRoute(router).name == "home"
+    # Every failed candidate handle stayed disposed through the whole run.
+    for handle in failedBig:
+      check handle.set(0) == StateWriteResult.disposed
     # Unmounting releases every retained page back to the empty baseline.
     showLimits = false
     rt.invalidateRoot()
