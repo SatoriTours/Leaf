@@ -51,6 +51,7 @@ var rootStateA, rootStateB: State[int]
 var rootInitA, rootInitB = 0
 var failReplace = false
 var showReplace = true
+var prepareFault = false
 
 let RootA = defineComponent[int, State[int]]("PerfRootA",
   proc(ctx: MountContext, p: int): State[int] =
@@ -123,7 +124,9 @@ let ReplaceShell = defineComponent[int, int]("PerfReplaceShell",
 
 proc captureConsumer(sessionId: uint64): HostConsumer =
   HostConsumer(sessionId: sessionId,
-    prepare: proc(batch: HostBatch) = batches.add(batch),
+    prepare: proc(batch: HostBatch) =
+      if prepareFault: fail("prepare fault")
+      batches.add(batch),
     apply: proc() = discard,
     accept: proc(revision: uint64) {.raises: [].} = discard,
     discardPrepared: proc() {.raises: [].} = discard)
@@ -180,25 +183,35 @@ suite "managed routing structural work":
       check uint64(rootHandle) != 0
       let staticHandles = staticHandleSnapshot(session, rt)
       for handle in staticHandles: staticSet.incl(handle)
-      # Collect the known boundary component ids from a warm A->B->A pair so
-      # the measured navigation can be checked against exact page/ancestor ids.
-      var knownBoundaries: HashSet[uint64]
-      batches.setLen(0)
-      go(rt, "b")
-      go(rt, "a")
-      for batch in batches:
-        for op in batch.ops:
-          if op.kind == HostOpKind.boundary:
-            knownBoundaries.incl(uint64(op.boundary.id))
-      check knownBoundaries.len >= 1
-      check rt.find("perf-a").node.text == "perf-a11"
+      # Semantic boundary roles come from accepted host records, not from the
+      # measured batch: a host's boundaryId is its owning component id.
       let leavingA = session.handleFor(rt.find("perf-a").id)
+      let pageABoundary = session.record(leavingA).get.boundaryId
+      let shellBoundary = session.record(rootHandle).get.boundaryId
+      check pageABoundary != 0
+      check shellBoundary != 0
+      check pageABoundary != shellBoundary
+      # Every static host is owned by its PerfStatic component, so no page or
+      # router-ancestor boundary id may be one of these static boundary ids.
+      var staticBoundaries: HashSet[uint64]
+      for handle in staticHandles:
+        let boundary = session.record(NodeHandle(handle)).get.boundaryId
+        check boundary != 0
+        staticBoundaries.incl(boundary)
+      check pageABoundary notin staticBoundaries
+      check shellBoundary notin staticBoundaries
       # Measure one A -> B navigation against the full static/oracle set.
       batches.setLen(0)
       go(rt, "b")
       let enteringB = session.handleFor(rt.find("perf-b").id)
+      let pageBBoundary = session.record(enteringB).get.boundaryId
+      check pageBBoundary != 0
+      check pageBBoundary != pageABoundary
+      check pageBBoundary != shellBoundary
+      check pageBBoundary notin staticBoundaries
       check rt.find("perf-b").node.text == "perf-b22"
       var createOps, removeOps, updateOps, boundaryOps, setChildrenOps, childEntries, staticTargetOps, windowOps = 0
+      var root0Boundary, enteringPageBoundary, enteringPageParent, routerAncestorBoundary, routerAncestorParent: uint64
       for batch in batches:
         for op in batch.ops:
           case op.kind
@@ -217,12 +230,23 @@ suite "managed routing structural work":
             if uint64(op.handle) != uint64(rootHandle): inc staticTargetOps
           of HostOpKind.boundary:
             inc boundaryOps
-            if uint64(op.boundary.id) notin knownBoundaries: inc staticTargetOps
-            # A removal boundary carries root 0; otherwise the boundary must
-            # point at the leaving/entering page or a required ancestor.
+            let id=uint64(op.boundary.id)
             let root=uint64(op.boundary.root)
-            if root!=0 and root!=uint64(leavingA) and root!=uint64(enteringB) and
-                root!=uint64(rootHandle):
+            let parent=uint64(op.boundary.parent)
+            if root==0:
+              # A removal boundary must be the leaving page component itself.
+              check root0Boundary==0
+              root0Boundary=id
+            elif root==uint64(enteringB):
+              if id==pageBBoundary:
+                check enteringPageBoundary==0
+                enteringPageBoundary=id
+                enteringPageParent=parent
+              else:
+                check routerAncestorBoundary==0
+                routerAncestorBoundary=id
+                routerAncestorParent=parent
+            else:
               inc staticTargetOps
             if root in staticSet: inc staticTargetOps
           of HostOpKind.window: inc windowOps
@@ -239,6 +263,19 @@ suite "managed routing structural work":
       check totalOps == 6
       check windowOps == 0
       check childEntries == count + 1
+      # Exact boundary roles: leaving page (root 0), entering page and the
+      # necessary router ancestor, with the ancestor parent chain verified.
+      check root0Boundary == pageABoundary
+      check root0Boundary != shellBoundary
+      check root0Boundary notin staticBoundaries
+      check enteringPageBoundary == pageBBoundary
+      check routerAncestorBoundary != 0
+      check routerAncestorBoundary != pageABoundary
+      check routerAncestorBoundary != pageBBoundary
+      check routerAncestorBoundary != shellBoundary
+      check routerAncestorBoundary notin staticBoundaries
+      check routerAncestorParent == shellBoundary
+      check enteringPageParent == routerAncestorBoundary
       # Every static handle stays stable (shared-parent children may reference them).
       let afterHandles = staticHandleSnapshot(session, rt)
       check afterHandles == staticHandles
@@ -251,8 +288,8 @@ suite "managed routing structural work":
         " childEntriesPerSet=", (if setChildrenOps == 0: 0 else: childEntries div setChildrenOps),
         " staticRendersInitial=", initialRenders, " staticRenderDelta=", staticRenders - initialRenders,
         " snapshotDelta=", rt.updateStats().snapshotExports - exports
-      # 100 complete A -> B -> A roundtrips (200 legs) preserve State identity,
-      # values, retention size and static isolation.
+      # 100 complete A -> B -> A roundtrips (200 real page-transition legs).
+      go(rt, "a")
       for i in 0 ..< 100:
         go(rt, "b")
         check savedB.read() == 22
@@ -352,24 +389,47 @@ suite "managed routing structural work":
     check rt.flush()
     check savedA.read() == 5
     check rt.stats.treeBytes == baselineP
-    # A rejected same-page root replacement keeps route, value and cost and
-    # disposes the real candidate State.
+    # Early render failure: child reconcile fails before the parent registry
+    # write; accepted route, value and cost stay, candidate State disposed.
     failReplace = true
     let beforeReject = rt.stats.treeBytes
     discard navigate(replaceRouter, "v2")
     expect UiError:
       discard rt.flush()
+    failReplace = false
     check currentRoute(replaceRouter).view == "v1"
     check savedA.read() == 5
     check rt.stats.treeBytes == beforeReject
     check rootInitB == 1
     check rootStateB.set(0) == StateWriteResult.disposed
+    # Post-write rejection: render succeeds (a real RootB candidate State is
+    # created) and host prepare fails after reconcile already staged the parent
+    # registry COW/set. The accepted registry must still map p to RootA.
+    prepareFault = true
+    discard navigate(replaceRouter, "v2")
+    expect UiError:
+      discard rt.flush()
+    prepareFault = false
+    check currentRoute(replaceRouter).view == "v1"
+    check savedA.read() == 5
+    check rt.stats.treeBytes == beforeReject
+    check rootInitB == 2
+    check rootStateB.set(0) == StateWriteResult.disposed
+    # Access the registry's old root mapping: away to q and back to p restores
+    # the original State without reinitializing p.
+    discard navigate(replaceRouter, "q")
+    check rt.flush()
+    check rootInitA == 3
+    discard navigate(replaceRouter, "v1")
+    check rt.flush()
+    check savedA.read() == 5
+    check rootInitA == 3
+    check rt.stats.treeBytes == baselineP
     # Legal replacement succeeds at the same cost (equal-size key and text).
-    failReplace = false
     discard navigate(replaceRouter, "v2")
     check rt.flush()
     check rt.stats.treeBytes == beforeReject
-    check rootInitB == 2
+    check rootInitB == 3
     let acceptedB = rootStateB
     check savedA.set(7) == StateWriteResult.disposed
     # Removing the owner restores the measured empty baseline exactly.
