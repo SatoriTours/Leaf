@@ -35,7 +35,8 @@ proc main():int =
     env["LEAF_WATCH_STATUS"]=directory/"status.json"
     writeStatus(env["LEAF_WATCH_STATUS"],0,"")
   let example=getEnv("LEAF_TEST_EXAMPLE")=="1"
-  if not example and getEnv("LEAF_TEST_SKIP_FAIL")!="1":
+  let pages=getEnv("LEAF_TEST_PAGES")=="1"
+  if not example and not pages and getEnv("LEAF_TEST_SKIP_FAIL")!="1":
     block:
       env["LEAF_TEST_FAIL_LIST"]="1"
       let failedLog=directory/"failed-events.jsonl"
@@ -61,7 +62,7 @@ proc main():int =
     require(not child.poll(),"GPUI window exited before readiness: " & child.output)
     require(getMonoTime()<deadline,"GPUI window readiness timeout")
     sleep(20)
-  let window=command(xdotool,@["search","--name",(if example:"^Leaf" else:"^Leaf GPUI native smoke$")],root).splitLines()[0]
+  let window=command(xdotool,@["search","--name",(if example:"^Leaf" elif pages:"^Leaf component pages$" else:"^Leaf GPUI native smoke$")],root).splitLines()[0]
   discard command(xdotool,@["windowfocus",window],root)
   if getEnv("LEAF_TEST_RENDERING")=="1":
     let receipt=readFile(directory/"ready.json")
@@ -175,6 +176,49 @@ proc main():int =
     awaitStatus("1")
     clickTarget("reset")
     awaitStatus("0")
+  elif pages:
+    proc pagesCaption(key:string):string =
+      proc find(node:JsonNode,key:string):string =
+        if node.kind!=JObject:return ""
+        if node{"id"}.getStr.endsWith(":" & key):return node{"text"}.getStr
+        if node.hasKey("children"):
+          for child in node["children"]:
+            let found=find(child,key)
+            if found.len>0:return found
+      find(parseFile(dump)["root"],key)
+    proc awaitPages(expected:string) =
+      let until=getMonoTime()+initDuration(seconds=5)
+      while pagesCaption("status")!=expected:
+        require(getMonoTime()<until,"pages status expected " & expected & "; got " & pagesCaption("status"))
+        require(not child.poll(),"GPUI test application exited")
+        sleep(20)
+    awaitPages("main:0:中文草稿:0")
+    clickTarget("add")
+    awaitPages("main:1:中文草稿:0")
+    clickTarget("go-unknown")
+    awaitPages("main:1:中文草稿:1")
+    clickTarget("reset")
+    awaitPages("main:0:中文草稿:0")
+    clickTarget("go-draft")
+    awaitPages("draft:中文草稿")
+    clickTarget("go-edit")
+    awaitPages("draft-edit:中文草稿")
+    clickTarget("draft-input")
+    discard command(xdotool,@["key","ctrl+a"],root)
+    discard command(xdotool,@["type","--clearmodifiers","--delay","1","页面草稿"],root)
+    awaitPages("draft-edit:页面草稿")
+    clickTarget("go-main")
+    awaitPages("main:0:中文草稿:0")
+    clickTarget("go-draft")
+    awaitPages("draft:页面草稿")
+    clickTarget("go-scratch")
+    awaitPages("scratch:0")
+    clickTarget("scratch-add")
+    awaitPages("scratch:1")
+    clickTarget("go-main")
+    awaitPages("main:0:中文草稿:0")
+    clickTarget("go-scratch")
+    awaitPages("scratch:0")
   else:
     awaitStatus("1:中文输入:0")
     clickTarget("entry")
@@ -215,6 +259,7 @@ proc main():int =
   require(child.code==0,"GPUI close failed: " & child.output)
   if lists:echo "Passed real variable-height list window and close"
   elif example:echo "Passed real component example window, increment, reset, ready and close"
+  elif pages:echo "Passed real component pages window: navigate, edit, reset, unknown address and close"
   else:echo "Passed real Nim + GPUI + GPUI Kit window, click, input, Enter, ready, failed viewport and close"
 when isMainModule:
   try:quit(main())

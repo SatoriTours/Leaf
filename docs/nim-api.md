@@ -93,3 +93,11 @@ let actions = views:
 `runtime.snapshot` 和整树 validator 是显式完整导出；高频局部查询使用 `runtime.find(key)`，观察局部工作量使用 `runtime.updateStats()`。ABI2 默认自动选择；`LEAF_GPUI_ABI=1|2|auto` 可诊断协议选择，只有缺少 ABI2 查询符号才自动退回 ABI1，不会忽略不兼容查询结果。`LEAF_GPUI_CACHE=0` 可关闭组件缓存进行行为对照。
 
 托管节点的完整诊断 ID 是内部格式，包含组件类型身份；业务查找应使用稳定 `key`。普通组件类型替换或卸载再挂载会建立新输入 Entity；列表源 generation 变化时，仅同一列表、逻辑 key 和宿主祖先类型一致的输入可迁移编辑状态。
+
+## 组件页面路由
+
+`leaf/components` 额外导出 `Route`、`PageRetention`、`ComponentPageDefinition`、`ComponentRouter`、`newComponentRouter`、`routes`、`navigate`、`currentRoute` 与 `renderPage`。路由在持有它的组件 initialize 中用 `newComponentRouter(ctx, routes, pages, initial)` 创建；`renderPage(ctx, router)` 在当前组件 render 中返回唯一页面出口，构造时只捕获当前页面的 build 与 view，不执行页面 build。`navigate(router, nameOrPath)` 把地址写入普通 State 队列，与同批 State、宿主和 revision 一起接受；未知地址抛出 `UiError` 且不排队，router 已销毁时返回 `StateWriteResult.disposed`。地址与页面配置在创建时复制并校验，之后不可变；`routes(router)` 返回副本。
+
+页面生命周期由框架维护：默认 `PageRetention.retainState`，离开时移除该页宿主与活动事件、保留组件身份和 State，返回时分配新宿主句柄；`PageRetention.disposeOnLeave` 在离开被接受后递归卸载页面组件，旧 State 句柄变为 disposed，返回时重新初始化。隐藏页仍可接受 State 写入，但不 render、不导出；恢复时读取最新已接受值。整组保留页与列表暖行在 router 组件卸载时释放。保留不承诺光标、选区、焦点、滚动位置或未完成 IME 组合；重新挂载的输入控件建立新 Entity。
+
+`PageOutletSpec`、`pageOutlet`、`outletSpec` 以及 owner/accounting helper 都是运行时内部入口，不从 `leaf/components` 导出。`DescriptionKind` 是可见枚举，新增 `pageOutlet` 值：对描述类型写穷尽 `case` 的低层代码需要显式处理该值，普通 `host`/`component` 使用方式不变。`ComponentRouter` 的配置字节与所属组件一起计入现有 `MaxTreeBytes` 预算，未显示的 controller 也不例外。完整可运行示例见 `examples/component_pages.nim`。

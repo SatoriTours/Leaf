@@ -26,6 +26,7 @@ type
     currentPage:string
     currentRetention:PageRetention
     retained:ref Table[string,uint64]
+    registryBytes:int
     ownedBytes:int
   ManagedStore=ref object
     owner:Runtime
@@ -72,15 +73,15 @@ proc segment(desc:UiDescription,index:int):string=
   let key=desc.key
   if key.len==0:"i:" & $index else:"k:" & $key.len & ":" & key
 const OutletRegistrationBytes=64
+when defined(leafProtocolProbes):
+  var outletRegistryEdits*:uint64
 proc newOutletRegistry():ref Table[string,uint64]=
   new(result)
   result[]=initTable[string,uint64]()
 proc cloneOutletRegistry(source:ref Table[string,uint64]):ref Table[string,uint64]=
   result=newOutletRegistry()
   if source!=nil:result[]=source[]
-proc outletRegistryBytes(registry:ref Table[string,uint64]):int=
-  if registry==nil:return 0
-  for key in registry.keys:result+=OutletRegistrationBytes+key.len
+proc outletRegistrationBytes(key:string):int=OutletRegistrationBytes+key.len
 proc descriptionBytes(desc:UiDescription,path:string):int=
   result=128+path.len+desc.key.len
   case desc.kind
@@ -163,12 +164,13 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
       item.currentPage=old.currentPage
       item.currentRetention=old.currentRetention
       item.children=old.children
+      item.registryBytes=old.registryBytes
     else:
       item.retained=newOutletRegistry()
       item.currentPage=""
       item.currentRetention=PageRetention.retainState
-  let registryBefore=if desc.kind==DescriptionKind.pageOutlet:outletRegistryBytes(item.retained) else:0
-  item.bytes=descriptionBytes(desc,path)+registryBefore;d.bytes+=item.bytes
+      item.registryBytes=0
+  item.bytes=descriptionBytes(desc,path)+item.registryBytes;d.bytes+=item.bytes
   if d.count-d.componentCount>MaxNodes or d.componentCount>MaxNodes or d.bytes>MaxTreeBytes:fail("managed description exceeds node/instance/byte budget")
   d.edits[id]=item
   case desc.kind
@@ -261,6 +263,7 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
     if built==nil:fail("page outlet build returned nil")
     let pagePath=path & "/p:" & $spec.page.len & ":" & spec.page
     var registryOwned=old==nil
+    let registryStart=item.registryBytes
     template ownRegistry() =
       if not registryOwned:
         item.retained=cloneOutletRegistry(item.retained);registryOwned=true
@@ -274,7 +277,10 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
           d.erase(leaving)
           if item.retained.getOrDefault(item.currentPage)!=0:
             ownRegistry()
-            item.retained.del(item.currentPage)
+            let removed=item.currentPage
+            item.retained.del(removed)
+            item.registryBytes-=outletRegistrationBytes(removed)
+            when defined(leafProtocolProbes):inc outletRegistryEdits
         else:
           d.deactivate(leaving)
       let existing=item.retained.getOrDefault(spec.page)
@@ -284,13 +290,17 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
     if item.retained.getOrDefault(spec.page)!=childId:
       ownRegistry()
       item.retained[spec.page]=childId
+      item.registryBytes+=outletRegistrationBytes(spec.page)
+      when defined(leafProtocolProbes):inc outletRegistryEdits
     item.currentPage=spec.page
     item.currentRetention=spec.retention
     item.children= @[childId]
-    let registryAfter=outletRegistryBytes(item.retained)
-    if registryAfter!=registryBefore:
-      item.bytes+=registryAfter-registryBefore
-      d.bytes+=registryAfter-registryBefore
+    # The registry byte charge is cached on the instance and adjusted only when
+    # a registration is added or removed, so warm revisits scan no keys.
+    let registryDelta=item.registryBytes-registryStart
+    if registryDelta!=0:
+      item.bytes+=registryDelta
+      d.bytes+=registryDelta
       if d.bytes>MaxTreeBytes:fail("managed description exceeds node/instance/byte budget")
   id
 proc repairAncestors(d:ManagedDriver,id:uint64)=

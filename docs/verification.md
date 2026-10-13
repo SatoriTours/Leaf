@@ -104,3 +104,13 @@ Linux 实际窗口：先 `cargo build -p leaf-gpui --features native-test-suppor
 已执行：Linux Xvfb / Mesa 软件渲染八组，点击、中文初值/重置、编辑、Enter、拒绝恢复、选区替换、resize、隐藏/显示、ready/失败 viewport、退出。ABI1 保留拒绝非零 reset token 的原契约，fixture 使用受控值变化重置；ABI2 检查显式 token。测试构建启用 GPUI 句柄泄漏检查，两个渲染器均在安全帧释放平台输入处理器后退出。
 
 未执行：真实 Windows / macOS、系统 IME 输入法组合阶段、真实平台的离屏焦点行操作与 DPI 切换；这些不由 X11 模拟输入或纯运行时测试替代。`nim c -r scripts/test_win32.nim` 在 Linux 返回 2，必须记 NotRun。新增 `tests/windows/test_component_host.nim` 需要实际 Windows 执行，跨平台窗口验收仍有阻塞。
+
+## 组件页面路由（2026-10-13）
+
+运行 `nim c -r --path:src tests/nim/test_component_routing_performance.nim`（结构性计数）与 `-d:leafProtocolProbes` 变体（registry 工作量计数）。`navigation_work_is_independent_of_static_siblings` 设 100/1000/5000 个静态兄弟：导航后静态组件 render 次数为 0、静态宿主句柄不变、`snapshotExports` 不变；捕获 batch 的宿主操作不涉及静态句柄。页面根句柄变化时共享父宿主产生一次 `setChildren`，其子句柄数组为兄弟数 +1（101/1001/5001），与操作数分开报告。往返 100 次后 `mountedNodes`/`treeBytes` 与预热值相等（保留不增长）。`-d:leafProtocolProbes` 下 `warm_revisits_do_not_edit_or_rescan_the_registry` 证明三页各访问一次后 100 次重访不新增 registry 登记、不改变预算。
+
+这些是结构性计数，不是恒定 CPU 时间或 FFI 字节的证明；宽父宿主的 `setChildren` 体积随未变兄弟线性增长。显式 `runtime.snapshot` 在计时与计数检查之外。
+
+功能与故障回归：`test_component_routing`、`test_component_routing_state`、`test_component_routing_outlet`、`test_component_routing_faults`、`test_component_routing_limits`、`test_component_faults`、`test_component_lists`、`test_host_reconcile` 在 Linux/ORC headless 全部退出 0。示例 `examples/component_pages.nim` 通过 `--check` 与 `--headless --click go-draft --click go-edit`；`tests/nim/component_pages_native_app.nim` 与 `tests/nim/gpui_native.nim` 的 `LEAF_TEST_PAGES=1` 分支编译通过，真实 X11 四组 ABI/CACHE 窗口执行由主会话按既有 frozen native-test 桥接完成。
+
+未执行（NotRun）：真实 Windows/macOS 窗口、系统 IME 组合阶段、跨 DPI/多屏以及发行 SDK 安装后的页面回归；这些不由 Linux headless 或 X11 模拟输入替代。最终全 Nim/Rust、四组窗口和 SDK 结果由主会话在代码冻结后统一记录。

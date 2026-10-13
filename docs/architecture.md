@@ -103,3 +103,11 @@ Rust 的 HostStore 保留已接受宿主控件、子项顺序和组件边界，�
 GPUI 为组件边界持有 Entity，普通宿主叶节点直接从平铺表渲染。只有外部宽高确定的边界启用缓存；内容自动测量、百分比尺寸保守渲染。尺寸、继承样式、主题、窗口变化和全局刷新传播失效。输入 Entity 保持独立寿命，同值模型同步不修改选区或组合态；普通重新挂载会建立新 Entity，列表源替换仅在同一列表、逻辑 key 与宿主祖先类型匹配时迁移。变量行高的行 provider 读取已接受节点，缺失行先使用高度估计，当前绘制结束后合并视口请求；相同视口与保护行不重复请求。退出在安全帧先释放平台 IME handler。
 
 虚拟列表按接受的 key/generation 管理活动行和有限暖缓存，离屏行的 State 可能在淘汰后销毁。源替换及 viewport 构建失败保留之前接受的行。Snapshot 是显式兼容导出，按接受 revision 缓存；调用 Snapshot validator、ABI1 或诊断整树导出会承担完整导出的成本。Native Backend 消费类型化宿主操作，Win32 当前仍可执行全量布局，不能据局部 Nim 计数宣称 Win32 帧已完全局部化。
+
+## 托管页面路由与保留生命周期
+
+`component_routing.nim` 在组件 initialize 中建立不可变地址配置和归属该组件的 `State[int]`；`renderPage` 依据 render 候选地址返回第三类描述 `DescriptionKind.pageOutlet`。出口实例保存页面名到根实例 id 的共享注册表以及当前活动子实例；注册表写入前复制，候选失败不改动接受态。`managed_runtime` 在 reconcile 中复用既有停用/恢复/递归擦除辅助：`retainState` 离开时停用页面子树并移出活动宿主与事件索引，返回时用原组件身份重建宿主；`disposeOnLeave` 离开被接受后递归擦除；整组保留页、暖行和嵌套 controller 在外部 router 卸载时一并释放。隐藏页只保留 Nim 模型与 State，不建立宿主。
+
+配置字节、registry 键、页面实例和列表暖行全部计入既有 `MaxNodes`/组件上限/`MaxTreeBytes`/`MaxDepth` 预算。router 的 `configurationBytes` 在组件初始化时通过 MountContext 记账并按 owner 保留一次，初始化帧在成功和异常退出时都会关闭，已关闭上下文不能再次计费；renderPage 的出口显式使用 0 以避免重复计费。registry 的字节量缓存在出口实例上，只在新增、删除或根 id 替换时调整，正常重访不扫描键。
+
+结构性计数（静态组件 render 次数、宿主操作数、子句柄数组长度）只描述受影响实例范围，不证明恒定 CPU 时间或 FFI 字节。页面根句柄变化时，宽共享父宿主需要一次包含全部未变兄弟句柄的 `setChildren`，其数组体积单独报告；本实现不承诺与兄弟数量无关的 O(1) 布局。快照导出、validator 与 ABI1 兼容查询仍是显式完整导出。
