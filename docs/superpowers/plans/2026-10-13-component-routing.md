@@ -104,12 +104,12 @@
 
 **Interfaces:** 不新增公开API；沿用HostConsumer、StateWriteResult、Runtime acceptedRevision/updateStats及现有fault fixture。
 
-- [ ] **4.1 失败测试**：`navigation_rejection_preserves_all_accepted_state` 注入build、validator、prepare、apply、scope入场失败；对每项断言 `check router.currentRoute.name == "a"`、地址/旧State/宿主revision不变、新候选Statedisposed、旧页面事件仍有效。先写隐藏页State再切页/销毁的组合也覆盖。
-- [ ] **4.2 失败测试**：`accepted_scope_error_does_not_replay_navigation` 断言scope收尾失败后route已B、revision推进一次、callback次数为1；恢复失败冻结后不再执行业务事件。`nested_router_and_warm_rows_are_disposed` 建嵌套路由及100000项列表，仅物化50行并产生暖行，卸载外router后所有持有句柄disposed。
-- [ ] **4.3 失败测试**：`retained_pages_and_catalog_share_runtime_budgets` 分别触发节点/组件/描述字节/深度上限，中文按UTF-8字节计；候选超限拒绝且旧页面/保留状态仍有效。连续导航/失败/卸载不累积候选链或失效回调。
-- [ ] **4.4 RED**：两新suite分别 `nim c -r --path:src --out:target/nim/<name> tests/nim/<name>.nim`，记录真实失败；已经GREEN的约束无需人为改坏实现，只记录回归通过。
-- [ ] **4.5 修复与GREEN**：只修对应归属模块；重复4.4并跑全部test_component_routing*、test_component_faults、test_component_lists、test_host_reconcile。任何接受后副作用不倒退revision，不把数据库/普通变量纳入State回滚。
-- [ ] **4.6 提交与窄审查**：`test: verify routing rollback retention budgets and disposal`；所有重大问题修复后进入出口验收。
+- [x] **4.1 失败测试**：`navigation_rejection_preserves_all_accepted_state` 注入build、validator、prepare、apply、scope入场失败；对每项断言 `check router.currentRoute.name == "a"`、地址/旧State/宿主revision不变、新候选Statedisposed、旧页面事件仍有效。先写隐藏页State再切页/销毁的组合也覆盖。
+- [x] **4.2 失败测试**：`accepted_scope_error_does_not_replay_navigation` 断言scope收尾失败后route已B、revision推进一次、callback次数为1；恢复失败冻结后不再执行业务事件。`nested_router_and_warm_rows_are_disposed` 建嵌套路由及100000项列表，仅物化50行并产生暖行，卸载外router后所有持有句柄disposed。
+- [x] **4.3 失败测试**：`retained_pages_and_catalog_share_runtime_budgets` 分别触发节点/组件/描述字节/深度上限，中文按UTF-8字节计；候选超限拒绝且旧页面/保留状态仍有效。连续导航/失败/卸载不累积候选链或失效回调。
+- [x] **4.4 RED**：两新suite分别 `nim c -r --path:src --out:target/nim/<name> tests/nim/<name>.nim`，记录真实失败；已经GREEN的约束无需人为改坏实现，只记录回归通过。
+- [x] **4.5 修复与GREEN**：只修对应归属模块；重复4.4并跑全部test_component_routing*、test_component_faults、test_component_lists、test_host_reconcile。任何接受后副作用不倒退revision，不把数据库/普通变量纳入State回滚。
+- [x] **4.6 提交与窄审查**：`test: verify routing rollback retention budgets and disposal`；所有重大问题修复后进入出口验收。
 
 ## Task 5：可运行示例、结构性性能与发布兼容
 
@@ -140,4 +140,4 @@
 
 ## 计划审阅与交付
 
-本计划已获用户认可。Task1至Task3实现和修复已独立审查通过；后续按复用的Paseo角色与相关会话连续实施。范围裁定、命令/退出码与任务进度见本计划独立SDD ledger，常规实现选择不重复询问。
+本计划已获用户认可。Task1至Task4实现和修复已独立审查通过；后续按复用的Paseo角色与相关会话连续实施。范围裁定、命令/退出码与任务进度见本计划独立SDD ledger，常规实现选择不重复询问。
