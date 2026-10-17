@@ -1,6 +1,6 @@
 # 组件异步任务与生命周期验证记录
 
-状态：Task1–3 已实现并独立验收；Task4–7 尚未实现。不能据本记录声称整个异步功能已完成。
+状态：Task1–3 已实现并独立验收；Task4 已提交，独立审查进行中；Task5–7 尚未实现。不能据本记录声称整个异步功能已完成。
 
 ## 身份与执行空间
 
@@ -74,11 +74,35 @@ I1修复`0f59f5f`提取严格private UTF-8标量解析供key与错误消息共�
 - task-only仍经过validator/preparer/apply和revision门禁，可保留未变宿主树的accepted Snapshot缓存；真正UI更新仍失效缓存。首次正常初始化的Snapshot可供后续metadata验证复用。
 - 独立snapshot-export可恢复异常注入暂记NotRun：导出只遍历prepare已验证的框架记录，没有业务回调或可配置故障入口。exportNode仍有空active page不变量UiError，不能声称导出绝不抛错。实际export计数/缓存、validator拒绝以及更早的非法树/build/budget拒绝分别作为不同证据，不新增专为测试的生产故障钩子。
 
-## Task4 关闭语义裁定（待实现）
+## Task4 关闭语义裁定（已验收）
 
 合法所属UI业务体内公共closeRuntime采用两阶段关闭：立即关门、失效owner/任务代、请求取消并使全部已接受State disposed后返回，不执行清理/join/解除pin；此前排队State/导航/任务不再接受，剩余普通投递停止。随后普通close/finally处理未claim清理，scope完全退出且执行身份为0后最终回收。render/updater/prepare/apply/host安装及跨Runtime/线程公共关闭拒绝，onDispose递归关闭幂等返回。
 
 ManagedDriver从accepted instances准备含warm/retained的child-first序列，已有pendingdispose按ownerstamp保留且去重；逐owner disposeOwner可复用现有State模块。scope入场拒绝保留未claim清理供再次close，已调用清理不因异常重放。Task4须通过真实onMount/onResult/event busy-close、排队意图作废、非合作work栅栏、递归close和scope拒绝重试回归；本段裁定不是已运行证据。
+
+## Task4 实际检查（含已验收修复）
+
+实现为`dcbe1da..11afa67`八个授权文件，工作树/Git/最终manifest八项SHA一致。结果交付、保留策略、普通安全点泵和两阶段close已实现；新completionReadyInternal仅在ticket membership验证后acquire读取completed，不改变Task1跨线程载荷协议。
+
+threads:on共17套173项EXIT0：三新交付14/保留6/关闭12，共32项；其余为Task1–3及实际受影响旧路径。16套157项与最终validation-inputs-2一致；standaloneworker16项来自inputs-1，其worker/contracts依赖与最终一致。threads:off非worker关闭7项通过，最后退出链变更后受影响清理3项重跑通过，其他4项按未改路径保留原身份；不是关闭线程后运行worker用例。官方全量、Task4内存检查工具和真实新窗口未执行。
+
+真实RED/GREEN包括scope包装器关闭权限、legacy事件合法关闭、cleanup包装器与实际递归body界限、clock抛错后pumping复位，以及40000 backlog退出优先全扫描退化。后者用prepare阶段独立退出批次链修复，publish仅链接，最终lifecycle16项通过，须由独立审查核对顺序、预算和引用回收。
+
+最终三新套件实际覆盖40000未claimdispose+2livecleanup：关闭后40002条全部保存，scope两次拒绝不追加/重复收费，恢复后每owner一次，cleanup引用/计费归零。关闭专用上限50000，活动期仍40000及共享16MiB；记录最多6,400,000字节逻辑清理费用及有界辅助存储。500轮替换/取消/销毁后框架槽和额度逐轮归零，不作为系统零泄漏证明。
+
+TaskPumpReport按规格裁定区分有效完成claim、实际handler调用和交付异常；nil onError真实stderr仍有界合法UTF-8。wrong-thread负编译保留于授权shutdown的`-d:leafTask4ForeignCloseProbe`，预期EXIT1精确nongcsafe；运行时uiThreadId guard动态分支NotRun，需静态核对其在变更/早返之前。既有NotRun及旧警告保留，另新delivery测试有一处Spacing警告待审查。
+
+完整报告`task-4-report.md`、最终manifest`task-4-final-inputs.json`及全部独立RED/GREEN/结果JSON在scratch。独立`task-4-review.md`已完成，结论Needs fixes，Critical0/Important3/Minor1；Task4尚未验收通过。
+
+Task4独立最小probe确认三项Important：受阻enter主链无界保留已消费退出批次；scope入口经合法嵌套uiTask关闭后仍pop旧记录，pending费用变为-128且可能恢复旧退出链；最终onDispose取消失效handle先遭retired拒绝，打断剩余清理。批次计量仅是所有权分析佐证，不作为系统泄漏检测结论。三项已交原实现Agent按真实RED→GREEN修复；需覆盖持续受阻enter与持续成功exit、mount/exit关闭移交、完成/销毁/最终cleanup取消幂等，并保留线程、Runtime身份及保护阶段权限。新增Spacing警告随修复清理。Task5继续冻结，修复后由原验收Agent局部复核。
+
+原始Task4 manifest另存`task-4-original-inputs-11afa67.json`；修复使用独立命名输入与日志，不将原173项或历史全量冒充修复HEAD证据。
+
+Task4三项修复已分提交：I1 `9dc3882`拆开prepare阶段的退出/进入批次和存储，已消费退出不再被受阻进入链持有；I2 `4ff385c`在scope实际body入场后、pop前检查退役与队列归属；I3/M1 `e68e5e3`为失效取消设置专用权限门禁，只允许合法实际cleanup或普通UI闭态无操作，并修新增测试空格。原报告追加逐项真实行为RED→GREEN；completed/disposed取消原本已通过，作为兼容验证保留。
+
+最终修复身份八项SHA与checkout/Git及最终run输入一致。threads:on十套123项、threads:off九项EXIT0；负编译重跑精确nongcsafe EXIT1。I1测试含两种批次模式各64轮受阻进入/成功退出，I2含mount/exit移交，I3含最终清理后续语句、重复取消和保护阶段拒绝；原40002关闭容量、500轮额度归零及40000 backlog亦在必要套件中复测。固定`11afa67..e68e5e3`交原独立验收Agent局部复核，尚不声明修复已验收或最终官方全量通过。
+
+Task4局部复审已确认I1/I2/I3/M1全部resolved：Spec compliant、Quality Approved，Critical0/Important0/Minor0。协调完整读取`task-4-review-fix-1.md`，原Important均关闭，无新增问题；标准库及旧代码警告、未执行项目仍如实保留。Task4任务门禁通过，最终源码身份为`e68e5e33820447db00ddd8eacfc80d3f0e8ab9c1`，并不代表整个功能或最终官方全量验收完成。后续Task5可在已批准文件范围接入真实GPUI协商、唯一根定时泵及普通finally关闭。
 
 ## 环境基线与实际限制
 

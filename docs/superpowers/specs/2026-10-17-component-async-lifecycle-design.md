@@ -107,6 +107,8 @@ proc closeRuntime(runtime: Runtime)
 
 `startTask` 仅允许所属 Runtime 的普通 UI 事件、生命周期回调、完成回调，或显式 `runtime.uiTask/batch` 内调用；初始化、render、updater、host prepare/apply/publish 中禁止启动或取消任务。对 disposed scope 启动抛 UiError；cancel disposed/已结束 handle 为幂等空操作；跨 Runtime/线程的调用拒绝。空 key、nil work/nil onResult、非法UTF-8 key及超预算输入在登记前拒绝。inactive owner只有keepWhileRetained scope可启动任务，cancelOnDeactivate在停用期间启动会明确拒绝；销毁及过期进入回调都不能取得可写scope。
 
+TaskPumpReport的delivered计成功进入scope业务体后claim的有效完成消息，含work错误；callbacks计实际生命周期、onResult和onError调用；failed计回调/flush/scope交付异常。正常onError交付work错误不增加failed；未配置onError时仍消费有效错误消息并记录有界合法UTF-8诊断，callbacks为0。scope拒绝入场不消费消息；过期完成只计dropped。
+
 每个 owner/key 采用 latest-wins：只有本次被接受的替换才使前一个任务失效。TaskHandle 的身份单调递增、不复用；scope、运行时关闭代和请求 generation 都参加交付校验。任务取消不改变路由地址；导航按现有路由队列执行。
 
 ## 5. 任务意图和接受门禁
@@ -162,6 +164,8 @@ Win32安全tick调用相同pumpTasks，新增独立任务唤醒/计时来源，�
 closeRuntime在UI线程关闭接收门，失效所有owner/任务代，设置取消标记并清空待交付业务闭包；调用一次onDispose清理后幂等。销毁回调处于关闭态，不能发起任务。宿主session换绑/卸载不自动等同Runtime销毁；只有应用最终退出或显式closeRuntime关闭它。
 
 公共closeRuntime在合法UI业务回调内调用时采用两阶段关闭：立即关门、取消并使所有已接受State失效后返回，不在该回调内执行清理或join；该业务体先前排队的State/导航/任务不再接受。随后普通closeRuntime或宿主finally执行尚未claim的清理并最终回收pool。render、updater、prepare/apply、host安装阶段及跨Runtime/线程调用明确拒绝。onDispose内递归close幂等返回，不递归清理或join；scope入场拒绝留下尚未执行的清理，之后普通close只重试未claim部分。
+
+活动期生命周期pending仍最多40000条，树与pending共享16MiB门禁。最终关闭使用独立清理容量，最多50000条（已有未claim dispose最多40000，加最终live owner最多MaxNodes=10000）；只接管已存在的清理引用，关门后没有新producer，不增加活动期event额度。关闭队列准备一次、按owner stamp去重，重试只处理未claim部分，不重复追加或收费；不得为容量丢弃dispose。retireDeferred不分配清理队列，存储在普通close或合法busy-close准备，关闭后普通pump停止投递。
 
 C detach只标记最终投递门关闭和取消，返回后的普通Nimfinally完成生命周期清理。窗口关闭不在UI回调、WndProc、renderer detach内join工作线程。工作函数须设置自己的超时；最终任务服务回收等待worker结束，框架不承诺任意阻塞work立即退出。保存尚在运行的共享控制块直到安全结束，禁止强制释放或遗留可调用的UI闭包。桌面run的最终退出可能等待不合作work；文档和测试必须区分窗口关闭响应与进程退出耗时。
 

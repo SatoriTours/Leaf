@@ -123,7 +123,7 @@ check acceptedFinalKeyWorkCalls == 1
 
 **Interfaces:** 复用Task2的pumpDeferred/pumpTasks/pumpTaskService；core新增Driver默认方法`retireDeferred(driver) {.raises:[].}`、`closeDeferred(driver)`及公共`closeRuntime(runtime)`；ManagedDriver覆盖并转交TaskService。内部`retireTaskService(service) {.raises:[].}`、`closeTaskService(service)`；core增加内部`runRuntimeCleanup(runtime,body:proc() {.closure.})`，在关闭态也能进入executionScope，但不触发State提交或开放任务启动。调用路径保留core→contracts的单向依赖。TaskPumpReport字段按规格；退休只关门/原子取消，最终关闭才执行用户清理/join。 合法UI业务体内公共closeRuntime立即关门、使State失效且不接受此前排队意图，返回后由普通close/finally执行未claim清理并在scope退出、执行身份为0时最终回收；受保护阶段拒绝，onDispose递归close幂等返回。
 
-- [ ] **Step 1: 写交付/退出RED测试。** 两个可控worker令旧请求后完成；A离开返回分别测默认取消与keepWhileRetained；换key/类型、router卸载、行复用、旧Runtime重开；完成已到达但scope拒绝入场后再允许；onResult/onDispose报错、pump重入、host临时换绑与最终关闭、取消不合作work和挂载清理顺序。最终close时scope拒绝入场必须立即关门/使State失效，但保存未执行的清理；下次显式close在scope可用时只执行尚未claim的清理一次。
+- [x] **Step 1: 写交付/退出RED测试。** 两个可控worker令旧请求后完成；A离开返回分别测默认取消与keepWhileRetained；换key/类型、router卸载、行复用、旧Runtime重开；完成已到达但scope拒绝入场后再允许；onResult/onDispose报错、pump重入、host临时换绑与最终关闭、取消不合作work和挂载清理顺序。最终close时scope拒绝入场必须立即关门/使State失效，但保存未执行的清理；下次显式close在scope可用时只执行尚未claim的清理一次。
 
 ```nim
 check deliveredValues == @["new"]
@@ -135,16 +135,16 @@ check disposeCallsAfterTwoCloses == 1
 check callbacksAfterRuntimeRetirement == 0
 ```
 
-- [ ] **Step 2: 验证RED。** 分别运行三项`nim c -r --threads:on --out:target/nim/<对应文件名> tests/nim/<对应文件名>.nim`，保存未实现泵/代校验/关闭的失败。
-- [ ] **Step 3: 实现安全交付。** core拒绝busy/hook安装/候选/跨线程泵，服务逐条进入uiTask；scope body真正入场才claim消息，scope入场拒绝保留并结束该轮。已调用回调的失败不重试，清理错误隔离；先处理生命周期退出和owner失效再交付普通结果。取消/替换/关闭/交付失败均在真实收尾后释放额度，关闭先使全部State disposed，随后按child-first清理。
-- [ ] **Step 4: 验证GREEN。** 跑三套件和Task1–3；用可注入单调时钟测试64项/4ms边界，不要求回调被抢占。无消息泵全部结构计数和revision不变，持续500轮替换/取消/销毁后记录存活槽/字节回基线；非合作work测试先证明关门返回，再释放fixture栅栏证明join和共享控制块释放。
-- [ ] **Step 5: 提交。** `feat: deliver component task results and close task owners safely`。
+- [x] **Step 2: 验证RED。** 分别运行三项`nim c -r --threads:on --out:target/nim/<对应文件名> tests/nim/<对应文件名>.nim`，保存未实现泵/代校验/关闭的失败。
+- [x] **Step 3: 实现安全交付。** core拒绝busy/hook安装/候选/跨线程泵，服务逐条进入uiTask；scope body真正入场才claim消息，scope入场拒绝保留并结束该轮。已调用回调的失败不重试，清理错误隔离；先处理生命周期退出和owner失效再交付普通结果。取消/替换/关闭/交付失败均在真实收尾后释放额度，关闭先使全部State disposed，随后按child-first清理。
+- [x] **Step 4: 验证GREEN。** 跑三套件和Task1–3；用可注入单调时钟测试64项/4ms边界，不要求回调被抢占。无消息泵全部结构计数和revision不变，持续500轮替换/取消/销毁后记录存活槽/字节回基线；非合作work测试先证明关门返回，再释放fixture栅栏证明join和共享控制块释放。
+- [x] **Step 5: 提交。** `feat: deliver component task results and close task owners safely`。
 
 ## Task 5：GPUI ABI1/ABI2任务泵与兼容
 
-**Files:** 修改`include/leaf_gpui_v2.h`、`src/leaf/gpui_ffi_v2.nim`、`gpui_api.nim`、`gpui_bridge.nim`、`gpui_session.nim`、`desktop.nim`；Rust`abi_v2.rs`、`bridge.rs`、`bridge_v2.rs`、`desktop.rs`、`host_view.rs`、`host_ui_tests.rs`；扩展`tests/nim/test_gpui_v2_requests.nim`、`test_gpui_v2_session.nim`、新`test_task_pump_compatibility.nim`；按实际常量断言需求更新`tests/ffi/gpui_v2_layout.{c,nim,rs}`。
+**Files:** 修改`include/leaf_gpui_v2.h`、`src/leaf/gpui_ffi_v2.nim`、`gpui_api.nim`、`gpui_bridge.nim`、`gpui_session.nim`、`desktop.nim`；为只读pending接缝最小修改`core.nim`、`managed_runtime.nim`；Rust`model.rs`（仅默认bool响应字段）、`abi_v2.rs`、`bridge.rs`、`bridge_v2.rs`、`desktop.rs`、`host_view.rs`、`host_ui_tests.rs`；扩展`tests/nim/test_gpui_v2_requests.nim`、`test_gpui_v2_session.nim`、新`test_task_pump_compatibility.nim`；按实际常量断言需求更新`tests/ffi/gpui_v2_layout.{c,nim,rs}`。
 
-**Interfaces:** 使用规格3个typed常量及ABI1导出；为typed reply定义不占既有status位的`LEAF_REPLY_TASKS_PENDING=4`，ABI1新响应字段`tasks_pending`为严格布尔。Rust ABI1新增`TaskTickReply { pending:bool, response:Option<Response> }`及`Bridge::tasks() -> Result<TaskTickReply,String>`，空tick无需Snapshot。core内部`configureTaskPump(runtime,supported:bool)`、`taskPumpPending(runtime):bool`供宿主使用；仅task-capable托管Runtime协商泵能力，具体是否排队/计时由pending决定，不把初始页是否已经有work当能力。
+**Interfaces:** 使用规格3个typed常量及ABI1导出；为typed reply定义不占既有status位的`LEAF_REPLY_TASKS_PENDING=4`，ABI1新响应字段`tasks_pending`为严格布尔。Rust ABI1新增`TaskTickReply { pending:bool, response:Option<Response> }`及`Bridge::tasks() -> Result<TaskTickReply,String>`，空tick无需Snapshot。core复用内部`configureTaskPumpInternal(runtime,supported:bool)`并新增只读pending driver/facade供宿主使用，managed_runtime转交已有service查询；Rust Response加默认false的严格bool tasks_pending字段，保持Bridge Copy/旧request Snapshot合同；仅task-capable托管Runtime协商泵能力，具体是否排队/计时由pending决定，不把初始页是否已经有work当能力。
 
 - [ ] **Step 1: 写兼容RED测试。** 新库+旧宿主禁止新op；新功能+旧库在调用work前明确失败；ready失败或能力非true不激活ABI1任务op；typed config的frame位1与pump位2可以组合，根view只建一个计时器；status/ready/rendering不消费任务。初始无任务、后来事件挂载组件必须开始收到完成消息，detach不调用业务清理且旧会话不能继续交付。
 
