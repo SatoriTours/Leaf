@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-17-component-async-lifecycle-design.md`（用户在原会话回复“继续”，确认规格后进入本计划阶段）。
 
-状态：计划已获批准并执行中。Task1–3 已实现并独立验收；Task4–7 待执行。实际命令、退出码及审查证据见同日期验证记录和执行 ledger；以下预期断言本身不代表已取得的证据。
+状态：计划已获批准并执行中。Task1–5 已实现并独立验收；Task6–7 待执行。实际命令、退出码及审查证据见同日期验证记录和执行 ledger；以下预期断言本身不代表已取得的证据。
 
 ## Global Constraints
 
@@ -142,11 +142,11 @@ check callbacksAfterRuntimeRetirement == 0
 
 ## Task 5：GPUI ABI1/ABI2任务泵与兼容
 
-**Files:** 修改`include/leaf_gpui_v2.h`、`src/leaf/gpui_ffi_v2.nim`、`gpui_api.nim`、`gpui_bridge.nim`、`gpui_session.nim`、`desktop.nim`；为只读pending接缝最小修改`core.nim`、`managed_runtime.nim`；Rust`model.rs`（仅默认bool响应字段）、`abi_v2.rs`、`bridge.rs`、`bridge_v2.rs`、`desktop.rs`、`host_view.rs`、`host_ui_tests.rs`；扩展`tests/nim/test_gpui_v2_requests.nim`、`test_gpui_v2_session.nim`、新`test_task_pump_compatibility.nim`；按实际常量断言需求更新`tests/ffi/gpui_v2_layout.{c,nim,rs}`。
+**Files:** 修改`include/leaf_gpui_v2.h`、`src/leaf/gpui_ffi_v2.nim`、`gpui_api.nim`、`gpui_bridge.nim`、`gpui_session.nim`、`desktop.nim`；为只读pending接缝最小修改`core.nim`、`managed_runtime.nim`；Rust`model.rs`（仅默认bool响应字段）、`abi_v2.rs`、`bridge.rs`、`bridge_v2.rs`、`desktop.rs`、`host_view.rs`、`lists.rs`（仅普通list响应唤醒）、`host_ui_tests.rs`；扩展`tests/nim/test_gpui_v2_requests.nim`、`test_gpui_v2_session.nim`、新`test_task_pump_compatibility.nim`；按实际常量断言需求更新`tests/ffi/gpui_v2_layout.{c,nim,rs}`。
 
-**Interfaces:** 使用规格3个typed常量及ABI1导出；为typed reply定义不占既有status位的`LEAF_REPLY_TASKS_PENDING=4`，ABI1新响应字段`tasks_pending`为严格布尔。Rust ABI1新增`TaskTickReply { pending:bool, response:Option<Response> }`及`Bridge::tasks() -> Result<TaskTickReply,String>`，空tick无需Snapshot。core复用内部`configureTaskPumpInternal(runtime,supported:bool)`并新增只读pending driver/facade供宿主使用，managed_runtime转交已有service查询；Rust Response加默认false的严格bool tasks_pending字段，保持Bridge Copy/旧request Snapshot合同；仅task-capable托管Runtime协商泵能力，具体是否排队/计时由pending决定，不把初始页是否已经有work当能力。
+**Interfaces:** GPUI失败清理以GpuiRunError携带可重试Runtime及可选exitStatus，runDesktop末尾可选cleanupOwner输出且slot须为空；失败边界只尝试一次close，成功清理保留旧返回，未完成时按规格显式移交。使用规格3个typed常量及ABI1导出；为typed reply定义不占既有status位的`LEAF_REPLY_TASKS_PENDING=4`，ABI1新响应字段`tasks_pending`为严格布尔。Rust ABI1新增`TaskTickReply { pending:bool, response:Option<Response> }`及`Bridge::tasks() -> Result<TaskTickReply,String>`，空tick无需Snapshot。core复用内部`configureTaskPumpInternal(runtime,supported:bool)`并新增只读pending driver/facade供宿主使用，managed_runtime转交已有service查询；Rust Response加默认false的严格bool tasks_pending字段，保持Bridge Copy/旧request Snapshot合同；仅task-capable托管Runtime协商泵能力，具体是否排队/计时由pending决定，不把初始页是否已经有work当能力。
 
-- [ ] **Step 1: 写兼容RED测试。** 新库+旧宿主禁止新op；新功能+旧库在调用work前明确失败；ready失败或能力非true不激活ABI1任务op；typed config的frame位1与pump位2可以组合，根view只建一个计时器；status/ready/rendering不消费任务。初始无任务、后来事件挂载组件必须开始收到完成消息，detach不调用业务清理且旧会话不能继续交付。
+- [x] **Step 1: 写兼容RED测试。** 新库+旧宿主禁止新op；新功能+旧库在调用work前明确失败；ready失败或能力非true不激活ABI1任务op；typed config的frame位1与pump位2可以组合，根view只建一个计时器；status/ready/rendering不消费任务。初始无任务、后来事件挂载组件必须开始收到完成消息，detach不调用业务清理且旧会话不能继续交付。
 
 ```nim
 check requestsToOldHost.filterIt(it == "tasks").len == 0
@@ -156,10 +156,10 @@ check lifecycleCallsInsideDetach == 0
 check statusRevision == revisionBeforeStatus
 ```
 
-- [ ] **Step 2: 验证RED。** 跑新compatibility Nim套件和定向Rust任务泵测试，断言现有库不具备新能力/tick。保留新旧组合fixture，不能只检查数值常量相同。
-- [ ] **Step 3: 实现双向协商。** ABI2 config允许任务泵后，ready成功或事件reply pending时根view启动16msUI tick；无待处理事件/worker后停止，后续事件可重新唤醒。ABI1 ready能力只授权新op，每个正常响应的pending决定同样调度；旧Rust忽略新增响应字段。新ABI1 tasks空响应只有pending/error元数据；Rust新tasks路径只在响应含实际更新时解析Snapshot，既有Bridge.request的Snapshot校验保持原义。Nim桥在普通tasks请求调用pumpTasks，Rust调用时不持HostStore可变借用。最终desktop finally执行closeRuntime，session重绑不销毁Runtime；旧库动态挂载功能在候选prepare拒绝。
-- [ ] **Step 4: 验证GREEN。** 跑相关Nim桥接套件、`nim c -r scripts/check_gpui_v2_abi.nim`、`cargo test --workspace --locked`、`cargo fmt --all --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`。验证ABI1任务实际更新允许Snapshot，但其status/ready既有合同不变；ABI2空tick无UI树和额外Snapshot。
-- [ ] **Step 5: 提交。** `feat: negotiate and drive GPUI component task pumps`。
+- [x] **Step 2: 验证RED。** 跑新compatibility Nim套件和定向Rust任务泵测试，断言现有库不具备新能力/tick。保留新旧组合fixture，不能只检查数值常量相同。
+- [x] **Step 3: 实现双向协商。** ABI2 config允许任务泵后，ready成功或事件reply pending时根view启动16msUI tick；无待处理事件/worker后停止，后续事件可重新唤醒。ABI1 ready能力只授权新op，每个正常响应的pending决定同样调度；旧Rust忽略新增响应字段。新ABI1 tasks空响应只有pending/error元数据；Rust新tasks路径只在响应含实际更新时解析Snapshot，既有Bridge.request的Snapshot校验保持原义。Nim桥在普通tasks请求调用pumpTasks，Rust调用时不持HostStore可变借用。最终desktop finally执行closeRuntime，session重绑不销毁Runtime；旧库动态挂载功能在候选prepare拒绝。
+- [x] **Step 4: 验证GREEN。** 跑相关Nim桥接套件、`nim c -r scripts/check_gpui_v2_abi.nim`、`cargo test --workspace --locked`、`cargo fmt --all --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`。验证ABI1任务实际更新允许Snapshot，但其status/ready既有合同不变；ABI2空tick无UI树和额外Snapshot。
+- [x] **Step 5: 提交。** `feat: negotiate and drive GPUI component task pumps`。
 
 ## Task 6：Win32安全tick与关闭
 

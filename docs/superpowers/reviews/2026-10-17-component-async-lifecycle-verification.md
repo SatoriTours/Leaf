@@ -122,3 +122,33 @@ Task4局部复审已确认I1/I2/I3/M1全部resolved：Spec compliant、Quality A
 - 日常配置模型启动即报`Model is unavailable`、无代码改动；改用实际保存的高消耗配置`codex/gpt-6.1-sol/high/auto-review`处理线程复杂工作。代价是更高模型用量；未修改用户profiles。独立验收沿用实际架构配置`pi/openai-codex/gpt-6.1-sol/high`。
 
 本轮未合并、推送或归档；后续任务继续在原协调会话交付。
+
+## Task5 执行空间恢复
+
+原执行空间在2026-10-17T06:26:47通过Paseo客户端归档，目录及Task5未提交修改、原scratch随之移除；协调未执行归档。用户随后明确选择恢复空间并继续开发。已从保留分支`feat/component-async-lifecycle`的`6d6dd32`创建Paseo托管恢复worktree，Task1–4提交完整、主分支保持干净。
+
+找到并保存原实现完整会话归档及Task5片段，含28个工具输入/对应输出，可用于恢复已编辑源码；不据此声称所有独立原始测试日志或历史scratch报告已经找回。原归档SHA256为`587ec8fe8fa5d1b6f9f9b990590479a827ddaab672b87a5179a6520837cd1216`，另存主工作区忽略目录`.superpowers/recovery/component-async-lifecycle/`，不受恢复worktree删除影响。接手实现Agent负责审阅重放授权编辑并重新验证，恢复后证据使用独立命名与输入manifest。
+
+能力拒绝启动的最终清理裁定已写规格：初始owner如已接受，配置/安装失败后仍须在普通UI边界close，使State失效并一次onDispose；未接受候选不获得dispose，正常进入/完成交付与worker启动仍禁止。该异常路径可能执行dispose副作用，测试与文档必须明确其最终清理性质，并保留原始启动错误。
+
+## Task5 实际检查（含已验收修复）
+
+恢复后源码提交`e69b32fc3c1bea5af685670369b5b4e871f32a69`包含20个授权文件。协调已完整阅读实现/恢复报告，核对最终20项源码与测试SHA和Git/checkout/改动集合一致，37份命令日志哈希一致，旧生产桥接库SHA保持不变。恢复采用15条审阅过的确定编辑，历史独立日志缺口如实保留；恢复后typed root/child/borrow、初始能力拒绝清理、malformed typed ready、ABI1 callback错误metadata、attach后安装失败收尾都有新的真实行为RED→GREEN。
+
+必要验证记录为Nim138项、Rust51项、C/Nim/Rust ABI161条及fmt/clippy/build EXIT0，另无线程专用启动拒绝场景EXIT0。最终兼容/bridge/requests/session8/off-startup输入全部匹配提交；Rust检查/构建的Rust输入为最终，ABI最终变化只涉及非布局的gpui_session。早期任务/worker回归发生在最后Nim启动收尾补丁前，完整输入存在gpui_bridge/gpui_session及两个测试差异；不能概括为138项全在最终完整输入运行，需按实际编译依赖区分复用。补充核对确认shutdown直接import host_session，其depfiles未列gpui_session，早期相关任务/worker/layout套件亦如此；协调此前将广域输入差异误判为shutdown import gpui_session，已纠正。旧session7由最终8项替代，不重复计数。
+
+固定提交范围已交独立架构验收，重点协商、根唯一timer与child/list唤醒、HostStore借用边界、临时换绑/迟到detach/终止分界、普通finally关闭与失败清理。Task5尚未通过验收，Task6/7未开始。真实native四组合、官方Nim全量、SDK及内存工具/平台仍未执行；GPUI TestAppContext不等于实际native窗口。提交证据另存主工作区忽略目录的恢复保管区，不受功能worktree归档删除影响。
+
+Task5实现报告已追加“证据复用身份”说明，138项计数不重复旧session7，Rust/ABI与Nim依赖身份分别说明。另如实披露两个未定向覆盖的异常组合：startup cleanup诊断自身抛错后的原始错误保留，以及ABI1同一tick接受UI更新后再发生callback/scope错误的Snapshot+error联合响应。两点已交正在运行的独立验收评估，不提前宣称为缺陷或已验证，也未为报告补充重复测试。源码继续冻结。
+
+Task5独立验收结论Needs fixes，Critical0/Important3/Minor0。I1实际ABI1成功list range/finish仅保存pending，根render开头的timer检查发生在其前，且成功路径不保证notify；原测试人为notify掩盖此边界。I2公共typed runDesktop外层finally在内层失败清理后再次close，真实旧库probe确认原能力错误被cleanup scope错误替代且单失败边界重复尝试。I3 ABI1内部构造失败遇到cleanup scope拒绝，初始已接受Runtime虽State失效，却未返回或转交可达重试owner，真实公开构造probe确认后续无入口完成dispose。三项交接手实现Agent修复，额外授权lists.rs最小响应唤醒；失败ownership接口方案先由协调裁定，Task6保持冻结。
+
+原始审查报告及最小probe源码/日志/审计已保存空间外稳定保管区。另两项coverage缺口由验收静态检查未发现实现缺陷，仍不声称异常诊断分支或Snapshot+error联合场景已动态运行；它们不混同已证实的I2/I3。
+
+Task5 round1修复已冻结：I1 `9e8ac94`在真实list range/finish成功响应后直接arm唯一根timer，真实scroll/provider无额外notify的RED→GREEN保留；I2/I3 `071d3ff`按既定GpuiRunError/cleanupOwner合同一次失败清理并显式移交重试Runtime，公开入口覆盖原msg/parent、整数5、正常0、默认异常与out通道、非空slot拒绝及最终dispose一次。
+
+本轮五个改动文件、累计21个授权文件SHA与checkout/Git一致，22份日志SHA核对。必要Nim42项（compat19/bridge9/typed requests6/session8）、Rust52项、fmt/clippy及新库构建EXIT0；compat最终完整输入一致，其余仅广域manifest内另一个compat测试后增coverage不同，实际套件/Rust依赖不包含它。ABI161按未变布局输入复用，未重跑；旧138不与42相加冒称最终全量。新库SHA已更新，原27a74…只代表历史构建，旧生产库SHA不变。固定`e69b32f..071d3ff`已交同一验收Agent局部复核，Task5仍待门禁通过。
+
+Task5 round1独立局部复核已确认I1/I2/I3全部resolved，Spec compliance/Quality Approved，Critical0/Important0/Minor0。协调完整读取`task-5-review-fix-1.md`，报告及只读审计副本保存空间外保管区。Task5任务门禁通过，最终源码`071d3ffac8f04244e257a838f435e285b4b50273`；这不代表官方Nim全量、真实native四组合、SDK或跨平台验收已完成。Task6在保存本阶段干净基线后接入Win32普通安全tick、独立任务timer及最终关闭。
+
+Task7公共文档须说明GpuiRunError与cleanupOwner两种显式重试方式、out slot必须为空、exitStatus的none/some(0)/some(nonzero)、普通边界重试及成功后释放owner/异常引用。两项未动态覆盖的异常组合继续NotRun，不冒称本轮已运行。
