@@ -1,6 +1,6 @@
 # Leaf 组件异步任务与生命周期设计
 
-状态：待用户审阅的设计稿。尚未实现产品代码，尚未编写实施计划。
+状态：用户已在原会话确认本规格；实施计划已形成，待审阅及确认执行方式。尚未实现产品代码。
 
 日期：2026-10-17。基线：`53368cf2a554c52af092d129f0aeb2b592c8d78f`。
 
@@ -52,7 +52,7 @@
 
 卸载和停用按子组件先于父组件；挂载和恢复按父组件先于子组件。同一深度使用已接受或候选子树的确定顺序，不依赖 Table 迭代顺序。列表暖行也使用停用/恢复语义；淘汰行使用销毁语义。
 
-回调只在普通 Nim UI 安全点、`inUpdate=false`、renderer prepare/apply/accept/discard 已完成后执行，且进入该 Runtime 的 `executionScope`。`publish` 仅发布预先准备的事件记录；C detach 只关闭预分配的投递门和设置取消标记，不执行回调。最终清理在 `runDesktop` 返回后的 Nim finally 或显式 `closeRuntime` 中执行。
+回调从普通 Nim UI 安全点进入：入场前要求`inUpdate=false`、renderer prepare/apply/accept/discard 已完成，并进入该 Runtime 的 `executionScope`。回调体可处于`uiTask`自身防重入保护中；该保护标记不等同于render/commit阶段，不能拒绝回调中合法的State与任务写入。`publish` 仅发布预先准备的事件记录；C detach 只关闭预分配的投递门和设置取消标记，不执行回调。最终清理在 `runDesktop` 返回后的 Nim finally 或显式 `closeRuntime` 中执行。
 
 事件带 owner generation、接受 revision 和 activity epoch。挂载/恢复回调交付前重新确认 owner 仍处于对应活动代；过期的进入回调不再启动工作。离开/销毁清理仍执行一次，并拿到该次转换的只读事实。销毁回调中的旧 State 已 disposed；它用于释放 UI 线程资源，不能让旧组件复活。
 
@@ -195,4 +195,4 @@ C detach只标记最终投递门关闭和取消，返回后的普通Nimfinally�
 
 执行workspace：`wks_43c47436537996f7`，标题`【自动】组件异步任务与生命周期`，路径`/home/jimxl/.paseo/worktrees/1c1rvoii/component-async-lifecycle`，分支`feat/component-async-lifecycle`，基线如文首。设计、编码、修复和验收复用此空间。
 
-书面规格审阅通过后才编写实施计划；计划包含实际profiles配置、编码边界和独立验收。当前没有派发实现Agent，不声称已调度或测试。合并/推送另按用户授权执行；尚未获本功能合并/推送授权。成功合并及推送后的归档须先完成仓库、成果及活跃会话检查。
+用户回复“继续”后进入实施计划阶段；计划为`docs/superpowers/plans/2026-10-17-component-async-lifecycle.md`，包含实际profiles配置、编码边界和独立验收。计划阶段仅补充接口、容量及兼容细节，并澄清安全点入场与uiTask保护体的区别；尚未派发实现Agent或执行产品测试。合并/推送另按用户授权执行；尚未获本功能合并/推送授权。成功合并及推送后的归档须先完成仓库、成果及活跃会话检查。
