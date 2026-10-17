@@ -441,3 +441,36 @@ suite "accepted latest-wins replacement":
     finally:
       releaseWork.store(true)
       rt.finalizeTaskPoolInternal()
+
+suite "strict task key UTF-8":
+  test "three and four byte overlong encodings reject before accepting a revision":
+    for key in ["\xE0\x80\x80", "\xF0\x80\x80\x80"]:
+      let rt=makeOwner()
+      let scope=scopes[^1]
+      try:
+        let before=rt.acceptedRevision
+        expect UiError:
+          rt.uiTask(proc()=discard startTask(scope,key,"",counted,proc(v:string)=discard))
+        check rt.acceptedRevision==before
+        check rt.taskServiceInternal().taskWorkerStatsInternal().reservedTasks==0
+      finally:rt.finalizeTaskPoolInternal()
+
+  test "caught malformed key leaves an earlier legal intent in the same body intact":
+    for key in ["\xE0\x80\x80", "\xF0\x80\x80\x80"]:
+      let rt=makeOwner()
+      let scope=scopes[^1]
+      let service=rt.taskServiceInternal()
+      var legal:TaskHandle
+      var rejected=false
+      try:
+        let before=rt.acceptedRevision
+        rt.uiTask(proc()=
+          legal=startTask(scope,"legal","kept",counted,proc(v:string)=discard)
+          try:discard startTask(scope,key,"bad",counted,proc(v:string)=discard)
+          except UiError:rejected=true)
+        check rejected
+        check rt.acceptedRevision==before+1
+        check service.taskCurrentInternal(legal)
+        check service.taskWorkerStatsInternal().reservedTasks==1
+        check service.taskWorkerStatsInternal().inputBytes==4
+      finally:rt.finalizeTaskPoolInternal()
