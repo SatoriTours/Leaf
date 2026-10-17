@@ -256,3 +256,55 @@ suite "retained router and row cleanup":
     check "row0" in order
     check "row1" in order
     check order[^1]=="root"
+
+suite "review I1 bounded lifecycle storage":
+  test "refused live enters do not retain consumed exit-only or mixed storage":
+    for mixed in [false,true]:
+      var generation:State[int]
+      var allow=0
+      var disposes=0
+      let Enter=defineComponent[int,int]("BlockedStorageEnter",
+        proc(ctx:MountContext,p:int):int=
+          ctx.onMount(proc(event:LifecycleContext)=discard);p,
+        proc(ctx:ComponentContext,p,m:int):UiDescription=host(text("enter")))
+      let Exit=defineComponent[int,int]("ConsumedStorageExit",
+        proc(ctx:MountContext,p:int):int=
+          ctx.onDispose(proc(event:LifecycleContext)=inc disposes);p,
+        proc(ctx:ComponentContext,p,m:int):UiDescription=host(text("exit")))
+      let Root=defineComponent[int,State[int]]("BoundedStorageRoot",
+        proc(ctx:MountContext,p:int):State[int]=result=ctx.state(0);generation=result,
+        proc(ctx:ComponentContext,p:int,s:State[int]):UiDescription=
+          let current=ctx.value(s)
+          var children = @[component(Enter,0,key="blocked")]
+          if mixed:
+            for i in 1..current:children.add(component(Enter,i,key="enter-" & $i))
+          for i in 0..<32:children.add(component(Exit,i,key="exit-" & $current & "-" & $i))
+          hostShell(column(@[]),children))
+      let execution:ExecutionScope=proc(body:proc() {.closure.})=
+        if allow==0:fail("retain effective enter")
+        if allow>0:dec allow
+        body()
+      allow = -1
+      let rt=newRuntime(componentApplication(component(Root,0),"storage",executionScope=execution))
+      let service=rt.taskServiceInternal()
+      try:
+        service.setTaskClockInternal(proc():int64=0)
+        for round in 1..64:
+          allow = -1
+          rt.uiTask(proc()=generation.set(round))
+          allow=32
+          let report=rt.pumpTasks()
+          check report.callbacks==32
+          check report.failed==1
+          check disposes==round*32
+          let pending=if mixed:round+1 else:1
+          check service.pendingTaskBytesInternal()==pending*128
+          let storage=service.lifecycleStorageInternal()
+          check storage.slots==pending
+          check storage.batches<=pending
+        allow = -1
+        rt.closeRuntime()
+        check service.lifecycleStorageInternal()==(batches:0,slots:0)
+        check disposes==65*32
+      finally:
+        allow = -1;rt.closeRuntime()

@@ -33,8 +33,7 @@ type
   EventBatch = ref object
     events: seq[LifecycleEvent]
     cursor: int
-    exitCursor, exitEnd: int
-    next, nextExit: EventBatch
+    next: EventBatch
   OwnerUpdate = object
     registration: OwnerRegistration
     kind: LifecyclePhase
@@ -62,7 +61,7 @@ type
     service: TaskService
     frame: TaskIntentFrame
     updates: seq[OwnerUpdate]
-    batch: EventBatch
+    batch, exitBatch: EventBatch
     pendingRecords: int
     published, rejected: bool
   TaskService* = ref object of TaskDomain
@@ -137,6 +136,15 @@ proc ownerTransitionInternal*(registration: OwnerRegistration,
 
 proc pendingTaskBytesInternal*(service: TaskService): int =
   service.pendingRecords * LifecycleRecordBytesInternal
+proc lifecycleStorageInternal*(service: TaskService): tuple[batches,slots:int] =
+  ## Queue-owned batches and retained event-array lengths, not allocator bytes.
+  service.requireUi()
+  for head in [service.first,service.firstExit]:
+    var batch=head
+    while batch!=nil:
+      inc result.batches
+      result.slots+=batch.events.len
+      batch=batch.next
 proc preparedTaskBytesInternal*(attempt: TaskAttempt): int =
   if attempt == nil: 0 else: attempt.pendingRecords * LifecycleRecordBytesInternal
 
@@ -399,7 +407,7 @@ proc prepareTasks*(service: TaskService, revision: uint64,
     if result == 0: result = (if aEnter: cmp(a.depth, b.depth) else: cmp(b.depth, a.depth))
     if result == 0: result = cmp(a.order, b.order))
   var seen: HashSet[uint64]
-  var events: seq[LifecycleEvent]
+  var events, exits: seq[LifecycleEvent]
   for transition in ordered:
     let owner = transition.stamp.owner
     if owner in seen: fail("duplicate candidate lifecycle owner transition")
@@ -419,14 +427,15 @@ proc prepareTasks*(service: TaskService, revision: uint64,
       if result.pendingRecords >= MaxLifecycleEventsInternal:
         fail("pending lifecycle events exceed 40000 records")
       inc result.pendingRecords
-      events.add LifecycleEvent(registration: registration, kind: transition.kind,
+      let event = LifecycleEvent(registration: registration, kind: transition.kind,
         revision: revision, epoch: epoch, callback: callback, scope: registration.scope)
+      if transition.kind in {LifecyclePhase.deactivate,LifecyclePhase.dispose}:exits.add(event)
+      else:events.add(event)
   service.prepareIntents(frame, result.updates)
-  if events.len > 0:
-    var exitEnd = 0
-    while exitEnd < events.len and events[exitEnd].kind in {LifecyclePhase.deactivate,LifecyclePhase.dispose}:
-      inc exitEnd
-    result.batch = EventBatch(events: move(events), exitEnd: exitEnd)
+  # Each array has one queue owner. A blocked enter cannot retain already
+  # consumed exit storage, including exits prepared in the same candidate.
+  if events.len > 0: result.batch = EventBatch(events: move(events))
+  if exits.len > 0: result.exitBatch = EventBatch(events: move(exits))
 
 proc publishTasks*(service: TaskService, attempt: TaskAttempt) {.raises: [].} =
   if attempt == nil or attempt.service != service or attempt.published or attempt.rejected: return
@@ -441,10 +450,10 @@ proc publishTasks*(service: TaskService, attempt: TaskAttempt) {.raises: [].} =
     if service.last == nil: service.first = attempt.batch
     else: service.last.next = attempt.batch
     service.last = attempt.batch
-    if attempt.batch.exitEnd > 0:
-      if service.lastExit == nil: service.firstExit = attempt.batch
-      else: service.lastExit.nextExit = attempt.batch
-      service.lastExit = attempt.batch
+  if attempt.exitBatch != nil:
+    if service.lastExit == nil: service.firstExit = attempt.exitBatch
+    else: service.lastExit.next = attempt.exitBatch
+    service.lastExit = attempt.exitBatch
   service.pendingRecords = attempt.pendingRecords
   let frame = attempt.frame
   if frame != nil and not frame.published:
@@ -470,32 +479,29 @@ proc rejectTasks*(service: TaskService, attempt: TaskAttempt) {.raises: [].} =
   if attempt == nil or attempt.service != service or attempt.published: return
   attempt.rejected = true
   attempt.batch = nil
+  attempt.exitBatch = nil
   attempt.updates.setLen(0)
 
 proc nextEvent(service: TaskService, exitsOnly: bool): tuple[batch:EventBatch,index:int] =
   if exitsOnly:
     let batch = service.firstExit
-    if batch != nil: return (batch,batch.exitCursor)
+    if batch != nil: return (batch,batch.cursor)
   elif service.first != nil:
     return (service.first,service.first.cursor)
 
 proc popEvent(service: TaskService, batch: EventBatch, index: int) =
+  let exiting=batch.events[index].kind in {LifecyclePhase.deactivate,LifecyclePhase.dispose}
   batch.events[index] = default(LifecycleEvent)
   dec service.pendingRecords
-  # Prepared batches put exits first. A second, preallocated link chain avoids
-  # rescanning retained entering records for every exit or stale entering drop.
-  if index < batch.exitEnd:
-    inc batch.exitCursor
-    if batch.exitCursor == batch.exitEnd:
-      service.firstExit = batch.nextExit
-      batch.nextExit = nil
-      if service.firstExit == nil: service.lastExit = nil
-  while service.first != nil:
-    let head = service.first
-    while head.cursor < head.events.len and head.events[head.cursor].callback == nil:inc head.cursor
-    if head.cursor < head.events.len:break
-    service.first = head.next
-  if service.first == nil:service.last = nil
+  inc batch.cursor
+  if batch.cursor == batch.events.len:
+    if exiting:
+      service.firstExit=batch.next
+      if service.firstExit==nil:service.lastExit=nil
+    else:
+      service.first=batch.next
+      if service.first==nil:service.last=nil
+    batch.next=nil
 
 proc readyTaskCountInternal*(service: TaskService): int =
   service.requireUi()
@@ -520,7 +526,7 @@ proc prepareCloseTaskServiceInternal*(service:TaskService,owners:seq[OwnerRegist
   if service.closePrepared:return
   var seen:HashSet[(uint64,uint64)]
   var cleanup:seq[LifecycleEvent]
-  var batch=service.first
+  var batch=service.firstExit
   while batch!=nil:
     for index in batch.cursor..<batch.events.len:
       let event=batch.events[index]
