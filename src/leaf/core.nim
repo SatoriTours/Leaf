@@ -1,6 +1,6 @@
 ## Immutable UI descriptions. Application state belongs to native Nim objects;
 ## callbacks are published only after a complete, validated render succeeds.
-import std/[tables, sets, json, math, unicode, algorithm]
+import std/[tables, sets, json, math, unicode, algorithm, options]
 import ./diagnostics
 import ./task_contracts
 
@@ -13,6 +13,10 @@ const
 
 type
   UiError* = object of CatchableError
+  RuntimeCleanupError* = object of UiError
+    ## Caller retains the owner until an ordinary close succeeds.
+    cleanupRuntime*: Runtime
+    exitStatus*: Option[int]
   NodeKind* = enum
     column, row, text, button, input, checkbox, toggle, progress, tag,
     separator, spinner, virtualList
@@ -654,7 +658,22 @@ proc newRuntime*(app: Application, validator: SnapshotValidator = nil,
   result = Runtime(executionId:nextRuntimeId,app: app, context: BuildContext(), validator: validator, diagnostics: diagnostics)
   when compileOption("threads"): result.uiThreadId=getThreadId()
   if app.driverFactory!=nil:result.driver=app.driverFactory(result)
-  discard result.refresh()
+  try:
+    discard result.refresh()
+  except CatchableError as primary:
+    # Rejected candidates have no accepted owner. In particular, do not enter
+    # cleanup from a foreign/protected scope that rejected initial refresh.
+    if result.acceptedRevision == 0: raise
+    if primary of RuntimeCleanupError and
+        cast[ref RuntimeCleanupError](primary).cleanupRuntime == result: raise
+    try: result.closeRuntime()
+    except CatchableError:
+      let failure = newException(RuntimeCleanupError, primary.msg)
+      failure.parent = primary
+      failure.cleanupRuntime = result
+      failure.exitStatus = none(int)
+      raise failure
+    raise
 
 proc snapshot*(runtime: Runtime): Snapshot =
   if runtime.driver==nil:runtime.current else:runtime.driver.exportSnapshot()

@@ -214,6 +214,11 @@ impl Desktop {
                                 view.accept(Ok(response));
                                 view.sync_inputs(window, cx);
                                 cx.notify();
+                            } else if view.error != tick.error {
+                                // A valid application error retains pending. Only
+                                // malformed/transport failures stop this timer.
+                                view.error = tick.error;
+                                cx.notify();
                             }
                         }
                         Err(error) => {
@@ -726,6 +731,7 @@ mod dpi_tests {
         task_capability: Value,
         tasks_pending: bool,
         task_ticks: usize,
+        task_replies: std::collections::VecDeque<Value>,
         response: CString,
         capability: Value,
         error: Option<String>,
@@ -750,6 +756,7 @@ mod dpi_tests {
                 task_capability: Value::Null,
                 tasks_pending: false,
                 task_ticks: 0,
+                task_replies: std::collections::VecDeque::new(),
                 error: None,
                 reject_ready: false,
                 null_ready: false,
@@ -777,7 +784,11 @@ mod dpi_tests {
         if request["op"] == "tasks" {
             host.task_ticks += 1;
             host.tasks_pending = false;
-            host.response = CString::new(json!({"tasks_pending":false}).to_string()).unwrap();
+            let reply = host
+                .task_replies
+                .pop_front()
+                .unwrap_or_else(|| json!({"tasks_pending":false}));
+            host.response = CString::new(reply.to_string()).unwrap();
             return host.response.as_ptr();
         }
         let mut transient_error = None;
@@ -962,6 +973,48 @@ mod dpi_tests {
         assert!(host.error.is_none());
         assert!(view.read_with(cx, |view, _| view.error.is_none()));
         assert_eq!(host.ready_count, 1);
+    }
+
+    #[gpui::test]
+    fn task_error_preserves_unique_root_timer_until_remaining_completion(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut host = LegacyHost::new(json!(true));
+        host.task_capability = json!(true);
+        host.tasks_pending = true;
+        // A refused scope leaves its message unclaimed; later a running worker
+        // still keeps pending true. No new event/notify/arm follows handshake.
+        host.task_replies = [
+            json!({"tasks_pending":true,"error":"scope refused"}),
+            json!({"tasks_pending":true}),
+            json!({"tasks_pending":false,"snapshot":host.snapshot,"rows":[]}),
+        ]
+        .into();
+        let (view, cx) = form(&mut host, cx);
+        handshake(&view, cx);
+        for tick in 1..=3 {
+            cx.background_executor
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.run_until_parked();
+            assert_eq!(host.task_ticks, tick, "root must tick without extra input");
+            view.read_with(cx, |view, _| {
+                assert_eq!(view.tasks_pending, tick < 3);
+                assert_eq!(view.task_running, tick < 3);
+                assert_eq!(
+                    view.error.as_deref(),
+                    if tick == 1 {
+                        Some("scope refused")
+                    } else {
+                        None
+                    }
+                );
+                assert_eq!(view.snapshot.title, "DPI");
+            });
+        }
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(64));
+        cx.run_until_parked();
+        assert_eq!(host.task_ticks, 3, "idle must stop the same timer");
     }
 
     #[gpui::test]

@@ -117,3 +117,9 @@ GPUI 和 Win32 在 ordinary UI 安全点自动泵；headless 工具/SDK fixture 
 普通退出必须 `closeRuntime`。业务回调内关闭先使 State 无效/关投递门，未 claim 的 dispose 与 pool 回收留到 ordinary 边界。scope 拒绝后可显式再次关闭，不能把 closed 当全部清理完成。`runDesktop(...,cleanupOwner=addr owner)` 和 `GpuiRunError(cleanupRuntime,exitStatus)` 可移交待重试 Runtime；out slot 必须预先为 nil，无 out 时整数状态（含 0）保存在异常的 `some(status)`，原异常无整数时为 none，msg/parent 保留。重试成功后释放 owner/异常引用。
 
 Win32 `runNative` 同样支持 `cleanupOwner` 和 `Win32RunError(cleanupRuntime,cleanupHost,exitStatus)`。若 Host 资源仍未释放，即使提供 Runtime out 也必须处理双 owner 异常：先 ordinary `cleanupHost.destroyHost()` 成功，再 `cleanupRuntime.closeRuntime()`；失败继续持有 owner。WndProc/renderer/native callback 不负责最终 join，也没有析构自动重试。
+
+`RuntimeCleanupError` 在 `leaf/core` 定义，公开 `cleanupRuntime: Runtime`、`exitStatus: Option[int]`；`GpuiRunError` 和 `Win32RunError` 继承它，Win32 另有 `cleanupHost`。`newRuntime` 首次已接受刷新在 scope-exit 报错时，完全退出保护域后只尝试一次 ordinary close；清理成功原样抛出原错误，清理拒绝则由共用异常保存原 msg/parent 和可重试 owner，status 为 none。未接受候选不执行 dispose，也不会为清理而泵 mount/activate/work。
+
+`run(app, args, cleanupOwner=nil)`、`run(app, cleanupOwner=nil)` 和 `runHeadless` 的两个重载也支持末尾 owner 输出；slot 必须预先为 nil。高层 `run` 继续传播带待清理 Runtime/Host 的异常，普通无 owner 错误保留诊断/整数合同。构造已经尝试过清理时，外层只移交 owner，不立即再 close；诊断对象收尾不能覆盖 pending owner。headless 在正常、check、help 和错误出口关闭 Runtime，然后关闭诊断对象；它不自动泵任务、不等待后台结果。
+
+有 out 时，即使整数返回 0，也必须检查 owner 是否非 nil：整数保留运行状态，不表示清理完成。恢复 scope 条件后在 ordinary UI 边界显式 `owner.closeRuntime()`；成功后将 out 和保存的异常引用清空。无 out 时仅最终清理失败以异常的 some(status) 保存整数；原业务/构造异常与清理同时失败时保留原 msg/parent、none status，不能吞成整数。Win32 的 pending Host 仍必须先 destroyHost，再 closeRuntime，不能只处理共用 Runtime 字段。

@@ -2,10 +2,8 @@
 import std/[json,os,tables,math,strutils,options]
 import ./[core,diagnostics,watch_ipc,gpui_styles,managed_runtime,task_contracts]
 type
-  GpuiRunError* = object of UiError
+  GpuiRunError* = object of RuntimeCleanupError
     ## Keep this owner until ordinary close succeeds, then release references.
-    cleanupRuntime*:Runtime
-    exitStatus*:Option[int]
   ActiveRow = tuple[key:string,index:int]
   Viewports = ref object
     rows: Table[string,seq[ActiveRow]]

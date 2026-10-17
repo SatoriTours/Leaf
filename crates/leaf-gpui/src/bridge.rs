@@ -16,6 +16,7 @@ pub struct Bridge {
 pub struct TaskTickReply {
     pub pending: bool,
     pub response: Option<Response>,
+    pub error: Option<String>,
 }
 impl Bridge {
     fn transport_value(&self, value: Value) -> Result<Value, String> {
@@ -43,16 +44,21 @@ impl Bridge {
         let pending = value["tasks_pending"]
             .as_bool()
             .ok_or("invalid tasks_pending boolean")?;
+        let error: Option<String> =
+            serde_json::from_value(value.get("error").cloned().unwrap_or(Value::Null))
+                .map_err(|e| e.to_string())?;
+        let error = error.filter(|error| !error.is_empty());
         let response = if value.get("snapshot").is_some() {
             Snapshot::parse(&value["snapshot"].to_string())?;
             Some(serde_json::from_value(value).map_err(|e| e.to_string())?)
         } else {
-            if let Some(error) = value["error"].as_str().filter(|v| !v.is_empty()) {
-                return Err(error.into());
-            }
             None
         };
-        Ok(TaskTickReply { pending, response })
+        Ok(TaskTickReply {
+            pending,
+            response,
+            error,
+        })
     }
     pub fn request(&self, value: Value) -> Result<Response, String> {
         serde_json::from_value(self.request_value(value)?).map_err(|e| e.to_string())
@@ -214,6 +220,47 @@ mod task_pump_tests {
         assert!(!reply.pending);
         assert!(reply.response.is_none());
         assert!(bridge.request(json!({"op":"status"})).is_err());
+    }
+    #[test]
+    fn task_pump_application_error_keeps_pending_and_optional_snapshot() {
+        for snapshot in [false, true] {
+            let mut value = json!({"tasks_pending":true,"error":"scope refused"});
+            if snapshot {
+                value["snapshot"] = json!({"title":"task","width":200,"height":200,
+                    "root":{"id":"root","kind":"text","text":"accepted"}});
+                value["rows"] = json!([]);
+            }
+            let mut response = CString::new(value.to_string()).unwrap();
+            let bridge = Bridge {
+                callback,
+                context: &mut response as *mut _ as *mut c_void,
+            };
+            let reply = bridge
+                .tasks()
+                .expect("application error is a valid task envelope");
+            assert!(reply.pending);
+            assert_eq!(reply.error.as_deref(), Some("scope refused"));
+            assert_eq!(reply.response.is_some(), snapshot);
+            // The first consumer-visible application error must survive as well.
+            if let Some(response) = reply.response {
+                assert_eq!(response.error.as_deref(), Some("scope refused"));
+            }
+        }
+    }
+    #[test]
+    fn task_pump_malformed_envelopes_remain_transport_errors() {
+        for text in [
+            "{",
+            r#"{"tasks_pending":true,"error":7}"#,
+            r#"{"tasks_pending":true,"snapshot":null}"#,
+        ] {
+            let mut response = CString::new(text).unwrap();
+            let bridge = Bridge {
+                callback,
+                context: &mut response as *mut _ as *mut c_void,
+            };
+            assert!(bridge.tasks().is_err());
+        }
     }
     #[test]
     fn task_pump_pending_is_a_strict_boolean() {

@@ -93,3 +93,9 @@ proc databaseWork(input: string, ctx: WorkerContext): string {.nimcall, gcsafe.}
 SQLite 默认 busy timeout 为 5 秒；这不是整个任务的总超时。长查询、网络调用和第三方库需各自的操作超时及取消策略；取消不能回滚框架外已经提交的副作用。业务需要幂等键/事务时由业务定义。最终 ordinary close 可能等待不合作的 work，报告窗口与进程退出观测时间时须分列。
 
 新旧 GPUI 必须严格协商 task pump，旧库在任何新 work 启动前明确拒绝。不要用普通 HostConsumer 的存在推断支持，也不要在 status/ready/rendering 查询中驱动任务。Win32 任务 timer 独立于 close-retry timer；WndProc 只置任务标记，业务交付在保留 thread/lease/session/busy/hook 保护的 ordinary safeTurn。
+
+公开 launcher 的最终收尾由 `newRuntime`、`runHeadless`、desktop/native 和高层 `run` 共同传递 ownership；遇到 `RuntimeCleanupError` 或其宿主子类，先保存异常/owner，恢复失败的 scope 条件后显式 ordinary retry。不要在 catch/finally 中无条件立即重试，也不要因为 `run(...,cleanupOwner=addr owner)` 返回 0 就释放非 nil owner。headless 输出最终 Snapshot 后取消未提交任务、回收空闲 pool 并 dispose；没有新增自动 task pump。
+
+任务兼容普通测试会从 `tests/ffi/gpui_v2_library.c` 构建无 task capability 的双 ABI fixture，不依赖开发者 home。真实旧库 integration 为显式可选输入：设置 `LEAF_TASK5_OLD_LIBRARY` 为绝对库路径，可同时设置 `LEAF_TASK5_OLD_LIBRARY_SHA256`；配置时检查实际 SHA 和无 task capability，未配置的 integration 明确 SKIPPED。本轮保留旧生产库 `63ef5b8104253b14bfcda7dca45fe84cc8a8e3ce8840c1f2555cfdfec63af9a1` 历史证据，不覆盖该文件。
+
+native 关闭观测的两个分支使用同一个截止时间，观测子进程创建后立即 defer close；非零退出表示窗口已消失，挂起工具则报告超时并回收进程组/句柄。共享 deadline 约束轮询，既有 ManagedProcess.close 还可能使用最多 500ms TERM grace 再 KILL，不能把它写成对系统清理的抢占时限。

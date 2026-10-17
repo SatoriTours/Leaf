@@ -11,8 +11,14 @@ proc runNative*(app: Application, diagnostics: Diagnostics = nil,
     fail("Win32 cleanup owner slot must be empty")
   let activity = newUiScopeActivity()
   let guarded = guardUiApplication(app, proc(): uint64 = uint64(GetCurrentThreadId()), activity)
-  let runtime = newRuntime(guarded, validator = proc(snapshot: Snapshot) = validateProps(snapshot.root),
-    diagnostics = diagnostics)
+  var runtime: Runtime
+  try:
+    runtime = newRuntime(guarded, validator = proc(snapshot: Snapshot) = validateProps(snapshot.root),
+      diagnostics = diagnostics)
+  except RuntimeCleanupError as failure:
+    if cleanupOwner != nil and failure.cleanupRuntime != nil:
+      cleanupOwner[] = failure.cleanupRuntime
+    raise
   var window: Win32Host
   var primary: ref CatchableError
   var status = none(int)

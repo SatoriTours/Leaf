@@ -12,6 +12,15 @@ proc command(exe:string,args:seq[string],root:string):string =
     sleep(10)
   require(process.code==0,exe & " " & args.join(" ") & " failed (" & $process.code & "): " & process.output)
   process.output.strip()
+proc probeWindowGone*(exe: string, args: seq[string], root: string, deadline: MonoTime): bool =
+  require(getMonoTime() < deadline, "window close observation timeout")
+  let probe = startManaged(exe, args, root)
+  defer: probe.close()
+  while true:
+    require(getMonoTime() < deadline, "window close observation timeout")
+    if probe.poll(): return probe.code != 0
+    sleep(1)
+
 proc main():int =
   when not defined(linux):
     stderr.writeLine("Real desktop smoke currently uses X11; run cargo test for portable GPUI controls")
@@ -347,20 +356,14 @@ proc main():int =
   while not child.poll():
     require(getMonoTime()<closing,"GPUI close timeout")
     if tasks and windowGoneMs < 0:
-      let probe = startManaged(xdotool, @["getwindowname", window], root)
-      while not probe.poll():
-        require(getMonoTime() < closing, "window close observation timeout")
-        sleep(1)
-      if probe.code != 0: windowGoneMs = float64((getMonoTime()-closeStarted).inNanoseconds)/1e6
-      probe.close()
+      if probeWindowGone(xdotool, @["getwindowname", window], root, closing):
+        windowGoneMs = float64((getMonoTime()-closeStarted).inNanoseconds)/1e6
     sleep(10)
   require(child.code==0,"GPUI close failed: " & child.output)
   if tasks:
     if windowGoneMs < 0:
-      let probe = startManaged(xdotool, @["getwindowname", window], root)
-      while not probe.poll(): sleep(1)
-      require(probe.code != 0, "task process exited but its window is still live")
-      probe.close()
+      require(probeWindowGone(xdotool, @["getwindowname", window], root, closing),
+        "task process exited but its window is still live")
       windowGoneMs = float64((getMonoTime()-closeStarted).inNanoseconds)/1e6
     require(child.output.count("tasks:result:main") == taskMainResultsBeforeClose, "completion delivered after terminal close")
     for mode in ["main", "retained", "other"]:

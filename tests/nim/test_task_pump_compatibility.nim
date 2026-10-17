@@ -1,6 +1,33 @@
 {.define:leafProtocolProbes.}
-import std/[unittest,json,os,options,atomics,strutils,osproc]
-import leaf/[core,components,widgets,managed_runtime,gpui_bridge,gpui_api,gpui_ffi_v2,gpui_session,host_session,backend,desktop]
+import std/[unittest,json,os,options,atomics,strutils,osproc,monotimes,times]
+import leaf/[core,components,widgets,managed_runtime,gpui_bridge,gpui_api,gpui_ffi_v2,gpui_session,host_session,backend,desktop,checksum,task_service]
+proc buildCapabilityFixture(capable: bool): string =
+  let directory = FrameworkRoot / "target/ffi-v2"
+  createDir(directory)
+  let source = directory / (if capable: "final-capable.c" else: "final-legacy.c")
+  result = source.changeFileExt("so")
+  var fixture = readFile(FrameworkRoot / "tests/ffi/gpui_v2_library.c")
+    .replace("../../include/leaf_gpui_v2.h", FrameworkRoot / "include/leaf_gpui_v2.h")
+  if capable:
+    fixture = fixture.replace("LeafGpuiApiV2 api={sizeof(api),2,0,run};", "LeafGpuiApiV2 api={sizeof(api),2,LEAF_CAP_TASK_PUMP,run};") &
+      "\nuint32_t leaf_gpui_task_pump_version(void) {return 1;}\n"
+  writeFile(source, fixture)
+  doAssert execCmd("gcc -shared -fPIC " & quoteShell(source) & " -o " & quoteShell(result)) == 0
+
+var legacyFixture: string
+proc legacyTaskLibrary(): string =
+  if legacyFixture.len == 0: legacyFixture = buildCapabilityFixture(false)
+  legacyFixture
+proc configuredLegacyTaskLibrary(): string =
+  result = getEnv("LEAF_TASK5_OLD_LIBRARY")
+  if result.len == 0: fail("set LEAF_TASK5_OLD_LIBRARY for the optional real old-library integration")
+  if not fileExists(result): fail("configured old GPUI library does not exist: " & result)
+  let actual = sha256File(result)
+  let expected = getEnv("LEAF_TASK5_OLD_LIBRARY_SHA256")
+  if expected.len > 0 and actual != expected: fail("configured old GPUI library SHA256 mismatch")
+  if loadGpui(result).supportsTaskPump(): fail("configured old GPUI library unexpectedly supports task pumping")
+  echo "OLD_GPUI_LIBRARY_SHA256=", actual
+
 var workCalls:Atomic[int]
 proc work(input:string,ctx:WorkerContext):string {.nimcall,gcsafe.}=
   discard workCalls.fetchAdd(1);"ready"
@@ -57,14 +84,14 @@ suite "task pump compatibility":
       check host.runtime.acceptedRevision==revision
     finally:host.runtime.closeRuntime()
 
-  test "real old production library refuses initial and dynamically mounted task owners":
+  test "buildable old capability library refuses initial and dynamically mounted task owners":
     let previous=getEnv("LEAF_GPUI_ABI")
     defer:
       if previous.len==0:delEnv("LEAF_GPUI_ABI")
       else:putEnv("LEAF_GPUI_ABI",previous)
     for abi in ["1","2"]:
       putEnv("LEAF_GPUI_ABI",abi)
-      let api=loadGpui("/home/jimxl/projects/leaf/target/debug/libleaf_gpui.so")
+      let api=loadGpui(legacyTaskLibrary())
       check not api.supportsTaskPump()
       workCalls.store(0);mounts=0;ownerDisposed=0
       expect UiError:discard newDesktopBridge(componentApplication(component(Owner,0),"old"),taskPumpSupported=api.supportsTaskPump())
@@ -437,7 +464,7 @@ suite "round1 public startup boundary":
       else:putEnv("LEAF_GPUI_LIBRARY",previousLibrary)
       if previousAbi.len==0:delEnv("LEAF_GPUI_ABI")
       else:putEnv("LEAF_GPUI_ABI",previousAbi)
-    putEnv("LEAF_GPUI_LIBRARY","/home/jimxl/projects/leaf/target/debug/libleaf_gpui.so")
+    putEnv("LEAF_GPUI_LIBRARY",legacyTaskLibrary())
     for abi in ["1","2"]:
       putEnv("LEAF_GPUI_ABI",abi)
       for withOut in [false,true]:
@@ -710,3 +737,98 @@ suite "round1 status and retry ownership":
       check cleanup==nil
       check entries==3 and disposed==1 and entered==0
       check owned.set(1)==StateWriteResult.disposed
+
+suite "portable old capability input":
+  test "explicit integration rejects a new capable library and a mismatched SHA":
+    let previous = getEnv("LEAF_TASK5_OLD_LIBRARY")
+    let previousSha = getEnv("LEAF_TASK5_OLD_LIBRARY_SHA256")
+    let previousAbi = getEnv("LEAF_GPUI_ABI")
+    defer:
+      for pair in [("LEAF_TASK5_OLD_LIBRARY", previous), ("LEAF_TASK5_OLD_LIBRARY_SHA256", previousSha), ("LEAF_GPUI_ABI", previousAbi)]:
+        if pair[1].len == 0: delEnv(pair[0])
+        else: putEnv(pair[0], pair[1])
+    putEnv("LEAF_TASK5_OLD_LIBRARY", buildCapabilityFixture(true))
+    delEnv("LEAF_TASK5_OLD_LIBRARY_SHA256")
+    for abi in ["1", "2"]:
+      putEnv("LEAF_GPUI_ABI", abi)
+      expect UiError: discard configuredLegacyTaskLibrary()
+    putEnv("LEAF_TASK5_OLD_LIBRARY", buildCapabilityFixture(false))
+    putEnv("LEAF_TASK5_OLD_LIBRARY_SHA256", repeat('0', 64))
+    expect UiError: discard configuredLegacyTaskLibrary()
+
+  test "optional real old library verifies SHA capability and startup rejection for both ABIs":
+    if getEnv("LEAF_TASK5_OLD_LIBRARY").len == 0:
+      skip()
+    else:
+      let previousAbi = getEnv("LEAF_GPUI_ABI")
+      defer:
+        if previousAbi.len == 0: delEnv("LEAF_GPUI_ABI")
+        else: putEnv("LEAF_GPUI_ABI", previousAbi)
+      for abi in ["1", "2"]:
+        putEnv("LEAF_GPUI_ABI", abi)
+        let library = configuredLegacyTaskLibrary()
+        let api = loadGpui(library)
+        check not api.supportsTaskPump()
+        ownerDisposed = 0; mounts = 0; workCalls.store(0)
+        expect UiError:
+          discard newDesktopBridge(componentApplication(component(Owner, 0), "configured old"),
+            taskPumpSupported=api.supportsTaskPump())
+        check ownerDisposed == 1 and mounts == 0 and workCalls.load() == 0
+
+var holdOtherWorker: Atomic[bool]
+proc heldWork(input: string, ctx: WorkerContext): string {.nimcall, gcsafe.} =
+  while holdOtherWorker.load(): sleep(1)
+  input
+suite "task error envelope with actual workers":
+  test "claimed error and a refused unclaimed delivery preserve pending without snapshots or replay":
+    var first, other: int
+    var refuseEntry, failExit: bool
+    let execution: ExecutionScope = proc(body: proc()) =
+      if refuseEntry: fail("delivery scope entry refused")
+      body()
+      if failExit: fail("delivery scope exit refused")
+    let Root = defineComponent[int, int]("ErrorEnvelopeWorkers",
+      proc(ctx: MountContext, p: int): int =
+        let scope = ctx.taskScope()
+        ctx.onMount(proc(e: LifecycleContext) =
+          discard startTask(scope, "first", "first", work, proc(value: string) =
+            inc first
+            failExit = true)
+          discard startTask(scope, "other", "other", heldWork, proc(value: string) = inc other))
+        p,
+      proc(ctx: ComponentContext, p, m: int): UiDescription = host(text("unchanged")))
+    holdOtherWorker.store(true)
+    let host = newDesktopBridge(componentApplication(component(Root, 0), "error envelope", executionScope=execution),
+      taskPumpSupported=true)
+    try:
+      discard host.request(%*{"op":"ready"})
+      discard host.request(%*{"op":"tasks"}) # accepted mount submits both actual workers
+      let deadline = getMonoTime() + initDuration(seconds=5)
+      while first == 0:
+        let response = host.request(%*{"op":"tasks"})
+        if first == 1:
+          check response.hasKey("error")
+          check response["tasks_pending"].getBool()
+          check not response.hasKey("snapshot")
+        doAssert getMonoTime() < deadline
+        sleep(1)
+      check first == 1 and other == 0
+      failExit = false
+      holdOtherWorker.store(false)
+      let service = host.runtime.taskServiceInternal()
+      while service.readyTaskCountInternal() == 0:
+        doAssert getMonoTime() < deadline
+        sleep(1)
+      refuseEntry = true
+      let refused = host.request(%*{"op":"tasks"})
+      check refused.hasKey("error") and refused["tasks_pending"].getBool()
+      check not refused.hasKey("snapshot")
+      check first == 1 and other == 0
+      refuseEntry = false
+      let recovered = host.request(%*{"op":"tasks"})
+      check not recovered.hasKey("error") and not recovered["tasks_pending"].getBool()
+      check not recovered.hasKey("snapshot")
+      check first == 1 and other == 1
+    finally:
+      holdOtherWorker.store(false); refuseEntry=false; failExit=false
+      host.runtime.closeRuntime()

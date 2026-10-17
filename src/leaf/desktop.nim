@@ -3,7 +3,7 @@ import std/[json,options]
 import ./[core,gpui_api,gpui_bridge,gpui_session,diagnostics,windows_dpi]
 export gpui_bridge.GpuiRunError
 
-proc transferFailure(error:ref GpuiRunError,cleanupOwner:ptr Runtime)=
+proc transferFailure(error:ref RuntimeCleanupError,cleanupOwner:ptr Runtime)=
   if cleanupOwner!=nil and error.cleanupRuntime!=nil:cleanupOwner[]=error.cleanupRuntime
 
 proc finishRun(runtime:Runtime,status:int,cleanupOwner:ptr Runtime,alreadyAttempted=false,
@@ -22,7 +22,11 @@ proc runDesktop*(app:Application,diagnostics:Diagnostics=nil,cleanupOwner:ptr Ru
     stderr.writeLine("leaf: DPI " & dpi.status & " awareness=" & dpi.awareness & " error=" & $dpi.errorCode)
   let api=loadGpui()
   if api.v2.isSome:
-    let runtime=newRuntime(app,diagnostics=diagnostics)
+    var runtime: Runtime
+    try: runtime = newRuntime(app, diagnostics=diagnostics)
+    except RuntimeCleanupError as failure:
+      failure.transferFailure(cleanupOwner)
+      raise
     var session:GpuiSession
     try:
       session=openGpuiSession(runtime,api)
@@ -37,7 +41,7 @@ proc runDesktop*(app:Application,diagnostics:Diagnostics=nil,cleanupOwner:ptr Ru
     return finishRun(runtime,result,cleanupOwner,session.cleanupAttempted,session.cleanupError)
   var host:DesktopBridge
   try:host=newDesktopBridge(app,diagnostics,taskPumpSupported=api.supportsTaskPump())
-  except GpuiRunError as failure:
+  except RuntimeCleanupError as failure:
     failure.transferFailure(cleanupOwner)
     raise
   try:

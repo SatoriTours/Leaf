@@ -1,6 +1,6 @@
 ## Owned Unicode top-level Host. WndProc never calls business or disposes a
 ## Session; all such work runs after native dispatch at an ordinary Nim boundary.
-import std/[tables, unicode, math, atomics, options]
+import std/[tables, unicode, math, atomics]
 import ../../[core, backend, backend_session, native_layout, windows_dpi]
 import ./[api, calls, host_state, host_bridge]
 export host_bridge
@@ -31,11 +31,9 @@ type
     needsTick, retryDeferred: bool
     errorCount: uint64
     pendingError: ref CatchableError
-  Win32RunError* = object of UiError
+  Win32RunError* = object of RuntimeCleanupError
     ## Caller retries Host first, then ordinary Runtime close; no destructor retry.
-    cleanupRuntime*: Runtime
     cleanupHost*: Win32Host
-    exitStatus*: Option[int]
   HostDiagnostics* = object
     liveWindows*, liveRoots*: int
     callbackErrors*: uint64
