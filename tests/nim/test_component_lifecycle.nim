@@ -1,5 +1,49 @@
-import std/[unittest, tables, monotimes, times]
+import std/[unittest, tables, monotimes, times, os, osproc, streams, strutils, unicode]
 import leaf/[core, widgets, components, component_description, task_contracts]
+
+proc errorLogMessage(kind: string): string =
+  case kind
+  of "cjk": repeat("界", 2000)
+  of "emoji-split": repeat('a', 4093) & "😀tail"
+  of "emoji-exact": repeat("😀", 1025)
+  of "invalid": "bad:\xFF:\xF0\x9F"
+  of "scalars": "\xED\xA0\x80|\xF4\x90\x80\x80|\xE0\x80\x80"
+  else: raise newException(ValueError, "unknown error-log fixture")
+
+proc runErrorLogChild(phase, kind: string) =
+  let message = errorLogMessage(kind)
+  var enabled = false
+  let scope: ExecutionScope = proc(body: proc() {.closure.}) =
+    if enabled and phase == "scope-entry": raise newException(ValueError, message)
+    body()
+    if enabled and phase == "scope-exit": raise newException(ValueError, message)
+  let Hook = defineComponent[int, int]("LifecycleErrorLogChild",
+    proc(ctx: MountContext, props: int): int =
+      ctx.onMount(proc(event: LifecycleContext) =
+        if phase == "callback": raise newException(ValueError, message))
+      0,
+    proc(ctx: ComponentContext, props, model: int): UiDescription = host(text("log")))
+  let runtime = newRuntime(componentApplication(component(Hook, 0), "log child", executionScope = scope))
+  enabled = true
+  let report = runtime.pumpTasks()
+  doAssert report.failed == 1
+  doAssert report.callbacks == (if phase == "scope-entry": 0 else: 1)
+  doAssert report.pending == (phase == "scope-entry")
+
+# Each subprocess runs the real pump/error path, with stderr and stdout kept
+# separate. It exits before unittest suites, so no test-runner text is captured.
+let fixtureArgs = commandLineParams()
+if fixtureArgs.len == 3 and fixtureArgs[0] == "--lifecycle-error-log":
+  runErrorLogChild(fixtureArgs[1], fixtureArgs[2])
+  quit(0)
+
+proc captureFailureLog(phase, kind: string): tuple[output: string, exitCode: int] =
+  let child = startProcess(getAppFilename(), args = @["--lifecycle-error-log", phase, kind], options = {})
+  try:
+    result.output = child.errorStream.readAll()
+    result.exitCode = child.waitForExit()
+    doAssert child.outputStream.readAll().len == 0
+  finally: child.close()
 
 type
   Observation = object
@@ -397,3 +441,29 @@ suite "lifecycle admission budgets":
     runtime.uiTask(proc() = discard navigation.navigate("B"))
     runtime.drain()
     check navigation.currentRoute.name == "B"
+
+suite "lifecycle error log encoding":
+  for phase in ["callback", "scope-entry", "scope-exit"]:
+    test phase & " logs bounded complete Unicode scalars and keeps event metadata":
+      let cases = @[
+        ("cjk", repeat("界", 1365)),
+        ("emoji-split", repeat('a', 4093)),
+        ("emoji-exact", repeat("😀", 1024)),
+        ("invalid", "bad:�:��"),
+        ("scalars", "���|����|���")]
+      for (kind, expected) in cases:
+        checkpoint("real stderr fixture: " & phase & "/" & kind)
+        let captured = captureFailureLog(phase, kind)
+        require captured.exitCode == 0
+        let prefix = "leaf: lifecycle owner=1 revision=1 phase=mount: "
+        require captured.output.startsWith(prefix)
+        let message = captured.output[prefix.len..^1].strip(chars = {'\r', '\n'})
+        check message.len <= 4096
+        check validateUtf8(message) == -1
+        var validScalars = true
+        for rune in message.runes:
+          if int(rune) < 0 or int(rune) > 0x10FFFF or int(rune) in 0xD800..0xDFFF:
+            validScalars = false
+        check validScalars
+        let matchesExpected = message == expected
+        check matchesExpected

@@ -182,11 +182,38 @@ proc popEvent(service: TaskService) =
     service.first = batch.next
     if service.first == nil: service.last = nil
 
+proc boundedErrorMessage(message: string): string =
+  # Strict Unicode scalar decoding: invalid bytes become U+FFFD. Apply the
+  # byte limit after normalization, never retaining only part of a scalar.
+  var index = 0
+  while index < message.len:
+    let first = ord(message[index])
+    var width = 0
+    var scalar, minimum: int
+    if first <= 0x7F: width = 1; scalar = first
+    elif first in 0xC2..0xDF: width = 2; scalar = first and 0x1F; minimum = 0x80
+    elif first in 0xE0..0xEF: width = 3; scalar = first and 0x0F; minimum = 0x800
+    elif first in 0xF0..0xF4: width = 4; scalar = first and 0x07; minimum = 0x10000
+    var valid = width > 0 and width <= message.len - index
+    if valid:
+      for offset in 1..<width:
+        let next = ord(message[index+offset])
+        if next notin 0x80..0xBF:
+          valid = false
+          break
+        scalar = (scalar shl 6) or (next and 0x3F)
+      valid = valid and scalar >= minimum and scalar <= 0x10FFFF and
+        scalar notin 0xD800..0xDFFF
+    let encoded = if valid: message[index..<index+width] else: "\xEF\xBF\xBD"
+    if result.len + encoded.len > 4096: break
+    result.add(encoded)
+    index += (if valid: width else: 1)
+
 proc logFailure(event: LifecycleEvent, error: ref CatchableError) =
   try:
     stderr.writeLine("leaf: lifecycle owner=" & $event.registration.stamp.owner &
       " revision=" & $event.revision & " phase=" & $event.kind & ": " &
-      error.msg[0..<min(error.msg.len, 4096)])
+      boundedErrorMessage(error.msg))
   except IOError: discard
 
 proc currentEntry(service: TaskService, event: LifecycleEvent): bool =
