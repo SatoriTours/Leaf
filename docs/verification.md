@@ -114,3 +114,22 @@ Linux私有Xvfb/软件渲染的ABI1/2×CACHE0/1四组真实页面窗口均退出
 100/1000/5000静态兄弟的导航均为静态render增量0、Snapshot导出增量0、6个宿主操作。共享父setChildren分别携带101/1001/5001个句柄（raw child payload808/8008/40008字节），这些样本不证明恒定CPU或总FFI字节。100完整往返保留A11/B22/C33及初始化身份；同页更换根不重复计费，prepare拒绝后验证旧registry映射仍可恢复。
 
 [完整验证记录](superpowers/reviews/2026-10-13-component-routing-verification.md)列明每项实际提交、命令、身份复用、证据及范围裁定。真实Windows/macOS桌面、系统IME组合阶段和跨屏DPI仍为NotRun，旧React计划13.4保持未关闭。
+
+
+## 组件任务与异步生命周期（2026-10-17）
+
+Task7 源码依次提交 `f088c465`（示例、性能/native/SDK fixture 与 API 文档）、`4e1b9a9b`（独立 NimScript include 路径修复）、`a3c63c71`（实际 scaffold 生成配置路径修复）。最终产品和测试源码为 `a3c63c710611ec1bad7ef3663bcccbf210166223`；本段后续文档提交不改变这些运行输入。官方 Nim normal 100 套件、独立 `--release-only` 4 套件均实际 EXIT0，使用固定 Nim 2.2.6/ORC 串行执行。ABI 校验 161 项 EXIT0；本轮实际 Rust workspace 52 测试及 fmt/clippy 均 EXIT0，Rust/Cargo/工具链/profile 未变后复用，不借用历史数字。
+
+100/1000/5000 静态兄弟下由真实 worker 完成单组件更新，render 增量均为 1，额外 Snapshot 均为 0，无关宿主句柄逐一保持。completion wall 样本为 2.308106/2.328006/2.322388ms，不含随后 handle 比较；这些计数与墙钟样本不承诺恒定 CPU、总 FFI 字节或 GPU 帧耗时。空泵保持 revision；ABI1 实际更新仍可能传完整活动树。
+
+Linux 私有 Xvfb/Mesa 显示环境下，ABI1/2 × CACHE0/1 四组真实任务窗口均 EXIT0，覆盖无需后续点击的完成、错误重试、默认离开取消、keep 隐藏完成返回、dispose 重建、关闭前在途任务及最终 dispose 次数。各使用本轮新构建 native-test-support 库独立绝对路径，SHA256 `25e3213182a4b616cd22a484c47ab8e8115a580e5e3a2d5026d6c1846a2e0bd0`。四组冻结于 f088；后续 nims 字节有变，当前无 `$` 的仓库路径下 path-only 转义不改变有效选项，普通配置实际探针确认 path/define/deepcopy，宿主/任务/harness/库未变。原 f088 native 行为据此复用，没有宣称 a3 重新跑窗口或全部依赖 bytes 一致。
+
+窗口消失/进程退出观测分别约 34.0–34.1ms / 34.1–44.2ms，受轮询与工具开销影响，合作 work 样本不构成非合作 work 的退出上界。真实窗口 ready/geometry/caption/trace 与 CPU 计数分别记录；未采样 GPUI 帧耗时/FPS，也未独立查询本轮 renderer/adapter 型号。沙箱首次禁止 X11 socket 的失败保留，审批后私有 Xvfb 成功，不当作产品 RED。
+
+最终 SDK 新 CLI 使用 a3 真实 commit 参数打包，production 桥接库 default features/dev debug=0，独立于 native-test-support 产物。包 SHA256 `7fbe8ef270190248e6c68d87e67e176427f775579aa3ea22f6e11454665b851b`；在仓库外 `/tmp/Leaf SDK 搬迁 $ Task7 a3c63c71/leaf-sdk` 真实解包，210 个 src/include 文件逐一匹配。清除 NIM、LEAF_LIBRARY、LEAF_GPUI_ROOT、LEAF_GPUI_LIBRARY、LEAF_SDK 后，doctor、普通 build、完整 smoke（保留 migration/CRUD/持久化）及独立任务 fixture 均 EXIT0，实际断言 `SDK_TASK_RESULT=后台完成`。SDK 使用自身 Nim/source；系统 GCC 和 `/tmp/mui-display/usr/lib` OS 依赖仍保留，不称完全无外部系统依赖。
+
+两个早期失败包未覆盖：f088/4e1 的 doctor/普通 build 成功，但完整 smoke 在生成配置路径失败。4e1 只修复独立 include 入口，随后实际 scaffold 产物回归取得 RED→GREEN，a3 才完成发布链路验证。普通/中文空格/`$`/`$$` 路径与非路径 define/deepcopy 都有实际配置运行断言。未缩路径、删 migration 或放宽结果断言。
+
+完整 argv/exit、源码/库/工具链/profile SHA、失败分类及证据复用边界保留在 `target/verification/component-async-lifecycle/task7`，并有独立空间外报告与 manifests 备份；二进制不提交。Task1–6 已接受的接口和历史 RED/GREEN 以协调专门验证记录为准，本项没有冒称找回缺失原始日志。
+
+NotRun：真实 Windows/macOS、完整 Windows PE 构建、系统 IME、跨屏 DPI、内存工具/长期稳态 RSS、Snapshot-export 独立故障注入、diagnostic 异常及联合 Snapshot+error 原缺口、动态 wrongthread。Task6 代码/静态通过不代表 Windows 行为通过；框架额度归零也不证明系统零泄漏。Task7 与整分支仍需独立架构审查，不自动合并、推送或归档。
