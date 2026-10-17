@@ -4,6 +4,21 @@ import ../../scripts/[package_sdk, smoke_sdk, verify_sdk_install]
 import ../../src/leaf/[checksum, archives, scaffold]
 import ../nim/archive_reader
 when defined(windows): import std/winlean
+when defined(windows): import ../../src/leaf/windows_paths
+
+proc compilerAlias(path: string): string =
+  ## The bundled ANSI MinGW toolchain cannot open Unicode directories, so reach
+  ## a Unicode build tree through its 8.3 alias exactly as the product does in
+  ## windows_paths.compilerPath and scripts/smoke_sdk.nim.
+  when defined(windows): windows_paths.compilerPath(path) else: path
+
+proc shortPathAvailable(path: string): bool =
+  ## True when every non-ASCII component was replaced by an existing alias.
+  ## Filesystems without 8.3 names cannot compile Unicode trees with GCC.
+  when defined(windows):
+    for character in path:
+      if ord(character) > 127: return compilerAlias(path) != path
+  true
 
 # Probe the environment at a real native-process boundary, then execute real
 # OpenSSL. This checks scoped environment propagation even on non-Windows hosts.
@@ -806,14 +821,21 @@ suite "SDK component worker result fixture":
       # the final smoke executes the same fixture against the relocated SDK.
       arguments = isolatedFixtureCommand(RepositoryRoot, base, "task_fixture").args
     else:
+      # The temporary tree carries Chinese and dollar path components; only the
+      # alias is visible to the ANSI compiler.
       arguments = @["c", "-r", "--threads:on", "--skipUserCfg:on", "--skipParentCfg:on",
-        "--skipProjCfg:on", "--noNimblePath", "--path:" & (RepositoryRoot / "src").replace("$", "$$"),
-        "--nimcache:" & (base / "cache").replace("$", "$$"),
-        "--out:" & (base / "task_fixture").replace("$", "$$"), base / "tests/task_fixture.nim"]
-    let executed = runCommand(compiler, arguments, base)
-    checkpoint executed.output
-    check executed.exitCode == 0
-    check "SDK_TASK_RESULT=后台完成" in executed.output
+        "--skipProjCfg:on", "--noNimblePath",
+        "--path:" & compilerAlias(RepositoryRoot / "src").replace("$", "$$"),
+        "--nimcache:" & compilerAlias(base / "cache").replace("$", "$$"),
+        "--out:" & compilerAlias(base / "task_fixture").replace("$", "$$"),
+        compilerAlias(base / "tests/task_fixture.nim")]
+    if not shortPathAvailable(base):
+      skip()
+    else:
+      let executed = runCommand(compiler, arguments, compilerAlias(base))
+      checkpoint executed.output
+      check executed.exitCode == 0
+      check "SDK_TASK_RESULT=后台完成" in executed.output
 
   test "SDK ORM config include accepts ordinary and literal dollar Unicode space paths once":
     let base = createTempDir("leaf-orm-sdk-", "")
@@ -850,11 +872,18 @@ doAssert original[0] == 1
 doAssert sdkPathMarker == "resolved"
 echo "SDK_ORM_CONFIG_OK"
 """)
-        let compiler = getEnv("NIM", findExe("nim"))
-        let executed = runCommand(compiler, @["c", "-r", "--skipUserCfg:on", "--skipParentCfg:on",
-          "--path:" & source.replace("$", "$$"),
-          "--nimcache:" & (project / "cache").replace("$", "$$"),
-          "--out:" & (project / "probe").replace("$", "$$"), project / "probe.nim"], project)
-        checkpoint directory & " / " & configKind & "\n" & executed.output
-        check executed.exitCode == 0
-        check "SDK_ORM_CONFIG_OK" in executed.output
+        if not shortPathAvailable(project):
+          skip()
+        else:
+          let compiler = getEnv("NIM", findExe("nim"))
+          # The include/project tree keeps its real Unicode literals; only the
+          # compiler's own inputs use the alias, so double-escaping stays under
+          # test while the ANSI GCC still reads its sources.
+          let executed = runCommand(compiler, @["c", "-r", "--skipUserCfg:on", "--skipParentCfg:on",
+            "--path:" & compilerAlias(source).replace("$", "$$"),
+            "--nimcache:" & compilerAlias(project / "cache").replace("$", "$$"),
+            "--out:" & compilerAlias(project / "probe").replace("$", "$$"),
+            compilerAlias(project / "probe.nim")], compilerAlias(project))
+          checkpoint directory & " / " & configKind & "\n" & executed.output
+          check executed.exitCode == 0
+          check "SDK_ORM_CONFIG_OK" in executed.output
