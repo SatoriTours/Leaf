@@ -6,6 +6,7 @@ import leaf/[core, widgets, components, host_session]
 import leaf/component_description
 import leaf/component_state
 import leaf/managed_runtime
+import leaf/task_contracts
 
 var initA, initB, renderA, renderB, clicksA, lazyBuilds, bigInit = 0
 var stateA, stateB: State[int]
@@ -450,3 +451,92 @@ suite "public managed page navigation":
     check ctxFreshInit == 1
     check rt.find("ctx-fresh") != nil
     session.close()
+
+suite "accepted page lifecycle":
+  test "A B A preserves owner and orders exits before enters, router unmount disposes retained pages":
+    var events: seq[string]
+    var navigation: ComponentRouter
+    var visible = true
+    var retainedState: State[int]
+    var rendersA = 0
+    proc hooks(ctx: MountContext, label: string) =
+      ctx.onMount(proc(event: LifecycleContext) = events.add("mount:" & label))
+      ctx.onActivate(proc(event: LifecycleContext) = events.add("activate:" & label))
+      ctx.onDeactivate(proc(event: LifecycleContext) = events.add("deactivate:" & label))
+      ctx.onDispose(proc(event: LifecycleContext) = events.add("dispose:" & label))
+    let Child = defineComponent[string, State[int]]("LifecycleRouteChild",
+      proc(ctx: MountContext, label: string): State[int] =
+        hooks(ctx, label & "-child")
+        result = ctx.state(0)
+        if label == "A": retainedState = result,
+      proc(ctx: ComponentContext, label: string, state: State[int]): UiDescription =
+        if label == "A": inc rendersA
+        host(text($ctx.value(state), key = "lifecycle-page")))
+    let Page = defineComponent[string, int]("LifecycleRouteParent",
+      proc(ctx: MountContext, label: string): int =
+        hooks(ctx, label)
+        0,
+      proc(ctx: ComponentContext, label: string, model: int): UiDescription = component(Child, label))
+    let Navigator = defineComponent[int, int]("LifecycleNavigator",
+      proc(ctx: MountContext, props: int): int =
+        navigation = newComponentRouter(ctx, @[
+          Route(name: "A", path: "/A", page: "A", view: "main"),
+          Route(name: "B", path: "/B", page: "B", view: "main")], @[
+          ComponentPageDefinition(name: "A", views: @["main"], build: proc(view: string): UiDescription = component(Page, "A")),
+          ComponentPageDefinition(name: "B", views: @["main"], build: proc(view: string): UiDescription = component(Page, "B"))], "A")
+        0,
+      proc(ctx: ComponentContext, props, model: int): UiDescription = renderPage(ctx, navigation))
+    let Root = defineComponent[int, int]("LifecycleRouterRoot",
+      proc(ctx: MountContext, props: int): int = 0,
+      proc(ctx: ComponentContext, props, model: int): UiDescription =
+        if visible: component(Navigator, 0) else: host(text("unmounted")))
+    let runtime = newRuntime(componentApplication(component(Root, 0), "route lifecycle"))
+    discard runtime.pumpTasks()
+    check events == @["mount:A", "mount:A-child"]
+    events.setLen(0)
+    runtime.uiTask(proc() = discard navigation.navigate("B"))
+    discard runtime.pumpTasks()
+    check events == @["deactivate:A-child", "deactivate:A", "mount:B", "mount:B-child"]
+    let count = rendersA
+    discard retainedState.set(7)
+    discard runtime.flush()
+    check rendersA == count
+    events.setLen(0)
+    runtime.uiTask(proc() = discard navigation.navigate("A"))
+    discard runtime.pumpTasks()
+    check events == @["deactivate:B-child", "deactivate:B", "activate:A", "activate:A-child"]
+    check retainedState.read() == 7
+    events.setLen(0)
+    visible = false
+    discard runtime.refresh()
+    discard runtime.pumpTasks()
+    check events == @["dispose:A-child", "dispose:B-child", "dispose:A", "dispose:B"]
+    check retainedState.set(9) == StateWriteResult.disposed
+    check navigation.navigate("B") == StateWriteResult.disposed
+
+  test "disposeOnLeave emits dispose without deactivate":
+    var events: seq[string]
+    var navigation: ComponentRouter
+    let Page = defineComponent[string, int]("LifecycleDisposablePage",
+      proc(ctx: MountContext, label: string): int =
+        ctx.onMount(proc(event: LifecycleContext) = events.add("mount:" & label))
+        ctx.onDeactivate(proc(event: LifecycleContext) = events.add("deactivate:" & label))
+        ctx.onDispose(proc(event: LifecycleContext) = events.add("dispose:" & label))
+        0,
+      proc(ctx: ComponentContext, label: string, model: int): UiDescription = host(text(label)))
+    let Navigator = defineComponent[int, int]("LifecycleDisposableNavigator",
+      proc(ctx: MountContext, props: int): int =
+        navigation = newComponentRouter(ctx, @[
+          Route(name: "A", path: "/A", page: "A", view: "main"),
+          Route(name: "B", path: "/B", page: "B", view: "main")], @[
+          ComponentPageDefinition(name: "A", views: @["main"], retention: PageRetention.disposeOnLeave,
+            build: proc(view: string): UiDescription = component(Page, "A")),
+          ComponentPageDefinition(name: "B", views: @["main"], build: proc(view: string): UiDescription = component(Page, "B"))], "A")
+        0,
+      proc(ctx: ComponentContext, props, model: int): UiDescription = renderPage(ctx, navigation))
+    let runtime = newRuntime(componentApplication(component(Navigator, 0), "dispose route"))
+    discard runtime.pumpTasks()
+    events.setLen(0)
+    runtime.uiTask(proc() = discard navigation.navigate("B"))
+    discard runtime.pumpTasks()
+    check events == @["dispose:A", "mount:B"]

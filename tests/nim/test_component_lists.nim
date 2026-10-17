@@ -92,3 +92,122 @@ suite "managed ABI 1 list compatibility":
     let tree=bridge.runtime.snapshot.toJson()
     check tree["root"]["children"][0]["list_index"].getInt==5000
     check tree["root"]["children"][0]["item_key"].getStr=="5000"
+
+suite "managed row lifecycle":
+  test "warm rows deactivate reactivate and evicted State is disposed before cleanup":
+    var events: seq[string]
+    var rowState: State[int]
+    var renders = 0
+    let Row = defineComponent[int, State[int]]("LifecycleWarmRow",
+      proc(ctx: MountContext, index: int): State[int] =
+        result = ctx.state(0)
+        if index == 0: rowState = result
+        ctx.onMount(proc(event: LifecycleContext) = events.add("mount:" & $index))
+        ctx.onActivate(proc(event: LifecycleContext) = events.add("activate:" & $index))
+        ctx.onDeactivate(proc(event: LifecycleContext) = events.add("deactivate:" & $index))
+        ctx.onDispose(proc(event: LifecycleContext) =
+          if index == 0: check rowState.set(1) == StateWriteResult.disposed
+          events.add("dispose:" & $index)),
+      proc(ctx: ComponentContext, index: int, state: State[int]): UiDescription =
+        inc renders
+        host(text($ctx.value(state), key = "life-row")))
+    var keys: seq[string]
+    for i in 0..<400: keys.add($i)
+    let root = componentList("life-list", keys,
+      proc(index: int): UiDescription = component(Row, index), rowHeight = 20, overscan = 0)
+    let runtime = newRuntime(componentApplication(root, "row lifecycle"))
+    discard runtime.materialize("life-list", 0, 1)
+    discard runtime.pumpTasks()
+    check events == @["mount:0"]
+    events.setLen(0)
+    discard runtime.materialize("life-list", 1, 2)
+    discard runtime.pumpTasks()
+    check events == @["deactivate:0", "mount:1"]
+    let before = renders
+    discard rowState.set(7)
+    discard runtime.flush()
+    check renders == before
+    events.setLen(0)
+    discard runtime.materialize("life-list", 0, 1)
+    discard runtime.pumpTasks()
+    check events == @["deactivate:1", "activate:0"]
+    check rowState.read() == 7
+    events.setLen(0)
+    discard runtime.materialize("life-list", 200, 400)
+    for i in 0..<20:
+      if not runtime.pumpTasks().pending: break
+    check events[0..1] == @["dispose:0", "dispose:1"]
+    check rowState.set(9) == StateWriteResult.disposed
+
+  test "same candidate created then evicted row never mounts or disposes":
+    var events: seq[int]
+    var erasedState: State[int]
+    let Row = defineComponent[int, State[int]]("LifecycleEphemeralRow",
+      proc(ctx: MountContext, index: int): State[int] =
+        result = ctx.state(index)
+        if index == 0: erasedState = result
+        ctx.onMount(proc(event: LifecycleContext) = events.add(index))
+        ctx.onDispose(proc(event: LifecycleContext) = events.add(-index-1)),
+      proc(ctx: ComponentContext, index: int, state: State[int]): UiDescription = host(text($index)))
+    var keys: seq[string]
+    for i in 0..200: keys.add($i)
+    let runtime = newRuntime(componentApplication(componentList("ephemeral", keys,
+      proc(index: int): UiDescription = component(Row, index), rowHeight = 20, overscan = 0), "ephemeral"))
+    runtime.setCommitter(proc(accepted, candidate: Runtime) =
+      if accepted == nil:
+        discard candidate.materialize("ephemeral", 0, 1)
+        discard candidate.materialize("ephemeral", 1, 201))
+    for i in 0..<20:
+      if not runtime.pumpTasks().pending: break
+    check events.len == 200
+    for i, index in events: check index == i+1
+    check erasedState.set(1) == StateWriteResult.disposed
+
+  test "new row retained inactive in the same candidate cannot receive an entering callback":
+    var events: seq[string]
+    var rowState: State[int]
+    var renders0 = 0
+    var visible = true
+    let Row = defineComponent[int, State[int]]("LifecycleNewInactiveRow",
+      proc(ctx: MountContext, index: int): State[int] =
+        result = ctx.state(0)
+        if index == 0: rowState = result
+        ctx.onMount(proc(event: LifecycleContext) = events.add("mount:" & $index))
+        ctx.onActivate(proc(event: LifecycleContext) = events.add("activate:" & $index))
+        ctx.onDispose(proc(event: LifecycleContext) =
+          if index == 0: check rowState.set(99) == StateWriteResult.disposed
+          events.add("dispose:" & $index)),
+      proc(ctx: ComponentContext, index: int, state: State[int]): UiDescription =
+        if index == 0: inc renders0
+        host(text($ctx.value(state))))
+    let list = componentList("new-inactive", @["0", "1"],
+      proc(index: int): UiDescription = component(Row, index), rowHeight = 20, overscan = 0)
+    let Root = defineComponent[int, int]("LifecycleNewInactiveRoot",
+      proc(ctx: MountContext, props: int): int = 0,
+      proc(ctx: ComponentContext, props, model: int): UiDescription =
+        if visible: list else: host(text("unmounted")))
+    let runtime = newRuntime(componentApplication(component(Root, 0), "new inactive"))
+    runtime.setCommitter(proc(accepted, candidate: Runtime) =
+      if accepted == nil:
+        discard candidate.materialize("new-inactive", 0, 1)
+        discard candidate.materialize("new-inactive", 1, 2))
+    discard runtime.pumpTasks()
+    check events == @["mount:1"]
+    check runtime.find("new-inactive").children.len == 1
+    check runtime.find("new-inactive").children[0].listIndex == 1
+    check runtime.listStats("new-inactive").warmRows == 1
+    let count = renders0
+    check rowState.set(7) == StateWriteResult.queued
+    discard runtime.flush()
+    check renders0 == count
+    events.setLen(0)
+    discard runtime.materialize("new-inactive", 0, 1)
+    discard runtime.pumpTasks()
+    check events == @["activate:0"]
+    check rowState.read() == 7
+    events.setLen(0)
+    visible = false
+    discard runtime.refresh()
+    discard runtime.pumpTasks()
+    check events == @["dispose:0", "dispose:1"]
+    check rowState.set(9) == StateWriteResult.disposed

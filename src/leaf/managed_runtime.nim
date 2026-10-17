@@ -1,7 +1,7 @@
 ## Managed component instances and affected overlays. The accepted maps are flat;
 ## successful publication replaces entries and never retains a candidate chain.
 import std/[tables,sets,options,algorithm]
-import ./[core,component_description,component_state,host_reconcile,backend]
+import ./[core,component_description,component_state,host_reconcile,backend,task_service,task_contracts]
 export host_protocol.UpdateStats
 
 type
@@ -28,9 +28,12 @@ type
     retained:ref Table[string,uint64]
     registryBytes:int
     ownedBytes:int
+    registration:OwnerRegistration
+    siblingIndex:int
   ManagedStore=ref object
     owner:Runtime
     states:StateStore
+    tasks:TaskService
     reconciler:HostReconciler
     rootDescription:UiDescription
     root,nextId,nextTypeId:uint64
@@ -59,6 +62,7 @@ type
     measurements:UpdateStats
     globalRefresh:bool
     preparedOutlets:Table[uint64,uint64]
+    taskAttempt:TaskAttempt
 var nextManagedId:uint64
 proc current(d:ManagedDriver,id:uint64):Instance=
   if d.edits.hasKey(id):d.edits.getOrDefault(id) else:d.data.instances.getOrDefault(id)
@@ -135,7 +139,7 @@ proc typeSegment(data:ManagedStore,definition:ErasedComponent):string=
     token=data.nextTypeId;data.typeTokens[identity]=token
   "/t:" & $token
 proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
-    parentHost:NodeHandle,path:string,depth:int):uint64=
+    parentHost:NodeHandle,path:string,depth:int,siblingIndex=0):uint64=
   if desc==nil:fail("nil UI description")
   if path.len>MaxStringBytes:fail("managed node ID exceeds 1 MiB")
   if depth>MaxDepth:fail("managed description exceeds depth 64")
@@ -150,7 +154,7 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
     old=nil
   let oldRoot=if old==nil:NoHandle else:d.hostRoot(old.id)
   let id=if old==nil:d.allocate() else:old.id
-  let item=Instance(id:id,parent:parent,owner:owner,depth:depth,path:path,description:desc,parentHost:parentHost,active:true,rowIndex: -1)
+  let item=Instance(id:id,parent:parent,owner:owner,depth:depth,path:path,description:desc,parentHost:parentHost,active:true,rowIndex: -1,siblingIndex:siblingIndex)
   if old==nil:
     inc d.count
     if desc.kind==DescriptionKind.component:inc d.componentCount
@@ -178,11 +182,13 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
     if old!=nil:
       item.model=old.model
       item.ownedBytes=old.ownedBytes
+      item.registration=old.registration
     else:
       var mount:MountContext
       d.data.states.setPhase(StatePhase.initializing)
       try:
-        mount=newMountContext(d.data.states,id)
+        item.registration=newOwnerRegistration(d.data.tasks,id)
+        mount=newMountContext(d.data.states,id,item.registration)
         item.model=desc.erased.instantiate(mount)
       finally:
         # Close the accounting frame on both the success and the exception exit;
@@ -250,7 +256,7 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
       let part=segment(child,i)
       if part in seen:fail("duplicate sibling key")
       seen.incl(part)
-      let childId=d.reconcile(child,previous.getOrDefault(part),id,owner,item.handle,path & "/" & part,depth+1)
+      let childId=d.reconcile(child,previous.getOrDefault(part),id,owner,item.handle,path & "/" & part,depth+1,i)
       item.children.add(childId)
       order.add(d.hostRoot(childId))
     for part,childId in previous:
@@ -375,7 +381,7 @@ proc materializeList(d:ManagedDriver,item:Instance,first,finish:int,protected:se
     if old==nil or not old.active:
       let description=if old==nil:item.description.buildDescriptionRow(index) else:d.retainedDescription(old.id)
       slot.id=d.reconcile(description,slot.id,item.id,item.owner,item.handle,
-        item.path & "/item/k:" & $key.len & ":" & key,item.depth+1)
+        item.path & "/item/k:" & $key.len & ":" & key,item.depth+1,index)
     let row=d.current(slot.id).copyInstance()
     row.rowIndex=index
     d.edits[slot.id]=row
@@ -428,8 +434,64 @@ proc prepareOutlets(d:ManagedDriver)=
         if owner==0:owner=acceptedOwner
     d.preparedOutlets[token]=owner
     when defined(leafProtocolProbes):inc outletIndexEdits
+proc prepareLifecycle(d:ManagedDriver)=
+  type OrderedTransition=object
+    registration:OwnerRegistration
+    kind:LifecyclePhase
+    depth:int
+    ranks:seq[int]
+    path:string
+    active:bool
+  var ordered:seq[OrderedTransition]
+  var registrations:seq[OwnerRegistration]
+  for id,item in d.edits:
+    let old=d.data.instances.getOrDefault(id)
+    if item!=nil and item.description.kind==DescriptionKind.component and old==nil:
+      registrations.add(item.registration)
+    var source:Instance
+    var kind:LifecyclePhase
+    var entering=false
+    if old!=nil and old.description.kind==DescriptionKind.component:
+      if item==nil:source=old;kind=LifecyclePhase.dispose
+      elif old.active and not item.active:source=old;kind=LifecyclePhase.deactivate
+      elif not old.active and item.active:source=item;kind=LifecyclePhase.activate;entering=true
+    elif old==nil and item!=nil and item.description.kind==DescriptionKind.component:
+      source=item;kind=LifecyclePhase.mount;entering=true
+    # Newly created and erased in this overlay has no accepted owner and no
+    # final instance: neither its registration nor a cleanup event escapes.
+    if source==nil:continue
+    var ranks:seq[int]
+    var ancestor=source
+    while ancestor!=nil:
+      ranks.add(ancestor.siblingIndex)
+      if ancestor.parent==0:break
+      ancestor=if entering:d.current(ancestor.parent) else:d.data.instances.getOrDefault(ancestor.parent)
+    ranks.reverse()
+    ordered.add(OrderedTransition(registration:source.registration,kind:kind,
+      depth:source.depth,ranks:move(ranks),path:source.path,active:item!=nil and item.active))
+  ordered.sort(proc(a,b:OrderedTransition):int=
+    let aEnter=a.kind in {LifecyclePhase.mount,LifecyclePhase.activate}
+    let bEnter=b.kind in {LifecyclePhase.mount,LifecyclePhase.activate}
+    result=cmp(aEnter,bEnter)
+    if result==0:result=(if aEnter:cmp(a.depth,b.depth) else:cmp(b.depth,a.depth))
+    if result==0:
+      for i in 0..<min(a.ranks.len,b.ranks.len):
+        result=cmp(a.ranks[i],b.ranks[i])
+        if result!=0:break
+    if result==0:result=cmp(a.ranks.len,b.ranks.len)
+    # Retained pages share a child slot but have distinct stable page paths.
+    if result==0:result=cmp(a.path,b.path))
+  var transitions:seq[OwnerTransition]
+  for i,transition in ordered:
+    transitions.add(ownerTransitionInternal(transition.registration,transition.kind,transition.depth,uint64(i),transition.active))
+  if d.taskAttempt!=nil:d.data.tasks.rejectTasks(d.taskAttempt)
+  d.taskAttempt=d.data.tasks.prepareTasks(d.data.owner.acceptedRevision+1,transitions,registrations)
+  if d.taskAttempt.preparedTaskBytesInternal > MaxTreeBytes-d.bytes:
+    fail("managed description and pending lifecycle events exceed 16 MiB")
+
 proc prepareHost(d:ManagedDriver)=
   d.prepareOutlets()
+  d.prepareLifecycle()
   var changes=HostChanges(window:d.changes.window)
   var upserts:Table[NodeHandle,HostRecord]
   var orders:Table[NodeHandle,HostChildren]
@@ -475,7 +537,7 @@ method stage*(base:ManagedDriver,forceRoot:bool):RuntimeDriver=
       let item=d.current(id)
       if item==nil or not item.active:continue
       let before=d.hostRoot(id)
-      discard d.reconcile(item.description,id,item.parent,item.owner,item.parentHost,item.path,item.depth)
+      discard d.reconcile(item.description,id,item.parent,item.owner,item.parentHost,item.path,item.depth,item.siblingIndex)
       if d.hostRoot(id)!=before:d.repairAncestors(id)
     if data.root==0:
       let config=data.owner.applicationConfig
@@ -535,6 +597,7 @@ method publish*(d:ManagedDriver) {.raises:[].}=
       if key.len>0:data.keys.mgetOrPut(key,default(HashSet[uint64])).incl(id)
   data.reconciler.publish(d.candidate)
   data.states.publishAttempt(d.attempt)
+  data.tasks.publishTasks(d.taskAttempt)
   # Apply only the prepared token delta; unrelated registrations are untouched.
   for token,owner in d.preparedOutlets:
     if owner==0:data.outlets.del(token)
@@ -550,7 +613,10 @@ method publish*(d:ManagedDriver) {.raises:[].}=
   data.totals.ops+=h.ops
   d.edits.clear();d.changes=default(HostChanges);d.candidate=nil;d.attempt=nil
   d.created.setLen(0);d.computed.clear();d.dirty.clear()
+  d.taskAttempt=nil
 method reject*(d:ManagedDriver) {.raises:[].}=
+  d.data.tasks.rejectTasks(d.taskAttempt)
+  d.taskAttempt=nil
   if d.attempt!=nil:d.data.states.rejectAttempt(d.attempt)
   d.data.states.clearQueued()
   d.data.invalid.clear()
@@ -608,7 +674,9 @@ method invokeAccepted*(d:ManagedDriver,key:string,event:Event):bool=
   true
 method stats*(d:ManagedDriver):PerformanceStats=
   PerformanceStats(renders:d.data.totals.componentRenders,builtNodes:d.data.totals.normalizedHosts,
-    mountedNodes:d.data.count,treeBytes:d.data.bytes)
+    mountedNodes:d.data.count,treeBytes:d.data.bytes+d.data.tasks.pendingTaskBytesInternal)
+method pumpDeferred*(d:ManagedDriver):TaskPumpReport=
+  d.data.tasks.pumpTaskService()
 proc componentApplication*(root:UiDescription,title:string,width=640,height=480,
     executionScope:ExecutionScope=nil):Application=
   if root==nil:fail("component application needs a root")
@@ -618,6 +686,7 @@ proc componentApplication*(root:UiDescription,title:string,width=640,height=480,
       reconciler:newHostReconciler(nextManagedId),rootDescription:root,nextId:1,
       instances:initTable[uint64,Instance](MaxNodes*4),index:initTable[string,uint64](MaxNodes*4),
       keys:initTable[string,HashSet[uint64]](MaxNodes*4),outlets:initTable[uint64,uint64](MaxNodes*2))
+    data.tasks=newTaskService(owner,data.states)
     ManagedDriver(data:data),executionScope)
 proc managed*(runtime:Runtime):bool=runtime.runtimeDriver of ManagedDriver
 proc managedReconciler*(runtime:Runtime):HostReconciler=

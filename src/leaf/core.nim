@@ -2,6 +2,7 @@
 ## callbacks are published only after a complete, validated render succeeds.
 import std/[tables, sets, json, math, unicode, algorithm]
 import ./diagnostics
+import ./task_contracts
 
 const
   MaxNodes* = 10_000
@@ -142,6 +143,8 @@ method find*(driver:RuntimeDriver,key:string):MountedNode {.base.}=nil
 method stats*(driver:RuntimeDriver):PerformanceStats {.base.}=default(PerformanceStats)
 method publish*(driver:RuntimeDriver) {.base,raises:[].}=discard
 method reject*(driver:RuntimeDriver) {.base,raises:[].}=discard
+method pumpDeferred*(driver:RuntimeDriver):TaskPumpReport {.base.}=
+  newTaskPumpReportInternal(0,0,0,0,false)
 proc runtimeDriver*(runtime:Runtime):RuntimeDriver=runtime.driver
 proc applicationConfig*(runtime:Runtime):tuple[title:string,width,height:int]=
   (runtime.app.title,runtime.app.width,runtime.app.height)
@@ -539,6 +542,15 @@ proc batch*(runtime:Runtime,body:proc() {.closure.})=
 proc uiTask*(runtime:Runtime,body:proc() {.closure.})=
   ## Backend task boundary. State writes enqueue; flush follows body completion.
   runtime.batch(body)
+
+proc pumpTasks*(runtime:Runtime):TaskPumpReport=
+  if runtime==nil:fail("missing Runtime")
+  if runtime.isCandidate or runtime.inUpdate or runtime.hookInstallation:
+    fail("task pump requires an ordinary UI safe point")
+  if executionRuntimeIdentity()!=0 and executionRuntimeIdentity()!=runtime.executionId:
+    fail("cannot pump another executing Runtime")
+  if runtime.driver==nil:return newTaskPumpReportInternal(0,0,0,0,false)
+  runtime.driver.pumpDeferred()
 
 proc refresh*(runtime: Runtime): bool =
   var completed: bool

@@ -1,7 +1,7 @@
 ## Immutable host/component descriptions. Erased models remain in Nim; neither
 ## component definitions nor callbacks are part of the host wire protocol.
 import std/[options,tables,sets,macros,unicode]
-import ./[core,component_state]
+import ./[core,component_state,task_service]
 export component_state.State,component_state.StateWriteResult,
   component_state.StateEqual,component_state.StateSnapshot
 
@@ -19,6 +19,7 @@ type
     owner:uint64
     ownedBytes:int
     sealed:bool
+    registration:OwnerRegistration
   ComponentContext* = ref object
     store:StateStore
     attempt:StateAttempt
@@ -84,7 +85,14 @@ proc children*(description:UiDescription):seq[UiDescription]=description.nested
 proc erased*(description:UiDescription):ErasedComponent=
   if description==nil or description.descriptionKind!=DescriptionKind.component:fail("description is not a component")
   description.instance
-proc newMountContext*(store:StateStore,owner:uint64):MountContext=MountContext(store:store,owner:owner)
+proc newMountContext*(store:StateStore,owner:uint64,registration:OwnerRegistration=nil):MountContext=
+  if registration!=nil:registration.requireOwnerRegistrationInternal(store,owner)
+  MountContext(store:store,owner:owner,registration:registration)
+proc lifecycleRegistrationInternal*(ctx:MountContext):OwnerRegistration=
+  if ctx==nil:fail("missing mount context")
+  if ctx.sealed:fail("mount context is already closed")
+  ctx.registration.requireOwnerRegistrationInternal(ctx.store,ctx.owner)
+  ctx.registration
 proc newComponentContext*(store:StateStore,attempt:StateAttempt,owner:uint64,
     invalidateOwner:proc(owner:uint64) {.closure.}=nil):ComponentContext=
   ComponentContext(store:store,attempt:attempt,owner:owner,invalidateOwner:invalidateOwner)
@@ -103,7 +111,9 @@ proc accountOwnedDescriptionBytes*(ctx: MountContext, bytes: int) =
 proc sealMountContext*(ctx: MountContext) =
   ## Runtime-internal: close this initialization frame on both the success and
   ## the exception exit of the initializer.
-  if ctx != nil: ctx.sealed = true
+  if ctx != nil:
+    ctx.sealed = true
+    sealOwnerRegistration(ctx.registration)
 proc ownedDescriptionBytes*(ctx: MountContext): int =
   ## Read-only accumulated owner cost, usable after initialization returns.
   if ctx == nil: return 0
