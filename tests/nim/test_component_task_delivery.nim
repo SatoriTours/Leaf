@@ -345,5 +345,20 @@ suite "unhandled worker diagnostics":
     check diagnostic.startsWith(prefix)
     let message=strutils.strip(diagnostic[prefix.len..^1],leading=false,trailing=true,chars={'\n'})
     check message.len<=4096
-    check validateUtf8(message)== -1
+    check validateUtf8(message) == -1
     check message==repeat("界",1365)
+
+suite "review I3 completed cancellation":
+  test "repeated cancellation after completion creates no intent or revision":
+    let f=Fixture();let rt=f.makeFixture()
+    var handle:TaskHandle
+    try:
+      rt.uiTask(proc()=handle=startTask(f.scope,"finished","ok",echoWork,proc(v:string)=f.values.add(v)))
+      rt.pumpUntil(proc():bool=f.values.len==1)
+      let before=rt.acceptedRevision
+      rt.uiTask(proc()=
+        cancel(handle);cancel(handle)
+        check not rt.taskServiceInternal().hasTaskIntents())
+      check rt.acceptedRevision==before
+      check not rt.taskServiceInternal().hasTaskIntents()
+    finally:rt.closeRuntime()

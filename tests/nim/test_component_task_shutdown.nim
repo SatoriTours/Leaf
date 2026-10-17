@@ -422,3 +422,100 @@ suite "review I2 close during lifecycle scope entry":
         check service.lifecycleStorageInternal()==(batches:0,slots:0)
       finally:
         armed=false;rt.closeRuntime()
+
+proc shutdownEcho(input:string,ctx:WorkerContext):string {.nimcall,gcsafe.}=input
+suite "review I3 closed handle cancellation":
+  test "cleanup cancellation continues resource release while wrappers and foreign Runtime reject":
+    var rt:Runtime
+    var scope:TaskScope
+    var handle:TaskHandle
+    var cleanupBefore,cleanupAfter,wrapperRejects=0
+    var armed=false
+    let Owner=defineComponent[int,int]("CancelDuringCleanup",
+      proc(ctx:MountContext,p:int):int=
+        scope=ctx.taskScope()
+        ctx.onDispose(proc(event:LifecycleContext)=
+          inc cleanupBefore
+          cancel(handle);cancel(handle)
+          check not rt.taskServiceInternal().hasTaskIntents()
+          expect UiError:discard startTask(scope,"closed","",shutdownEcho,proc(v:string)=discard)
+          inc cleanupAfter);p,
+      proc(ctx:ComponentContext,p,m:int):UiDescription=host(text("owner")))
+    let execution:ExecutionScope=proc(body:proc() {.closure.})=
+      if armed:
+        expect UiError:cancel(handle)
+        inc wrapperRejects
+      body()
+      if armed:
+        expect UiError:cancel(handle)
+        inc wrapperRejects
+    rt=newRuntime(componentApplication(component(Owner,0),"cleanup cancel",executionScope=execution))
+    let other=newRuntime(componentApplication(host(text("other")),"foreign"))
+    try:
+      rt.uiTask(proc()=handle=startTask(scope,"old","",shutdownEcho,proc(v:string)=discard))
+      let before=rt.acceptedRevision
+      armed=true
+      rt.closeRuntime()
+      armed=false
+      check cleanupBefore==1 and cleanupAfter==1
+      check wrapperRejects==2
+      check rt.acceptedRevision==before
+      check not rt.taskServiceInternal().hasTaskIntents()
+      cancel(handle);cancel(handle) # Closed, ordinary owning UI boundary.
+      expect UiError:other.uiTask(proc()=cancel(handle))
+      rt.closeRuntime()
+      check cleanupAfter==1
+      check rt.acceptedRevision==before
+    finally:
+      armed=false;rt.closeRuntime();other.closeRuntime()
+
+  test "invalid completed handle still rejects initialization render updater and host phases":
+    var rt:Runtime
+    var scope:TaskScope
+    var state:State[int]
+    var handle:TaskHandle
+    var complete=0
+    var armed=false
+    var rejected=0
+    let Late=defineComponent[int,int]("CancelProtectedInit",
+      proc(ctx:MountContext,p:int):int=
+        expect UiError:cancel(handle)
+        inc rejected;p,
+      proc(ctx:ComponentContext,p,m:int):UiDescription=host(text("late")))
+    let Root=defineComponent[int,State[int]]("CancelProtectedRoot",
+      proc(ctx:MountContext,p:int):State[int]=
+        scope=ctx.taskScope();result=ctx.state(0);state=result,
+      proc(ctx:ComponentContext,p:int,s:State[int]):UiDescription=
+        if armed:
+          expect UiError:cancel(handle)
+          inc rejected
+        if ctx.value(s)==1:component(Late,0) else:host(text("root")))
+    rt=newRuntime(componentApplication(component(Root,0),"protected cancel"))
+    var session:HostSession
+    try:
+      rt.uiTask(proc()=handle=startTask(scope,"finished","",shutdownEcho,proc(v:string)=inc complete))
+      for i in 0..<2000:
+        discard rt.pumpTasks()
+        if complete==1:break
+        sleep(1)
+      check complete==1
+      session=attachHostSession(rt,HostConsumer(sessionId:950,
+        prepare:proc(batch:HostBatch)=
+          expect UiError:cancel(handle)
+          inc(rejected),
+        apply:proc()=
+          expect UiError:cancel(handle)
+          inc(rejected),
+        accept:proc(revision:uint64) {.raises:[].}=discard,
+        discardPrepared:proc() {.raises:[].}=discard))
+      armed=true
+      rt.uiTask(proc()=state.update(proc(previous:int):int=
+        expect UiError:cancel(handle)
+        inc rejected
+        1))
+      check rejected==7 # installation2 + updater + render + init + prepare/apply2.
+      check not rt.taskServiceInternal().hasTaskIntents()
+    finally:
+      armed=false
+      if session!=nil:session.close()
+      rt.closeRuntime()

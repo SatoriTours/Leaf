@@ -372,6 +372,8 @@ proc acceptedRevision*(runtime: Runtime): uint64 = runtime.revision
 
 proc installingUpdate*(runtime: Runtime): bool = runtime.inUpdate
 proc taskBodyInternal*(runtime:Runtime):bool=runtime.taskBody
+proc runtimeCleanupBodyInternal*(runtime:Runtime):bool=
+  runtime.closed and runtime.cleanupBusy and runtime.cleanupBody
 proc runtimeClosedInternal*(runtime:Runtime):bool=runtime.closed or
   (runtime.driver!=nil and runtime.driver.deferredRetiredInternal())
 

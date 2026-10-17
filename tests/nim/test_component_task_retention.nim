@@ -308,3 +308,28 @@ suite "review I1 bounded lifecycle storage":
         check disposes==65*32
       finally:
         allow = -1;rt.closeRuntime()
+
+suite "review I3 disposed owner cancellation":
+  test "disposed owner handle cancellation is an intent and revision no-op":
+    var show:State[bool]
+    var scope:TaskScope
+    let Child=defineComponent[int,int]("DisposedCancelChild",
+      proc(ctx:MountContext,p:int):int=scope=ctx.taskScope();p,
+      proc(ctx:ComponentContext,p,m:int):UiDescription=host(text("child")))
+    let Root=defineComponent[int,State[bool]]("DisposedCancelRoot",
+      proc(ctx:MountContext,p:int):State[bool]=result=ctx.state(true);show=result,
+      proc(ctx:ComponentContext,p:int,s:State[bool]):UiDescription=
+        if ctx.value(s):component(Child,0) else:host(text("empty")))
+    let rt=newRuntime(componentApplication(component(Root,0),"disposed cancel"))
+    var handle:TaskHandle
+    try:
+      rt.uiTask(proc()=handle=startTask(scope,"old","",cycleWork,proc(v:string)=fail("disposed delivery")))
+      rt.uiTask(proc()=show.set(false))
+      let before=rt.acceptedRevision
+      rt.uiTask(proc()=
+        cancel(handle);cancel(handle)
+        check not rt.taskServiceInternal().hasTaskIntents())
+      check rt.acceptedRevision==before
+      discard rt.pumpTasks()
+      check rt.taskServiceInternal().taskWorkerStatsInternal().reservedTasks==0
+    finally:rt.closeRuntime()

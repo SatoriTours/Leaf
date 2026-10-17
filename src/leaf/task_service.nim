@@ -184,12 +184,17 @@ proc requireTaskAccess*(service: TaskService, scope: TaskScope) =
   if not registration.active and registration.scope.retention != keepWhileRetained:
     fail("task scope owner is inactive")
 
-proc requireTaskBoundary(service: TaskService) =
+proc requireCancelBoundary(service: TaskService) =
   service.requireUi()
-  if service.retired: fail("task service is retired")
-  if executionRuntimeIdentity() != service.runtime.runtimeIdentity or not service.runtime.taskBodyInternal:
-    fail("task API requires its Runtime UI task")
   service.states.requireIdle()
+  let runtime=service.runtime
+  if runtime.installingHook:fail("task cancellation is forbidden during host installation")
+  # Invalid retired handles may be cancelled at the ordinary final boundary.
+  # Scope wrappers still carry an executing identity without either body flag.
+  let ordinaryRetired=service.retired and executionRuntimeIdentity()==0 and not runtime.installingUpdate
+  if not ordinaryRetired and (executionRuntimeIdentity()!=runtime.runtimeIdentity or
+      not (runtime.taskBodyInternal or runtime.runtimeCleanupBodyInternal)):
+    fail("task API requires its Runtime UI task")
 
 proc hasTaskIntents*(service: TaskService): bool = service.intentsTouched
 proc sealTaskIntentsInternal*(service: TaskService): TaskIntentFrame =
@@ -266,8 +271,9 @@ proc startTaskInternal*(service: TaskService, scope: TaskScope, key, input: stri
   newTaskHandleInternal(service, request.identity)
 
 proc cancelTaskInternal*(service: TaskService, handle: TaskHandle) =
-  service.requireTaskBoundary()
+  service.requireCancelBoundary()
   if handle.taskDomainInternal != service: fail("task handle belongs to another Runtime")
+  if service.retired:return
   var found = false
   for request in service.records:
     if request != nil and request.current and request.identity == handle.taskIdInternal: found = true
