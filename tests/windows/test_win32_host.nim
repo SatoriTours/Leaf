@@ -724,3 +724,34 @@ suite "Win32 irreversible NCDESTROY cleanup":
     verifyNcDestroyFailure(false)
   test "NCDESTROY primary keeps class cleanup failure secondary and retries only owned class":
     verifyNcDestroyFailure(true)
+
+suite "partial Host construction ownership":
+  test "creation primary survives failed native cleanup and explicit owner retry":
+    var c = systemWin32Calls()
+    let primary = newException(UiError, "creation primary")
+    let realShow = c.showWindow
+    let realDestroy = c.destroyWindow
+    var refuse = true
+    var attempts = 0
+    c.showWindow = proc(w: HWND, command: int32): BOOL =
+      discard realShow(w, command)
+      raise primary
+    c.destroyWindow = proc(w: HWND): BOOL =
+      inc attempts
+      if refuse: setLastError(5); return 0
+      realDestroy(w)
+    var retained: Win32Host
+    try:
+      discard makeHost(c)
+      check false
+    except Win32RunError as error:
+      retained = error.cleanupHost
+      check error.parent == primary
+      check error.msg.contains("creation primary")
+      check retained != nil
+      check retained.windowHandle != nil
+      check attempts == 1
+    finally:
+      refuse = false
+      if retained != nil: retained.destroyHost()
+    check attempts == 2

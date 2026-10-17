@@ -1,6 +1,6 @@
 ## Owned Unicode top-level Host. WndProc never calls business or disposes a
 ## Session; all such work runs after native dispatch at an ordinary Nim boundary.
-import std/[tables, unicode, math, atomics]
+import std/[tables, unicode, math, atomics, options]
 import ../../[core, backend, backend_session, native_layout, windows_dpi]
 import ./[api, calls, host_state, host_bridge]
 export host_bridge
@@ -13,7 +13,11 @@ type
     instance: HINSTANCE
     className: seq[WCHAR]
     ownsClass, rooted, counted: bool
-    timer: UINT_PTR
+    timer, taskTimer: UINT_PTR
+    taskCookie: uint
+    sessionToken: uint64
+    needsTaskTick, tasksRetired: bool
+    cleanupFailure: ref CatchableError
     calls: Win32Calls
     ctx: HostContext
     close: CloseState
@@ -27,6 +31,11 @@ type
     needsTick, retryDeferred: bool
     errorCount: uint64
     pendingError: ref CatchableError
+  Win32RunError* = object of UiError
+    ## Caller retries Host first, then ordinary Runtime close; no destructor retry.
+    cleanupRuntime*: Runtime
+    cleanupHost*: Win32Host
+    exitStatus*: Option[int]
   HostDiagnostics* = object
     liveWindows*, liveRoots*: int
     callbackErrors*: uint64
@@ -127,6 +136,32 @@ proc busy(host: Win32Host): bool =
     let runtime = host.session.runtime
     if runtime.installingUpdate or runtime.installingHook: return true
   false
+proc currentTaskSession(host: Win32Host): bool =
+  host.session != nil and not host.session.disposed and
+    host.sessionToken != 0 and host.session.runtime.committerOwner == host.sessionToken and
+    (host.lease == nil or host.bridge.matchesSession(host.session))
+proc retireTasks(host: Win32Host) =
+  # Metadata only. Never enter executionScope, release the pool pin or join here.
+  if not host.tasksRetired and host.currentTaskSession():
+    let driver = host.session.runtime.runtimeDriver
+    if driver != nil: driver.retireDeferred()
+    host.tasksRetired = true
+proc disarmTaskTick(host: Win32Host) =
+  if host.taskTimer != 0:
+    if host.calls.killTimer(host.window, host.taskTimer) == 0: nativeError("KillTimer task")
+    host.taskTimer = 0
+  host.needsTaskTick = false
+proc armTaskTick(host: Win32Host) =
+  if host.window == nil or host.close.pending or host.close.complete or
+      not host.currentTaskSession() or host.session.closing or not host.session.runtime.taskPumpPending():
+    host.disarmTaskTick()
+    return
+  if host.taskTimer == 0:
+    let timer = host.calls.setTimer(host.window, host.taskCookie, 16, nil)
+    if timer == 0: nativeError("SetTimer task")
+    host.taskTimer = timer
+    if timer == host.timer: fail("task and close timers must have distinct identities")
+
 proc delayed(host: Win32Host) =
   if host.window == nil or host.timer != 0 or host.close.complete: return
   let timer = host.calls.setTimer(host.window, host.cookie, 30, nil)
@@ -217,7 +252,14 @@ proc windowProc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.
         host.close.posted = host.timer != 0
         host.needsTick = true
         return 0
+      of WM_HOST_TASK_TICK:
+        host.needsTaskTick = true
+        return 0
       of WM_TIMER:
+        if host.taskTimer != 0 and wp == host.taskTimer:
+          # Periodic timer survives a busy/nested turn; only ordinary code disarms.
+          host.needsTaskTick = true
+          return 0
         if host.timer != 0 and wp == host.timer:
           if host.calls.killTimer(window, host.timer) == 0: nativeError("KillTimer")
           host.timer = 0
@@ -233,6 +275,7 @@ proc windowProc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.
           # Never retain/retry a dead HWND or expose it through a borrowed getter.
           host.window = nil
           host.timer = 0 # USER32 has destroyed this window's remaining timers.
+          host.taskTimer = 0
           if host.counted:
             dec liveWindowCount
             host.counted = false
@@ -251,6 +294,7 @@ proc windowProc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.
 proc nativeCleanup(host: Win32Host) =
   var cleanupError: ref CatchableError
   try:
+    host.disarmTaskTick()
     if host.timer != 0:
       if host.calls.killTimer(host.window, host.timer) == 0: nativeError("KillTimer")
       host.timer = 0
@@ -286,11 +330,15 @@ proc finish(host: Win32Host) =
   host.bridge = default(HostBackendBridge)
   host.calls = default(Win32Calls)
   host.needsTick = false
+  host.needsTaskTick = false
+  host.cleanupFailure = nil
   host.close.closeSucceeded()
 
 proc release(host: Win32Host) =
   inc host.releaseDepth
   try:
+    host.retireTasks()
+    host.disarmTaskTick()
     if host.session != nil:
       host.session.dispose()
       if not host.session.disposed: fail("Session release did not complete")
@@ -304,6 +352,13 @@ proc release(host: Win32Host) =
 
 proc safeTurn(host: Win32Host) =
   host.checkCallback()
+  if host.close.pending:
+    host.retireTasks()
+    try: host.disarmTaskTick()
+    except CatchableError as error:
+      host.cleanupFailure = error
+      host.close.closeFailed()
+      raise error
   if host.close.complete or host.busy(): return
   var primary: ref CatchableError
   if not host.close.pending and host.lease != nil: host.bridge.nativeTick()
@@ -318,6 +373,20 @@ proc safeTurn(host: Win32Host) =
       host.recordError()
       primary = error
     finally: dec host.tickDepth
+  if not host.close.pending and host.currentTaskSession() and not host.session.closing:
+    if host.needsTaskTick or host.session.runtime.taskPumpPending():
+      host.needsTaskTick = false
+      inc host.tickDepth
+      try:
+        discard host.session.runtime.pumpTasks()
+      except CatchableError as error:
+        host.recordError()
+        if primary == nil: primary = error
+        else: primary.msg.add("; task secondary: " & error.msg)
+      finally: dec host.tickDepth
+    if not host.close.pending: host.armTaskTick()
+  else:
+    host.disarmTaskTick()
   if not host.close.pending and host.lease != nil and not host.busy(): host.bridge.nativeTick()
   if host.close.pending and (host.session != nil or host.lease != nil) and not host.busy() and not host.retryDeferred:
     try:
@@ -325,6 +394,7 @@ proc safeTurn(host: Win32Host) =
     except CatchableError as error:
       host.recordError()
       host.close.closeFailed()
+      host.cleanupFailure = error
       host.retryDeferred = true
       if primary != nil: primary.msg.add("; close secondary: " & error.msg)
       # A dead HWND cannot schedule a timer. Owner must explicitly retry cleanup.
@@ -357,7 +427,7 @@ proc createHost*(title: string, size: DipSize,
   if width <= 0 or height <= 0 or width > high(int32) or height > high(int32):
     fail("Win32 Host frame size overflows")
   let cookie = reserveCookie()
-  let host = Win32Host(owner: owner, cookie: cookie, calls: calls)
+  let host = Win32Host(owner: owner, cookie: cookie, taskCookie: reserveCookie(), calls: calls)
   host.className = wide("LeafHost-" & $owner & "-" & $cookie)
   host.ctx = HostContext(sessionId: uint64(cookie),
                          mountGeneration: 1, scale: scale)
@@ -385,7 +455,12 @@ proc createHost*(title: string, size: DipSize,
     result = host
   except CatchableError as primary:
     try: host.nativeCleanup()
-    except CatchableError as secondary: primary.msg.add("; Host cleanup secondary: " & secondary.msg)
+    except CatchableError as secondary:
+      primary.msg.add("; Host cleanup secondary: " & secondary.msg)
+      let failure = newException(Win32RunError, primary.msg)
+      failure.parent = primary
+      failure.cleanupHost = host
+      raise failure
     raise primary
 
 proc context*(host: Win32Host): HostContext =
@@ -409,9 +484,12 @@ proc bindSession*(host: Win32Host, session: BackendSession,
     fail("Session is disposed or belongs to another Host context")
   if host.lease != nil and not host.bridge.matchesSession(session):
     fail("Session does not match native owner binding")
+  session.runtime.configureTaskPumpInternal(true)
   host.session = session
+  host.sessionToken = session.runtime.committerOwner
   host.scopeBusy = scopeBusy
   if host.close.pending: session.requestClose()
+  host.armTaskTick()
   host.wake()
 proc setSafeTick*(host: Win32Host, tick: proc() {.closure.}) =
   host.liveCheck()
@@ -426,13 +504,24 @@ proc destroyHost*(host: Win32Host) =
   if host.close.complete: return
   host.close.requestClose()
   if host.session != nil: host.session.requestClose()
-  if host.busy(): fail("Win32 Host release is busy; retry after the full UI scope")
   host.retryDeferred = false
-  try: host.release()
+  try:
+    host.retireTasks()
+    host.disarmTaskTick()
+    if host.busy(): fail("Win32 Host release is busy; retry after the full UI scope")
+    host.release()
   except CatchableError as error:
     host.recordError()
     host.close.closeFailed()
+    host.cleanupFailure = error
     raise error
+
+proc resourcesReleasedInternal*(host: Win32Host): bool =
+  host.ownerCheck()
+  host.close.complete
+proc cleanupFailureInternal*(host: Win32Host): ref CatchableError =
+  host.ownerCheck()
+  host.cleanupFailure
 
 proc dispatch(host: Win32Host, message: var MSG) =
   inc host.dispatchDepth
