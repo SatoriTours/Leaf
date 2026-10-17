@@ -44,6 +44,7 @@
 | 已接受转换 | 回调 | 任务行为 |
 | --- | --- | --- |
 | 不存在 → active | onMount 一次；不额外调用 onActivate | 允许回调排队首批任务 |
+| 不存在 → retained/inactive | 无进入回调；之后恢复只交付 onActivate，不补 onMount | 保留 owner/State；启动权限按最终 retention 与活动态判断 |
 | active → retained/inactive | onDeactivate | 默认取消；显式保留的任务继续 |
 | retained/inactive → active | onActivate | 不自动重启旧任务；需要重载时在此回调发起 |
 | active/retained → disposed | onDispose 一次；不再追加 onDeactivate | 全部任务失效并请求取消 |
@@ -100,7 +101,9 @@ proc pumpTasks(runtime: Runtime): TaskPumpReport
 proc closeRuntime(runtime: Runtime)
 ```
 
-实施时补 Nim 导出标记；上述名称、参数和默认值作为设计合同。TaskScope 每个组件最多一个，同一初始化中重复申请拒绝。没有任务的组件无需创建 scope；生命周期注册也不自动创建线程。
+实施时补 Nim 导出标记；上述名称、参数和默认值作为设计合同。TaskScope 每个组件最多一个，同一初始化中重复显式申请拒绝。首次生命周期登记可建立一个默认隐式 scope；之后首次显式 taskScope 配置并取得同一 scope，不重复收费，且不受 hook 登记先后影响。没有任务或生命周期登记的组件无需创建 scope；生命周期注册也不自动创建线程。
+
+同一候选可能创建列表行后又将其保留为 inactive 暖行，临时候选宿主不等于已接受的 active 状态。因此存活 owner 的首次可见回调可能是 onActivate，业务不能假设每个 owner 都先收到 onMount。
 
 `startTask` 仅允许所属 Runtime 的普通 UI 事件、生命周期回调、完成回调，或显式 `runtime.uiTask/batch` 内调用；初始化、render、updater、host prepare/apply/publish 中禁止启动或取消任务。对 disposed scope 启动抛 UiError；cancel disposed/已结束 handle 为幂等空操作；跨 Runtime/线程的调用拒绝。空 key、nil work/nil onResult、非法UTF-8 key及超预算输入在登记前拒绝。inactive owner只有keepWhileRetained scope可启动任务，cancelOnDeactivate在停用期间启动会明确拒绝；销毁及过期进入回调都不能取得可写scope。
 

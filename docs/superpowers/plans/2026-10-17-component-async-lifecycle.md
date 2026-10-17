@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-17-component-async-lifecycle-design.md`（用户在原会话回复“继续”，确认规格后进入本计划阶段）。
 
-状态：实施计划待审阅，所有任务尚未执行。本计划中的命令、测试断言和预期结果都不是已取得的测试证据。
+状态：计划已获批准并执行中。Task1–2 已实现并独立验收；Task3–7 待执行。实际命令、退出码及审查证据见同日期验证记录和执行 ledger；以下预期断言本身不代表已取得的证据。
 
 ## Global Constraints
 
@@ -57,7 +57,7 @@
 
 **Interfaces:** `task_contracts`定义规格中的TaskRetention/TaskWork/WorkerContext/TaskFailure/TaskHandle/TaskScope/LifecycleContext/TaskPumpReport及回调类型；opaque scope通过内部TaskDomain基类关联服务，公共字段保持私有。worker提供`newTaskWorkerPool(workerCount=2):TaskWorkerPool`、`reserveWork(pool,id:uint64,input:string,work:TaskWork,maxResultBytes:int):WorkerTicket`、`submitReserved(pool,ticket):bool`、`peekCompletion(pool):Option[WorkerCompletion]`、`ackCompletion(pool,ticket)`、`requestCancel(ticket) {.raises:[].}`、`retirePool(pool) {.raises:[].}`、`joinPool(pool)`；WorkerCompletion含`id:uint64/value:string/failure:Option[TaskFailure]`，UI闭包不进入此类型。
 
-- [ ] **Step 1: 写线程所有权和容量RED测试。** fixture使用显式Channel/原子栅栏控制进入与释放，5秒超时只作为失败围栏，不以sleep猜测完成。写`independent payload survives UI mutation`、`queued cancel never invokes work`、`running cancel preserves ticket until acknowledgement`、`reserved result overflow reports resultTooLarge`、`captured closure cannot be TaskWork`；线程启动次数和执行次数由worker独立上报。
+- [x] **Step 1: 写线程所有权和容量RED测试。** fixture使用显式Channel/原子栅栏控制进入与释放，5秒超时只作为失败围栏，不以sleep猜测完成。写`independent payload survives UI mutation`、`queued cancel never invokes work`、`running cancel preserves ticket until acknowledgement`、`reserved result overflow reports resultTooLarge`、`captured closure cannot be TaskWork`；线程启动次数和执行次数由worker独立上报。
 
 ```nim
 check completion.value == "原始输入"
@@ -67,18 +67,18 @@ check runningTicketStillReserved
 check overflow.kind == TaskFailureKind.resultTooLarge
 ```
 
-- [ ] **Step 2: 验证RED。** `/tmp/nim-2.2.6/bin/nim c -r --threads:on --out:target/nim/test_task_worker tests/nim/test_task_worker.nim`因缺失模块/API失败；保存日志。负fixture在接口存在后应因closure/gcsafe类型不匹配编译失败，不能把任何其他编译错误算作通过。
-- [ ] **Step 3: 实现worker接口。** 验证Nim2.2.6/ORC通道的实际move/copy规则；共享控制块只含明确同步的取消和存活元数据，不共享GC ref。reserve先扣完整输入/结果额度，submit失败保持已接受pending请求；关闭不在worker仍使用内存时free。`--threads:off`保留旧组件导入/生命周期功能，实际启动后台任务明确报错，不偷偷在UI同步执行。
-- [ ] **Step 4: 验证GREEN。** 重跑Step2；分别测1条worker测试配置和默认2条worker，64个未收尾任务、1MiB边界、8MiB合计、最大结果和4KiB报错截断；重复500轮排队/取消/ack后框架计费回基线。取消的运行任务仍占额度、销毁后收尾不悬空，负fixture失败原因符合预期。
-- [ ] **Step 5: 提交。** `feat: add bounded component task workers`；仅stage本项文件，保存线程/载荷证据，不声称已接入Runtime。
+- [x] **Step 2: 验证RED。** `/tmp/nim-2.2.6/bin/nim c -r --threads:on --out:target/nim/test_task_worker tests/nim/test_task_worker.nim`因缺失模块/API失败；保存日志。负fixture在接口存在后应因closure/gcsafe类型不匹配编译失败，不能把任何其他编译错误算作通过。
+- [x] **Step 3: 实现worker接口。** 验证Nim2.2.6/ORC通道的实际move/copy规则；共享控制块只含明确同步的取消和存活元数据，不共享GC ref。reserve先扣完整输入/结果额度，submit失败保持已接受pending请求；关闭不在worker仍使用内存时free。`--threads:off`保留旧组件导入/生命周期功能，实际启动后台任务明确报错，不偷偷在UI同步执行。
+- [x] **Step 4: 验证GREEN。** 重跑Step2；分别测1条worker测试配置和默认2条worker，64个未收尾任务、1MiB边界、8MiB合计、最大结果和4KiB报错截断；重复500轮排队/取消/ack后框架计费回基线。取消的运行任务仍占额度、销毁后收尾不悬空，负fixture失败原因符合预期。
+- [x] **Step 5: 提交。** `feat: add bounded component task workers`；仅stage本项文件，保存线程/载荷证据，不声称已接入Runtime。
 
 ## Task 2：生命周期登记与已接受转换
 
 **Files:** 新`src/leaf/task_service.nim`、`component_lifecycle.nim`；修改`component_description.nim`、`managed_runtime.nim`、`core.nim`、`components.nim`；新`tests/nim/test_component_lifecycle.nim`，扩展`test_component_lists.nim`、`test_component_routing.nim`。
 
-**Interfaces:** `newTaskService(runtime:Runtime,states:StateStore):TaskService`；`newOwnerRegistration(service,owner:uint64):OwnerRegistration`、`sealOwnerRegistration(registration)`；`newMountContext(store,owner,registration=nil)`保持旧调用兼容。OwnerTransition含stamp、kind、depth及确定遍历序号。`prepareTasks(service,revision:uint64,transitions:seq[OwnerTransition],registrations:seq[OwnerRegistration]):TaskAttempt`、`publishTasks(service,attempt) {.raises:[].}`、`rejectTasks(service,attempt) {.raises:[].}`。公共onMount/onActivate/onDeactivate/onDispose及LifecycleContext.acceptedRevision按规格签名实现。core新增Driver默认方法`pumpDeferred(driver):TaskPumpReport`和公共`pumpTasks(runtime):TaskPumpReport`；ManagedDriver覆盖转交`pumpTaskService(service):TaskPumpReport`，本项先交付生命周期事件，Task4扩展完成消息。
+**Interfaces:** `newTaskService(runtime:Runtime,states:StateStore):TaskService`；`newOwnerRegistration(service,owner:uint64):OwnerRegistration`、`sealOwnerRegistration(registration)`；`newMountContext(store,owner,registration=nil)`保持旧调用兼容。OwnerTransition含stamp、kind、depth、最终active事实及确定遍历序号。`prepareTasks(service,revision:uint64,transitions:seq[OwnerTransition],registrations:seq[OwnerRegistration]):TaskAttempt`、`publishTasks(service,attempt) {.raises:[].}`、`rejectTasks(service,attempt) {.raises:[].}`。公共onMount/onActivate/onDeactivate/onDispose及LifecycleContext.acceptedRevision按规格签名实现。core新增Driver默认方法`pumpDeferred(driver):TaskPumpReport`和公共`pumpTasks(runtime):TaskPumpReport`；ManagedDriver覆盖转交`pumpTaskService(service):TaskPumpReport`，本项先交付生命周期事件，Task4扩展完成消息。
 
-- [ ] **Step 1: 写生命周期RED测试。** 初次mount、A→B→A、disposeOnLeave、router卸载和列表暖行淘汰；独立日志记录kind/owner/revision，不由实现返回的事件列表推导预期。保存旧MountContext，在另一个owner初始化时尝试登记；覆盖重复登记、候选失败、同候选创建后删除及回调确定顺序。
+- [x] **Step 1: 写生命周期RED测试。** 初次mount、A→B→A、disposeOnLeave、router卸载和列表暖行淘汰；独立日志记录kind/owner/revision，不由实现返回的事件列表推导预期。保存旧MountContext，在另一个owner初始化时尝试登记；覆盖重复登记、候选失败、同候选创建后删除及回调确定顺序。
 
 ```nim
 check events == @["mount:parent", "mount:child"]
@@ -89,16 +89,16 @@ check disposedState.set(1) == StateWriteResult.disposed
 expect UiError: savedClosedMount.onMount(callback)
 ```
 
-- [ ] **Step 2: 验证RED。** `nim c -r --threads:on --out:target/nim/test_component_lifecycle tests/nim/test_component_lifecycle.nim`（本计划后续`nim`均指Task1的已确认编译器）；断言因尚未提供生命周期API/行为失败。
-- [ ] **Step 3: 实现登记和转换。** 开放帧校验与owned bytes收费共用现有初始化合同；实例保留OwnerRegistration，accepted→candidate差异生成事件，仅受影响子树遍历。登记每hook及scope各计128字节owned bytes；待交付事件每条计128字节并与现有树共享16MiB运行时描述预算，且最多`4*MaxNodes=40000`条，超限候选明确拒绝。事件容量和退出回调引用在host apply前准备，publish不分配业务事件/调用用户代码；不依赖Table迭代。泵入场时要求inUpdate=false；随后回调在uiTask保护体执行，该体自身的inUpdate=true只防重入，不能误判为render/commit而拒绝合法任务API。TaskAttempt暂只承载owner/事件，Task3再加入任务意图。
-- [ ] **Step 4: 验证GREEN。** 重跑本项测试和`test_component_routing/test_component_lists/test_component_faults`，证明隐藏页/暖行不render、无候选回调泄漏、dispose后State失效；scope持续拒绝导致事件积压时预算仍有界，超限导航拒绝并保留旧页。测试通过普通Nim安全点驱动回调，不把publish方法伪装为安全点。
-- [ ] **Step 5: 提交。** `feat: publish component lifecycle transitions after acceptance`。
+- [x] **Step 2: 验证RED。** `nim c -r --threads:on --out:target/nim/test_component_lifecycle tests/nim/test_component_lifecycle.nim`（本计划后续`nim`均指Task1的已确认编译器）；断言因尚未提供生命周期API/行为失败。
+- [x] **Step 3: 实现登记和转换。** 开放帧校验与owned bytes收费共用现有初始化合同；实例保留OwnerRegistration，accepted→candidate差异生成事件，仅受影响子树遍历。登记每hook及scope各计128字节owned bytes；待交付事件每条计128字节并与现有树共享16MiB运行时描述预算，且最多`4*MaxNodes=40000`条，超限候选明确拒绝。事件容量和退出回调引用在host apply前准备，publish不分配业务事件/调用用户代码；不依赖Table迭代。泵入场时要求inUpdate=false；随后回调在uiTask保护体执行，该体自身的inUpdate=true只防重入，不能误判为render/commit而拒绝合法任务API。TaskAttempt暂只承载owner/事件，Task3再加入任务意图。
+- [x] **Step 4: 验证GREEN。** 重跑本项测试和`test_component_routing/test_component_lists/test_component_faults`，证明隐藏页/暖行不render、无候选回调泄漏、dispose后State失效；scope持续拒绝导致事件积压时预算仍有界，超限导航拒绝并保留旧页。测试通过普通Nim安全点驱动回调，不把publish方法伪装为安全点。
+- [x] **Step 5: 提交。** `feat: publish component lifecycle transitions after acceptance`。
 
 ## Task 3：任务意图、latest-wins与共同接受
 
 **Files:** 新`src/leaf/component_tasks.nim`；修改`task_service.nim`、`component_description.nim`、`managed_runtime.nim`、`core.nim`、`components.nim`；新`tests/nim/test_component_tasks.nim`、`test_component_task_faults.nim`。
 
-**Interfaces:** 公共`taskScope(ctx:MountContext,retention=cancelOnDeactivate):TaskScope`、`taskScope(ctx:LifecycleContext):TaskScope`、规格中的`startTask`和`cancel`；内部`hasTaskIntents(service):bool`、`requireTaskAccess(service,scope)`。requireTaskAccess结合执行Runtime身份、TaskService持有StateStore的requireIdle、owner/activity校验，不能只检查core.inUpdate。Task2的prepare/publish/reject接纳封存意图；`ManagedDriver.stage`对task-only工作返回元数据候选，不因State队列为空退出。
+**Interfaces:** 公共`taskScope(ctx:MountContext,retention=cancelOnDeactivate):TaskScope`、`taskScope(ctx:LifecycleContext):TaskScope`、规格中的`startTask`和`cancel`；内部`hasTaskIntents(service):bool`、`requireTaskAccess(service,scope)`。requireTaskAccess结合执行Runtime身份、TaskService持有StateStore的requireIdle、owner/activity校验，不能只检查core.inUpdate。Task2的prepare/publish/reject接纳封存意图；`ManagedDriver.stage`对task-only工作返回元数据候选，不因State队列为空退出。 本项先增加内部任务泵能力门禁（headless默认允许）及显式pool保活/退役/普通安全点最终回收接缝；Task5/6绑定真实宿主能力，Task4接公开closeRuntime。task-only保留已接受且未变的Snapshot缓存供validator使用，不重复export；真实树更新仍使缓存失效。
 
 - [ ] **Step 1: 写意图RED测试。** 在事件内同时更新State、导航和start/cancel；用真实HostConsumer.prepare/apply故障拒绝，worker执行日志独立核对。覆盖同key多次启动、启动后取消、接受后scope收尾报错、scope入场拒绝、owner在同候选移除和无State变化的task-only提交。保存失败初始化scope在新owner中复用，及跨Runtime/线程和render/updater启动，均须明确拒绝。
 

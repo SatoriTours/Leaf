@@ -1,6 +1,6 @@
 # 组件异步任务与生命周期验证记录
 
-状态：Task1 已实现、自测并经独立审查通过；Task2–7 尚未实现。不能据本记录声称整个异步功能已完成。
+状态：Task1–2 已实现并独立验收；Task3–7 尚未实现。不能据本记录声称整个异步功能已完成。
 
 ## 身份与执行空间
 
@@ -33,6 +33,29 @@ LEAF_GPUI_LIBRARY=/home/jimxl/.paseo/worktrees/1c1rvoii/component-async-lifecycl
 回归启动后Task1输入未变，四个主要源码/测试SHA与提交一致；额外threads_off fixture由最终独立命令验证。完整报告、RED/GREEN、审查diff及原始输出在本任务 `.superpowers/sdd/2026-10-17-component-async-lifecycle/`；`task-1-official-nim.log` 为官方结果，`task-1-report.md` 与 `task-1-review.md` 区分实现者声明和独立核查。普通worker和官方runner输出路径不同，默认Nimcache相同；普通编译未并发，ASan/threads-off缓存独立。
 
 worker采用UI预分配的原始byte envelope/结果槽、worker本地string显式复制、UI统一释放原始载荷。ORC Channel特征测试证明不能把sink/raw move误当成独立深拷贝。独立审查核对了worker归还slot/signal引用后release发布completed，以及UI acquire后才peek/ack/释放的顺序。取消运行任务在真实收尾前继续计费；最终pool析构会join，上层必须避免在publish、C detach或用户回调中释放最后pool引用。
+
+## Task2 实际检查
+
+实现范围为 `9eb91e0..38c704b` 九个文件；生命周期登记、已接受转换和普通安全点泵已接入，尚未实现任务启动/交付/关闭或宿主协商。随后 `28a246764b51d3ef8d5e5429e6b5de6f3e498dd6` 仅修复日志编码与新增集成回归两个文件。
+
+| 检查 | 源码身份与结果 |
+| --- | --- |
+| Task2 定向生命周期/routing/list/fault | `38c704b`：EXIT0，13/11/8/5项；另threads:off生命周期13项EXIT0 |
+| 官方Nim全量 | `38c704b`：session94784 EXIT0，93套件；9文件SHA与启动前manifest一致，平台SKIPPED保留 |
+| 初次独立审查 | Needs fixes，Critical0/Important1/Minor0；I1为4096字节切片切断UTF-8，两项接口裁定通过 |
+| I1真实RED | 新3项实际callback/scope stderr回归失败，EXIT1；原13项通过 |
+| I1最终GREEN | `28a2467`：lifecycle threads:on/off各16项EXIT0，覆盖3条异常路径×5种中文/emoji/畸形编码场景 |
+| I1局部复审 | I1 resolved，Spec compliant，Quality Approved，Critical0/Important0/Minor0 |
+
+I1将错误消息规范化为合法Unicode标量，并在完整UTF-8字符边界截断至最多4096字节，保留owner/revision/phase。93套全量是在此局部修复前取得，不能表述为`28a2467`全量通过；最终功能全量仍须在Task7执行。此补丁只重跑必要生命周期验证，未重复未受影响的routing/list/fault或官方全量。
+
+完整证据位于执行scratch的 `task-2-report.md`、`task-2-review.md`、`task-2-review-fix-1.md`、`task-2-official-nim.log`、`task-2-official-inputs.json` 和各RED/GREEN日志；源码冻结与原始记录保留。
+
+## Task2 接口裁定
+
+- 首次登记生命周期hook创建一个隐式默认scope，scope与hook各计128字节；后续首次显式`MountContext.taskScope`可配置并返回同一scope，不重复收费。重复显式申请仍拒绝。Task2验证隐式费用，Task3须验证显式申请与hook登记顺序等价、重复申请拒绝及最终retention配置。
+- 同一候选可能先materialize一行，再保留为inactive暖行。新owner按最终已接受的active事实登记；不存在→inactive不投递onMount/onActivate，之后inactive→active只投递onActivate，不补发onMount。候选内临时出现不构成已接受的active转换。Task2须补真实双materialize回归，Task7须在公共API文档说明首个可见回调可能是onActivate。
+- 上述规则的使用约束：业务不能假设所有保留owner必先收到onMount；首次可见时需要运行的副作用应同时考虑onActivate。最终源码、测试数量及独立审查结论另行记录。
 
 ## 环境基线与实际限制
 
