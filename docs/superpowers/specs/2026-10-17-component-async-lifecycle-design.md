@@ -161,6 +161,8 @@ Win32安全tick调用相同pumpTasks，新增独立任务唤醒/计时来源，�
 
 closeRuntime在UI线程关闭接收门，失效所有owner/任务代，设置取消标记并清空待交付业务闭包；调用一次onDispose清理后幂等。销毁回调处于关闭态，不能发起任务。宿主session换绑/卸载不自动等同Runtime销毁；只有应用最终退出或显式closeRuntime关闭它。
 
+公共closeRuntime在合法UI业务回调内调用时采用两阶段关闭：立即关门、取消并使所有已接受State失效后返回，不在该回调内执行清理或join；该业务体先前排队的State/导航/任务不再接受。随后普通closeRuntime或宿主finally执行尚未claim的清理并最终回收pool。render、updater、prepare/apply、host安装阶段及跨Runtime/线程调用明确拒绝。onDispose内递归close幂等返回，不递归清理或join；scope入场拒绝留下尚未执行的清理，之后普通close只重试未claim部分。
+
 C detach只标记最终投递门关闭和取消，返回后的普通Nimfinally完成生命周期清理。窗口关闭不在UI回调、WndProc、renderer detach内join工作线程。工作函数须设置自己的超时；最终任务服务回收等待worker结束，框架不承诺任意阻塞work立即退出。保存尚在运行的共享控制块直到安全结束，禁止强制释放或遗留可调用的UI闭包。桌面run的最终退出可能等待不合作work；文档和测试必须区分窗口关闭响应与进程退出耗时。
 
 ## 9. 文件范围与依赖顺序

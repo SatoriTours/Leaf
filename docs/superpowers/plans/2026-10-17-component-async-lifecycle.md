@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-17-component-async-lifecycle-design.md`（用户在原会话回复“继续”，确认规格后进入本计划阶段）。
 
-状态：计划已获批准并执行中。Task1–2 已实现并独立验收；Task3–7 待执行。实际命令、退出码及审查证据见同日期验证记录和执行 ledger；以下预期断言本身不代表已取得的证据。
+状态：计划已获批准并执行中。Task1–3 已实现并独立验收；Task4–7 待执行。实际命令、退出码及审查证据见同日期验证记录和执行 ledger；以下预期断言本身不代表已取得的证据。
 
 ## Global Constraints
 
@@ -100,7 +100,7 @@ expect UiError: savedClosedMount.onMount(callback)
 
 **Interfaces:** 公共`taskScope(ctx:MountContext,retention=cancelOnDeactivate):TaskScope`、`taskScope(ctx:LifecycleContext):TaskScope`、规格中的`startTask`和`cancel`；内部`hasTaskIntents(service):bool`、`requireTaskAccess(service,scope)`。requireTaskAccess结合执行Runtime身份、TaskService持有StateStore的requireIdle、owner/activity校验，不能只检查core.inUpdate。Task2的prepare/publish/reject接纳封存意图；`ManagedDriver.stage`对task-only工作返回元数据候选，不因State队列为空退出。 本项先增加内部任务泵能力门禁（headless默认允许）及显式pool保活/退役/普通安全点最终回收接缝；Task5/6绑定真实宿主能力，Task4接公开closeRuntime。task-only保留已接受且未变的Snapshot缓存供validator使用，不重复export；真实树更新仍使缓存失效。
 
-- [ ] **Step 1: 写意图RED测试。** 在事件内同时更新State、导航和start/cancel；用真实HostConsumer.prepare/apply故障拒绝，worker执行日志独立核对。覆盖同key多次启动、启动后取消、接受后scope收尾报错、scope入场拒绝、owner在同候选移除和无State变化的task-only提交。保存失败初始化scope在新owner中复用，及跨Runtime/线程和render/updater启动，均须明确拒绝。
+- [x] **Step 1: 写意图RED测试。** 在事件内同时更新State、导航和start/cancel；用真实HostConsumer.prepare/apply故障拒绝，worker执行日志独立核对。覆盖同key多次启动、启动后取消、接受后scope收尾报错、scope入场拒绝、owner在同候选移除和无State变化的task-only提交。保存失败初始化scope在新owner中复用，及跨Runtime/线程和render/updater启动，均须明确拒绝。
 
 ```nim
 check rejectedWorkerStarts == 0
@@ -112,16 +112,16 @@ check taskOnlyStats.snapshotExports == previousStats.snapshotExports
 check acceptedFinalKeyWorkCalls == 1
 ```
 
-- [ ] **Step 2: 验证RED。** `nim c -r --threads:on --out:target/nim/test_component_task_faults tests/nim/test_component_task_faults.nim`；先证实缺失意图或无法共同回滚的断言失败。
-- [ ] **Step 3: 实现意图覆盖层。** 单调id与owner/key请求代分开；候选准备检查64任务/input/result预算、挂载支持能力及启动前worker就绪，接受时才使被替换任务失效。取消仍运行的任务不释放其预留额度；work只由后续安全点submit。task-only保留validator/preparer/host gate且只加一次revision，不改变State无变化本身的旧行为。
-- [ ] **Step 4: 验证GREEN。** 运行本项两套件、Task1/2及已有组件fault/state/performance回归；将build/snapshot/预算/validator/prepare/apply/scope入场/收尾逐项执行并记录。输入恰好1MiB成功，超一字节拒绝；key256字节UTF-8成功，257及非法UTF-8拒绝；maxResultBytes不在1..1048576拒绝。
-- [ ] **Step 5: 提交。** `feat: commit component task intents with state and routing`。
+- [x] **Step 2: 验证RED。** `nim c -r --threads:on --out:target/nim/test_component_task_faults tests/nim/test_component_task_faults.nim`；先证实缺失意图或无法共同回滚的断言失败。
+- [x] **Step 3: 实现意图覆盖层。** 单调id与owner/key请求代分开；候选准备检查64任务/input/result预算、挂载支持能力及启动前worker就绪，接受时才使被替换任务失效。取消仍运行的任务不释放其预留额度；work只由后续安全点submit。task-only保留validator/preparer/host gate且只加一次revision，不改变State无变化本身的旧行为。
+- [x] **Step 4: 验证GREEN。** 运行本项两套件、Task1/2及已有组件fault/state/performance回归；将build/snapshot/预算/validator/prepare/apply/scope入场/收尾逐项执行并记录。输入恰好1MiB成功，超一字节拒绝；key256字节UTF-8成功，257及非法UTF-8拒绝；maxResultBytes不在1..1048576拒绝。 独立Snapshot导出可恢复异常目前没有受支持且已prepare候选的可控入口，不新增测试专用生产故障钩子；该注入记NotRun并说明原因，真实导出计数/缓存和validator拒绝单独记录，不能冒充导出异常。
+- [x] **Step 5: 提交。** `feat: commit component task intents with state and routing`。
 
 ## Task 4：结果交付、保留策略与Runtime关闭
 
 **Files:** 修改`task_service.nim`、`task_worker.nim`、`core.nim`、`managed_runtime.nim`、`component_tasks.nim`；新`tests/nim/test_component_task_delivery.nim`、`test_component_task_retention.nim`、`test_component_task_shutdown.nim`。
 
-**Interfaces:** 复用Task2的pumpDeferred/pumpTasks/pumpTaskService；core新增Driver默认方法`retireDeferred(driver) {.raises:[].}`、`closeDeferred(driver)`及公共`closeRuntime(runtime)`；ManagedDriver覆盖并转交TaskService。内部`retireTaskService(service) {.raises:[].}`、`closeTaskService(service)`；core增加内部`runRuntimeCleanup(runtime,body:proc() {.closure.})`，在关闭态也能进入executionScope，但不触发State提交或开放任务启动。调用路径保留core→contracts的单向依赖。TaskPumpReport字段按规格；退休只关门/原子取消，最终关闭才执行用户清理/join。
+**Interfaces:** 复用Task2的pumpDeferred/pumpTasks/pumpTaskService；core新增Driver默认方法`retireDeferred(driver) {.raises:[].}`、`closeDeferred(driver)`及公共`closeRuntime(runtime)`；ManagedDriver覆盖并转交TaskService。内部`retireTaskService(service) {.raises:[].}`、`closeTaskService(service)`；core增加内部`runRuntimeCleanup(runtime,body:proc() {.closure.})`，在关闭态也能进入executionScope，但不触发State提交或开放任务启动。调用路径保留core→contracts的单向依赖。TaskPumpReport字段按规格；退休只关门/原子取消，最终关闭才执行用户清理/join。 合法UI业务体内公共closeRuntime立即关门、使State失效且不接受此前排队意图，返回后由普通close/finally执行未claim清理并在scope退出、执行身份为0时最终回收；受保护阶段拒绝，onDispose递归close幂等返回。
 
 - [ ] **Step 1: 写交付/退出RED测试。** 两个可控worker令旧请求后完成；A离开返回分别测默认取消与keepWhileRetained；换key/类型、router卸载、行复用、旧Runtime重开；完成已到达但scope拒绝入场后再允许；onResult/onDispose报错、pump重入、host临时换绑与最终关闭、取消不合作work和挂载清理顺序。最终close时scope拒绝入场必须立即关门/使State失效，但保存未执行的清理；下次显式close在scope可用时只执行尚未claim的清理一次。
 
