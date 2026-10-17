@@ -1,7 +1,7 @@
 ## Typed, synchronous ABI 2 owner. All returned buffers are copied by Rust
 ## before the next request; no exception crosses the C calling convention.
 import std/[options, unicode, os, math, tables, json]
-import ./[core, backend, host_session, gpui_api, gpui_ffi_v2, watch_ipc,managed_runtime,task_contracts]
+import ./[core, backend, host_session, gpui_api, gpui_ffi_v2, watch_ipc,managed_runtime,task_contracts,gpui_bridge]
 type
   GpuiSession* = ref object
     runtime*:Runtime
@@ -15,6 +15,9 @@ type
     lastError,viewportError,externalError:string
     renderingRecorded:bool
     lastRendering:tuple[scale,width,height:float64]
+    cleanupAttempted*,cleanupIncomplete*:bool
+    cleanupError*:ref Exception
+    runExitStatus*:Option[int]
     readyCalls*:int
     onFrame*:proc(sample:LeafFrameSample):bool {.closure.}
     preparerToken:uint64
@@ -240,12 +243,9 @@ proc openGpuiSession*(runtime:Runtime,api:GpuiApi):GpuiSession=
   let capable=runtime.managed and api.supportsTaskPump()
   try:runtime.configureTaskPumpInternal(capable)
   except UiError as error:
-    let message=error.msg & "; rebuild the GPUI bridge with task pump support"
-    try:runtime.closeRuntime()
-    except Exception as cleanup:
-      try:runtime.diagnostic("gpui","error",%*{"message":"startup cleanup: " & cleanup.msg})
-      except Exception:discard
-    fail(message)
+    let primary=newException(UiError,error.msg & "; rebuild the GPUI bridge with task pump support")
+    primary.parent=error
+    raise runtime.closeGpuiFailureInternal(primary)
   inc nextSession
   GpuiSession(runtime:runtime,api:api,id:nextSession,taskCapable:capable)
 proc run*(session:GpuiSession):int=
@@ -260,15 +260,17 @@ proc run*(session:GpuiSession):int=
   var callbacks=LeafHostCallbacks(struct_size:uint32(sizeof(LeafHostCallbacks)),attach:attach,request:request,detach:detach)
   var bytes:array[2048,uint8]
   var error=LeafError(`ptr`:addr bytes[0],capacity:uint64(bytes.len))
-  try:result=int(session.api.v2.get.run(addr config,addr callbacks,cast[pointer](session),addr error))
+  try:
+    result=int(session.api.v2.get.run(addr config,addr callbacks,cast[pointer](session),addr error))
+    session.runExitStatus=some(result)
   finally:
     session.releaseSession(false)
-    if result!=0 and not session.installed:
-      # Installation failed. Cleanup is outside the protected C attach.
-      try:session.runtime.closeRuntime()
-      except Exception as cleanup:
-        try:session.runtime.diagnostic("gpui","error",%*{"message":"startup cleanup: " & cleanup.msg})
-        except Exception:discard
+    if session.runExitStatus.isSome and result!=0 and not session.installed:
+      # Direct session callers retain session.runtime for an ordinary retry.
+      session.cleanupAttempted=true
+      session.cleanupError=session.runtime.tryCloseGpuiRuntimeInternal()
+      session.cleanupIncomplete=session.cleanupError!=nil
+
 proc close*(session:GpuiSession)=
   if session.running:fail("cannot close a running GPUI session outside detach")
   session.releaseSession(false)

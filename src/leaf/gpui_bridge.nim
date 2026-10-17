@@ -1,7 +1,11 @@
 ## Nim owns application state and the response buffer. GPUI calls on the UI thread.
-import std/[json,os,tables,math,strutils]
+import std/[json,os,tables,math,strutils,options]
 import ./[core,diagnostics,watch_ipc,gpui_styles,managed_runtime,task_contracts]
 type
+  GpuiRunError* = object of UiError
+    ## Keep this owner until ordinary close succeeds, then release references.
+    cleanupRuntime*:Runtime
+    exitStatus*:Option[int]
   ActiveRow = tuple[key:string,index:int]
   Viewports = ref object
     rows: Table[string,seq[ActiveRow]]
@@ -13,6 +17,26 @@ type
     externalError: string
     viewports: Viewports
     taskCapable,tasksReady:bool
+
+proc gpuiRunErrorInternal*(primary:ref Exception,runtime:Runtime,status=none(int)):ref GpuiRunError=
+  if primary of GpuiRunError:return cast[ref GpuiRunError](primary)
+  result=newException(GpuiRunError,primary.msg)
+  result.parent=primary
+  result.cleanupRuntime=runtime
+  result.exitStatus=status
+
+proc tryCloseGpuiRuntimeInternal*(runtime:Runtime):ref Exception=
+  ## One attempt, after protected host work has unwound. No automatic retries.
+  try:runtime.closeRuntime()
+  except Exception as cleanup:
+    result=cleanup
+    try:runtime.diagnostic("gpui","error",%*{"message":"GPUI cleanup: " & cleanup.msg})
+    except Exception:discard
+
+proc closeGpuiFailureInternal*(runtime:Runtime,primary:ref Exception):ref GpuiRunError=
+  if primary of GpuiRunError:return cast[ref GpuiRunError](primary)
+  let cleanup=runtime.tryCloseGpuiRuntimeInternal()
+  gpuiRunErrorInternal(primary,if cleanup==nil:nil else:runtime)
 
 proc rejectNativeResetSignals*(root: MountedNode) =
   ## The legacy GPUI bridge has no native reset signal. Reject the new explicit
@@ -54,14 +78,9 @@ proc newDesktopBridge*(app:Application,diagnostics:Diagnostics=nil,taskPumpSuppo
           discard candidate.materialize(mounted.id,0,0,active)
         for child in mounted.children:visit(child)
       visit(candidate.snapshot.root))
-  except Exception:
-    # newRuntime has accepted its initial owners. Installation has unwound;
-    # ordinary close invalidates State and runs only final disposal callbacks.
-    try:result.runtime.closeRuntime()
-    except Exception as cleanup:
-      try:result.runtime.diagnostic("gpui","error",%*{"message":"startup cleanup: " & cleanup.msg})
-      except Exception:discard
-    raise
+  except Exception as primary:
+    # The exception owns any cleanup refused after initial acceptance.
+    raise result.runtime.closeGpuiFailureInternal(primary)
 
 proc recordRendering(host:DesktopBridge, value:JsonNode):bool =
   # Copy only numeric diagnostics; never forward arbitrary payload/editor data.

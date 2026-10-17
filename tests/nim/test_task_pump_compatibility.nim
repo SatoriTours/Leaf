@@ -1,6 +1,6 @@
 {.define:leafProtocolProbes.}
-import std/[unittest,json,os,options,atomics,strutils]
-import leaf/[core,components,widgets,managed_runtime,gpui_bridge,gpui_api,gpui_ffi_v2,gpui_session,host_session,backend]
+import std/[unittest,json,os,options,atomics,strutils,osproc]
+import leaf/[core,components,widgets,managed_runtime,gpui_bridge,gpui_api,gpui_ffi_v2,gpui_session,host_session,backend,desktop]
 var workCalls:Atomic[int]
 proc work(input:string,ctx:WorkerContext):string {.nimcall,gcsafe.}=
   discard workCalls.fetchAdd(1);"ready"
@@ -427,3 +427,286 @@ suite "loaded new library negotiation":
           let denied=bridge.request(%*{"op":"tasks"})
           check denied.hasKey("error")
         finally:bridge.runtime.closeRuntime()
+
+suite "round1 public startup boundary":
+  test "I2 public desktop preserves old library rejection and transfers one cleanup attempt":
+    let previousLibrary=getEnv("LEAF_GPUI_LIBRARY")
+    let previousAbi=getEnv("LEAF_GPUI_ABI")
+    defer:
+      if previousLibrary.len==0:delEnv("LEAF_GPUI_LIBRARY")
+      else:putEnv("LEAF_GPUI_LIBRARY",previousLibrary)
+      if previousAbi.len==0:delEnv("LEAF_GPUI_ABI")
+      else:putEnv("LEAF_GPUI_ABI",previousAbi)
+    putEnv("LEAF_GPUI_LIBRARY","/home/jimxl/projects/leaf/target/debug/libleaf_gpui.so")
+    for abi in ["1","2"]:
+      putEnv("LEAF_GPUI_ABI",abi)
+      for withOut in [false,true]:
+        var entries,disposed,entered:int
+        var refuse=true
+        var owned:State[int]
+        workCalls.store(0)
+        let execution:ExecutionScope=proc(body:proc())=
+          inc entries
+          if entries>1 and refuse:fail("round1 cleanup refused")
+          body()
+        let Root=defineComponent[int,State[int]]("PublicOldLibraryStartup",
+          proc(ctx:MountContext,p:int):State[int]=
+            result=ctx.state(0);owned=result
+            let scope=ctx.taskScope()
+            ctx.onMount(proc(event:LifecycleContext)=
+              inc entered
+              discard startTask(scope,"must-not-start","",work,proc(value:string)=discard))
+            ctx.onDispose(proc(event:LifecycleContext)=inc disposed),
+          proc(ctx:ComponentContext,p:int,s:State[int]):UiDescription=host(text($ctx.value(s))))
+        var caught=""
+        var cleanup:Runtime
+        let app=componentApplication(component(Root,0),"public old",executionScope=execution)
+        try:
+          discard (if withOut:runDesktop(app,cleanupOwner=addr cleanup) else:runDesktop(app))
+        except GpuiRunError as failure:
+          caught=failure.msg
+          check failure.exitStatus.isNone
+          check failure.parent!=nil and not (failure.parent of GpuiRunError)
+          check failure.parent.msg==caught
+          if withOut:check cleanup==failure.cleanupRuntime
+          else:cleanup=failure.cleanupRuntime
+        check "host does not support task pumping" in caught and "rebuild" in caught
+        check entries==2 and disposed==0 and entered==0
+        check workCalls.load()==0
+        check owned.set(1)==StateWriteResult.disposed
+        check cleanup!=nil
+        if cleanup!=nil:
+          refuse=false
+          cleanup.closeRuntime();cleanup.closeRuntime()
+          check disposed==1 and entered==0
+          check workCalls.load()==0
+          check owned.set(2)==StateWriteResult.disposed
+
+  test "I3 failed ABI1 constructor transfers a reachable cleanup Runtime for ordinary retry":
+    var entries,disposed,entered:int
+    var refuse=true
+    var owned:State[int]
+    let execution:ExecutionScope=proc(body:proc())=
+      inc entries
+      if entries>1 and refuse:fail("round1 cleanup refused")
+      body()
+    let Root=defineComponent[int,State[int]]("PublicConstructorRetryOwner",
+      proc(ctx:MountContext,p:int):State[int]=
+        result=ctx.state(0);owned=result
+        ctx.onMount(proc(event:LifecycleContext)=inc entered)
+        ctx.onDispose(proc(event:LifecycleContext)=inc disposed),
+      proc(ctx:ComponentContext,p:int,s:State[int]):UiDescription=host(text($ctx.value(s))))
+    var caught=""
+    var cleanup:Runtime
+    try:discard newDesktopBridge(componentApplication(component(Root,0),"public constructor",executionScope=execution))
+    except UiError as error:
+      caught=error.msg
+      check error of GpuiRunError
+      if error of GpuiRunError:cleanup=cast[ref GpuiRunError](error).cleanupRuntime
+    check "rebuild" in caught
+    check entries==2 and disposed==0 and entered==0
+    check owned.set(1)==StateWriteResult.disposed
+    check cleanup!=nil
+    if cleanup!=nil:
+      refuse=false
+      cleanup.closeRuntime()
+      cleanup.closeRuntime()
+      check disposed==1
+      check owned.set(2)==StateWriteResult.disposed
+
+var fix1BuiltStartupLibrary=""
+proc fix1StartupLibrary():string=
+  if fix1BuiltStartupLibrary.len>0:return fix1BuiltStartupLibrary
+  createDir("target/ffi-v2")
+  let path=absolutePath("target/ffi-v2/fix1-startup.c")
+  let fixture=readFile("tests/ffi/gpui_v2_library.c")
+    .replace("../../include/leaf_gpui_v2.h",FrameworkRoot / "include/leaf_gpui_v2.h")
+    .replace("LeafGpuiApiV2 api={sizeof(api),2,0,run};","LeafGpuiApiV2 api={sizeof(api),2,LEAF_CAP_TASK_PUMP,run};") &
+    "\nuint32_t leaf_gpui_task_pump_version(void) { return 1; }\n"
+  writeFile(path,fixture)
+  result=absolutePath("target/ffi-v2/fix1-startup.so")
+  let code=execCmd("gcc -shared -fPIC " & quoteShell(path) & " -o " & quoteShell(result))
+  check code==0
+  fix1BuiltStartupLibrary=result
+
+suite "round1 status and retry ownership":
+  test "I2 public typed installation status is preserved with out or exception ownership":
+    let previousLibrary=getEnv("LEAF_GPUI_LIBRARY");let previousAbi=getEnv("LEAF_GPUI_ABI")
+    defer:
+      if previousLibrary.len==0:delEnv("LEAF_GPUI_LIBRARY")
+      else:putEnv("LEAF_GPUI_LIBRARY",previousLibrary)
+      if previousAbi.len==0:delEnv("LEAF_GPUI_ABI")
+      else:putEnv("LEAF_GPUI_ABI",previousAbi)
+    putEnv("LEAF_GPUI_LIBRARY",fix1StartupLibrary());putEnv("LEAF_GPUI_ABI","2")
+    for withOut in [false,true]:
+      var entries,disposed,entered:int
+      var refuse=true
+      var owned:State[int]
+      let execution:ExecutionScope=proc(body:proc())=
+        inc entries
+        if entries==2:fail("round1 installation rejected")
+        if entries>2 and refuse:fail("round1 cleanup refused")
+        body()
+      let Root=defineComponent[int,State[int]]("PublicInstallStatusOwner",
+        proc(ctx:MountContext,p:int):State[int]=
+          result=ctx.state(0);owned=result
+          ctx.onMount(proc(event:LifecycleContext)=inc entered)
+          ctx.onDispose(proc(event:LifecycleContext)=inc disposed),
+        proc(ctx:ComponentContext,p:int,s:State[int]):UiDescription=host(text($ctx.value(s))))
+      let app=componentApplication(component(Root,0),"public status",executionScope=execution)
+      var cleanup:Runtime
+      var status= -1
+      var raised=false
+      try:
+        status=if withOut:runDesktop(app,cleanupOwner=addr cleanup) else:runDesktop(app)
+      except UiError as error:
+        raised=true
+        if error of GpuiRunError:
+          let failure=cast[ref GpuiRunError](error)
+          check failure.exitStatus==some(5)
+          cleanup=failure.cleanupRuntime
+          check failure.parent!=nil
+      check raised==not withOut
+      if withOut:check status==5
+      check entries==3 and disposed==0 and entered==0
+      check owned.set(1)==StateWriteResult.disposed
+      check cleanup!=nil
+      if cleanup!=nil:
+        refuse=false
+        cleanup.closeRuntime();cleanup.closeRuntime()
+        check disposed==1
+        check owned.set(2)==StateWriteResult.disposed
+
+  test "I3 direct ABI1 installation rejection transfers owner after one refused cleanup":
+    var entries,disposed,entered:int
+    var refuse=true
+    var owned:State[int]
+    let execution:ExecutionScope=proc(body:proc())=
+      inc entries
+      if entries==2:fail("round1 ABI1 installation rejected")
+      if entries>2 and refuse:fail("round1 cleanup refused")
+      body()
+    let Root=defineComponent[int,State[int]]("PublicAbi1InstallOwner",
+      proc(ctx:MountContext,p:int):State[int]=
+        result=ctx.state(0);owned=result
+        ctx.onMount(proc(event:LifecycleContext)=inc entered)
+        ctx.onDispose(proc(event:LifecycleContext)=inc disposed),
+      proc(ctx:ComponentContext,p:int,s:State[int]):UiDescription=host(text($ctx.value(s))))
+    var cleanup:Runtime
+    var caught=""
+    try:discard newDesktopBridge(componentApplication(component(Root,0),"ABI1 install",executionScope=execution),taskPumpSupported=true)
+    except UiError as error:
+      caught=error.msg
+      if error of GpuiRunError:
+        let failure=cast[ref GpuiRunError](error)
+        cleanup=failure.cleanupRuntime
+        check failure.exitStatus.isNone
+        check failure.parent!=nil and failure.parent.msg==caught
+    check caught=="round1 ABI1 installation rejected"
+    check entries==3 and disposed==0 and entered==0
+    check owned.set(1)==StateWriteResult.disposed
+    check cleanup!=nil
+    if cleanup!=nil:
+      refuse=false
+      cleanup.closeRuntime();cleanup.closeRuntime()
+      check disposed==1
+
+  test "public successful desktop status zero transfers refused final cleanup for either ABI":
+    let previousLibrary=getEnv("LEAF_GPUI_LIBRARY");let previousAbi=getEnv("LEAF_GPUI_ABI")
+    defer:
+      if previousLibrary.len==0:delEnv("LEAF_GPUI_LIBRARY")
+      else:putEnv("LEAF_GPUI_LIBRARY",previousLibrary)
+      if previousAbi.len==0:delEnv("LEAF_GPUI_ABI")
+      else:putEnv("LEAF_GPUI_ABI",previousAbi)
+    putEnv("LEAF_GPUI_LIBRARY",fix1StartupLibrary())
+    for abi in ["1","2"]:
+      putEnv("LEAF_GPUI_ABI",abi)
+      for withOut in [false,true]:
+        var entries,disposed,entered:int
+        var refuse=true
+        var owned:State[int]
+        let execution:ExecutionScope=proc(body:proc())=
+          inc entries
+          if entries>2 and refuse:fail("round1 final cleanup refused")
+          body()
+        let Root=defineComponent[int,State[int]]("PublicZeroStatusOwner",
+          proc(ctx:MountContext,p:int):State[int]=
+            result=ctx.state(0);owned=result
+            ctx.onMount(proc(event:LifecycleContext)=inc entered)
+            ctx.onDispose(proc(event:LifecycleContext)=inc disposed),
+          proc(ctx:ComponentContext,p:int,s:State[int]):UiDescription=host(text($ctx.value(s))))
+        let app=componentApplication(component(Root,0),"public zero",executionScope=execution)
+        var cleanup:Runtime
+        var status= -1
+        var raised=false
+        try:
+          status=if withOut:runDesktop(app,cleanupOwner=addr cleanup) else:runDesktop(app)
+        except UiError as error:
+          raised=true
+          if error of GpuiRunError:
+            let failure=cast[ref GpuiRunError](error)
+            cleanup=failure.cleanupRuntime
+            check failure.exitStatus==some(0)
+            check failure.parent!=nil
+        check raised==not withOut
+        if withOut:check status==0
+        check entries==3 and disposed==0 and entered==0
+        check owned.set(1)==StateWriteResult.disposed
+        check cleanup!=nil
+        if cleanup!=nil:
+          refuse=false
+          cleanup.closeRuntime();cleanup.closeRuntime()
+          check disposed==1
+
+  test "nonempty cleanup output is rejected before new owner initialization":
+    let previousLibrary=getEnv("LEAF_GPUI_LIBRARY");let previousAbi=getEnv("LEAF_GPUI_ABI")
+    defer:
+      if previousLibrary.len==0:delEnv("LEAF_GPUI_LIBRARY")
+      else:putEnv("LEAF_GPUI_LIBRARY",previousLibrary)
+      if previousAbi.len==0:delEnv("LEAF_GPUI_ABI")
+      else:putEnv("LEAF_GPUI_ABI",previousAbi)
+    putEnv("LEAF_GPUI_LIBRARY",fix1StartupLibrary());putEnv("LEAF_GPUI_ABI","1")
+    var initialized=0
+    var oldState:State[int]
+    let Old=defineComponent[int,State[int]]("OldCleanupSlotOwner",
+      proc(ctx:MountContext,p:int):State[int]=result=ctx.state(7);oldState=result,
+      proc(ctx:ComponentContext,p:int,s:State[int]):UiDescription=host(text($ctx.value(s))))
+    let original=newRuntime(componentApplication(component(Old,0),"old owner"))
+    var cleanup=original
+    let New=defineComponent[int,int]("MustNotInitializeOwner",
+      proc(ctx:MountContext,p:int):int=inc initialized;p,
+      proc(ctx:ComponentContext,p,m:int):UiDescription=host(text("new")))
+    let app=componentApplication(component(New,0),"new owner")
+    try:
+      expect UiError:discard runDesktop(app,cleanupOwner=addr cleanup)
+      check initialized==0
+      check cleanup==original
+      check oldState.read()==7
+    finally:original.closeRuntime()
+  test "completed public cleanup keeps integer return and leaves output empty":
+    let previousLibrary=getEnv("LEAF_GPUI_LIBRARY");let previousAbi=getEnv("LEAF_GPUI_ABI")
+    defer:
+      if previousLibrary.len==0:delEnv("LEAF_GPUI_LIBRARY")
+      else:putEnv("LEAF_GPUI_LIBRARY",previousLibrary)
+      if previousAbi.len==0:delEnv("LEAF_GPUI_ABI")
+      else:putEnv("LEAF_GPUI_ABI",previousAbi)
+    putEnv("LEAF_GPUI_LIBRARY",fix1StartupLibrary())
+    for (abi,status) in [("1",0),("2",0),("2",5)]:
+      putEnv("LEAF_GPUI_ABI",abi)
+      var entries,disposed,entered:int
+      var owned:State[int]
+      let execution:ExecutionScope=proc(body:proc())=
+        inc entries
+        if status==5 and entries==2:fail("round1 installation rejected")
+        body()
+      let Root=defineComponent[int,State[int]]("CompletedPublicCleanup",
+        proc(ctx:MountContext,p:int):State[int]=
+          result=ctx.state(0);owned=result
+          ctx.onMount(proc(event:LifecycleContext)=inc entered)
+          ctx.onDispose(proc(event:LifecycleContext)=inc disposed),
+        proc(ctx:ComponentContext,p:int,s:State[int]):UiDescription=host(text($ctx.value(s))))
+      var cleanup:Runtime
+      check runDesktop(componentApplication(component(Root,0),"completed cleanup",executionScope=execution),cleanupOwner=addr cleanup)==status
+      check cleanup==nil
+      check entries==3 and disposed==1 and entered==0
+      check owned.set(1)==StateWriteResult.disposed
