@@ -369,3 +369,56 @@ suite "cleanup claim exact boundary":
     finally:
       holdWork.store(false)
       first.close();runtime.closeRuntime()
+
+suite "review I2 close during lifecycle scope entry":
+  test "scope entry busy close transfers mount and exit without reclaiming their old queue":
+    for selectedPhase in ["mount","exit"]:
+      var rt:Runtime
+      var count:State[int]
+      var armed=false
+      var mounts,parentCleanup,childCleanup=0
+      let Child=defineComponent[int,State[int]]("EntryCloseChild",
+        proc(ctx:MountContext,p:int):State[int]=
+          result=ctx.state(p)
+          ctx.onDispose(proc(event:LifecycleContext)=inc childCleanup),
+        proc(ctx:ComponentContext,p:int,s:State[int]):UiDescription=host(text($ctx.value(s))))
+      let Root=defineComponent[int,State[int]]("EntryCloseRoot",
+        proc(ctx:MountContext,p:int):State[int]=
+          result=ctx.state(2);count=result
+          if selectedPhase=="mount":ctx.onMount(proc(event:LifecycleContext)=inc mounts)
+          ctx.onDispose(proc(event:LifecycleContext)=
+            check count.set(3)==StateWriteResult.disposed
+            inc parentCleanup),
+        proc(ctx:ComponentContext,p:int,s:State[int]):UiDescription=
+          var children:seq[UiDescription]
+          for i in 0..<ctx.value(s):children.add(component(Child,i,key = $i))
+          hostShell(column(@[]),children))
+      let execution:ExecutionScope=proc(body:proc() {.closure.})=
+        if armed:
+          armed=false
+          rt.uiTask(proc()=rt.closeRuntime())
+        body()
+      rt=newRuntime(componentApplication(component(Root,0),"entry close",executionScope=execution))
+      let service=rt.taskServiceInternal()
+      try:
+        if selectedPhase=="exit":
+          rt.uiTask(proc()=count.set(1))
+          rt.uiTask(proc()=count.set(0)) # Two separate exit batches.
+        armed=true
+        let report=rt.pumpTasks()
+        check report.callbacks==0
+        check not report.pending
+        check mounts==0
+        check parentCleanup==0 and childCleanup==0
+        check service.pendingTaskBytesInternal()==0
+        check service.lifecycleStorageInternal()==(batches:0,slots:0)
+        check service.cleanupPendingInternal()==3
+        check not rt.pumpTasks().pending
+        check service.pendingTaskBytesInternal()==0
+        rt.closeRuntime();rt.closeRuntime()
+        check parentCleanup==1 and childCleanup==2
+        check service.pendingTaskBytesInternal()==0
+        check service.cleanupPendingInternal()==0
+        check service.lifecycleStorageInternal()==(batches:0,slots:0)
+      finally:
+        armed=false;rt.closeRuntime()

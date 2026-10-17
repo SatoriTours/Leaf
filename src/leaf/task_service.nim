@@ -489,6 +489,15 @@ proc nextEvent(service: TaskService, exitsOnly: bool): tuple[batch:EventBatch,in
   elif service.first != nil:
     return (service.first,service.first.cursor)
 
+proc ownsEvent(service: TaskService, batch: EventBatch, index: int): bool =
+  if service.retired or batch==nil or index!=batch.cursor or index>=batch.events.len:
+    return false
+  let event=batch.events[index]
+  if event.callback==nil:return false
+  let head=if event.kind in {LifecyclePhase.deactivate,LifecyclePhase.dispose}:
+      service.firstExit else:service.first
+  head==batch
+
 proc popEvent(service: TaskService, batch: EventBatch, index: int) =
   let exiting=batch.events[index].kind in {LifecyclePhase.deactivate,LifecyclePhase.dispose}
   batch.events[index] = default(LifecycleEvent)
@@ -677,6 +686,11 @@ proc pumpTaskService*(service: TaskService): TaskPumpReport =
         try:
           service.runtime.uiTask(proc()=
             entered=true
+            # Application scope entry may close through a nested legal uiTask,
+            # transferring this event to cleanup and dropping both queue heads.
+            if not service.ownsEvent(selected.batch,selected.index):
+              inc dropped
+              return
             service.popEvent(selected.batch,selected.index)
             if not service.retired and service.currentEntry(event):
               inc callbacks
