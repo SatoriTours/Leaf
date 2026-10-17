@@ -1,6 +1,6 @@
 ## Nim owns application state and the response buffer. GPUI calls on the UI thread.
 import std/[json,os,tables,math,strutils]
-import ./[core,diagnostics,watch_ipc,gpui_styles]
+import ./[core,diagnostics,watch_ipc,gpui_styles,managed_runtime,task_contracts]
 type
   ActiveRow = tuple[key:string,index:int]
   Viewports = ref object
@@ -12,6 +12,7 @@ type
     viewportError: string
     externalError: string
     viewports: Viewports
+    taskCapable,tasksReady:bool
 
 proc rejectNativeResetSignals*(root: MountedNode) =
   ## The legacy GPUI bridge has no native reset signal. Reject the new explicit
@@ -32,23 +33,35 @@ proc bridgeValidator(snapshot: Snapshot) =
   validateStyles(snapshot.root)
   rejectNativeResetSignals(snapshot.root)
 
-proc newDesktopBridge*(app:Application,diagnostics:Diagnostics=nil):DesktopBridge =
+proc newDesktopBridge*(app:Application,diagnostics:Diagnostics=nil,taskPumpSupported=false):DesktopBridge =
   let viewports=Viewports()
   result=DesktopBridge(runtime:newRuntime(app,validator=bridgeValidator,diagnostics=diagnostics),viewports:viewports)
-  # Validate the current viewports inside core's isolated candidate before an
-  # event publishes a replacement source. Failure retains rows and callbacks.
-  result.runtime.setPreparer(proc(candidate:Runtime) =
-    proc visit(mounted:MountedNode) =
-      let source=mounted.node.listSource
-      if source!=nil and mounted.id in viewports.rows and source.len>0:
-        var indices:Table[string,int]
-        for i in 0..<source.len:indices[source.itemKey(i)]=i
-        var active:seq[int]
-        for row in viewports.rows[mounted.id]:
-          active.add(indices.getOrDefault(row.key,min(row.index,source.len-1)))
-        discard candidate.materialize(mounted.id,0,0,active)
-      for child in mounted.children:visit(child)
-    visit(candidate.snapshot.root))
+  try:
+    result.taskCapable=result.runtime.managed and taskPumpSupported
+    try:result.runtime.configureTaskPumpInternal(result.taskCapable)
+    except UiError as error:fail(error.msg & "; rebuild the GPUI bridge with task pump support")
+    # Validate the current viewports inside core's isolated candidate before an
+    # event publishes a replacement source. Failure retains rows and callbacks.
+    result.runtime.setPreparer(proc(candidate:Runtime) =
+      proc visit(mounted:MountedNode) =
+        let source=mounted.node.listSource
+        if source!=nil and mounted.id in viewports.rows and source.len>0:
+          var indices:Table[string,int]
+          for i in 0..<source.len:indices[source.itemKey(i)]=i
+          var active:seq[int]
+          for row in viewports.rows[mounted.id]:
+            active.add(indices.getOrDefault(row.key,min(row.index,source.len-1)))
+          discard candidate.materialize(mounted.id,0,0,active)
+        for child in mounted.children:visit(child)
+      visit(candidate.snapshot.root))
+  except Exception:
+    # newRuntime has accepted its initial owners. Installation has unwound;
+    # ordinary close invalidates State and runs only final disposal callbacks.
+    try:result.runtime.closeRuntime()
+    except Exception as cleanup:
+      try:result.runtime.diagnostic("gpui","error",%*{"message":"startup cleanup: " & cleanup.msg})
+      except Exception:discard
+    raise
 
 proc recordRendering(host:DesktopBridge, value:JsonNode):bool =
   # Copy only numeric diagnostics; never forward arbitrary payload/editor data.
@@ -76,8 +89,15 @@ proc request*(host:DesktopBridge,message:JsonNode):JsonNode =
   var located = -1
   var readySucceeded=false
   var diagnosticError=""
+  let taskTick=message.getOrDefault("op").getStr=="tasks"
+  let beforeOps=host.runtime.updateStats.ops
   try:
     case message["op"].getStr
+    of "tasks":
+      if not host.tasksReady:fail("GPUI task pump was not negotiated")
+      let report=host.runtime.pumpTasks()
+      if report.failed>0:fail("task delivery failed; see lifecycle diagnostics")
+      host.error=""
     of "event":
       let kind=case message["kind"].getStr
         of "click":click
@@ -145,12 +165,17 @@ proc request*(host:DesktopBridge,message:JsonNode):JsonNode =
     elif message.getOrDefault("op").getStr=="list":host.viewportError=error.msg
     else:host.error=error.msg
     host.runtime.diagnostic("gpui","error",%*{"message":error.msg})
-  result = %*{"snapshot":host.runtime.snapshot.toJson(),"rows":rows}
+  result = %*{"tasks_pending":host.runtime.taskPumpPending()}
+  if not taskTick or host.runtime.updateStats.ops!=beforeOps:
+    result["snapshot"]=host.runtime.snapshot.toJson()
+    result["rows"]=rows
   if located>=0:result["index"] = %located
   let error=host.error & (if host.viewportError.len>0:"\n" & host.viewportError else:"") & (if host.externalError.len>0:"\n" & host.externalError else:"")
   if error.len>0:result["error"] = %error
   elif diagnosticError.len>0:result["error"] = %diagnosticError
-  elif readySucceeded:result["capabilities"] = %*{"rendering_diagnostics":true}
+  elif readySucceeded:
+    host.tasksReady=host.taskCapable
+    result["capabilities"] = %*{"rendering_diagnostics":true,"task_pump":host.tasksReady}
 
 proc desktopCallback*(context:pointer,data:ptr uint8,len:csize_t):cstring {.cdecl.} =
   let host=cast[DesktopBridge](context)

@@ -42,6 +42,9 @@ pub struct TypedBridge {
     active: Rc<Cell<bool>>,
     session: u64,
     sequence: Rc<Cell<u64>>,
+    task_enabled: bool,
+    task_ready: Rc<Cell<bool>>,
+    task_pending: Rc<Cell<bool>>,
 }
 fn error(status: i32, revision: u64, message: impl Into<String>) -> BridgeError {
     BridgeError {
@@ -73,6 +76,9 @@ impl TypedBridge {
         t.apply_ms = 0.0;
         value
     }
+    pub fn tasks_pending(&self) -> bool {
+        self.active.get() && self.task_enabled && self.task_ready.get() && self.task_pending.get()
+    }
     pub fn session(&self) -> u64 {
         self.session
     }
@@ -88,6 +94,18 @@ impl TypedBridge {
     pub fn request(&self, request: &LeafRequest) -> Result<HostReply, BridgeError> {
         if !self.active.get() {
             return Err(error(4, 0, "typed callback has detached"));
+        }
+        if request.tag == LEAF_REQUEST_TASKS as u32
+            && (!self.task_enabled || !self.task_ready.get())
+        {
+            return Err(error(
+                LEAF_STATUS_REJECTED as i32,
+                0,
+                "task pump was not negotiated",
+            ));
+        }
+        if request.tag == LEAF_REQUEST_READY as u32 {
+            self.task_ready.set(false);
         }
         let mut bytes = [0u8; 2048];
         let mut fault = LeafError {
@@ -155,6 +173,11 @@ impl TypedBridge {
         } else {
             None
         };
+        self.task_pending
+            .set(reply.flags & LEAF_REPLY_TASKS_PENDING != 0);
+        if request.tag == LEAF_REQUEST_READY as u32 {
+            self.task_ready.set(status == 0 && reply.status == 0);
+        }
         Ok(HostReply {
             scope_error,
             external_status,
@@ -265,7 +288,7 @@ impl AttachedHost {
             || config.session_id == 0
             || !(1..=16384).contains(&config.width)
             || !(1..=16384).contains(&config.height)
-            || config.flags & !1 != 0
+            || config.flags & !(1 | LEAF_CONFIG_TASK_PUMP as u32) != 0
             || callbacks.struct_size != size_of::<LeafHostCallbacks>() as u32
             || callbacks.attach.is_none()
             || callbacks.request.is_none()
@@ -292,6 +315,9 @@ impl AttachedHost {
                 active: Rc::new(Cell::new(true)),
                 session: config.session_id,
                 sequence: Rc::new(Cell::new(0)),
+                task_enabled: config.flags & LEAF_CONFIG_TASK_PUMP as u32 != 0,
+                task_ready: Rc::new(Cell::new(false)),
+                task_pending: Rc::new(Cell::new(false)),
             },
         };
         let api = LeafRendererApi {
@@ -373,7 +399,7 @@ pub unsafe extern "C" fn leaf_gpui_query_v2(
         out.write(LeafGpuiApiV2 {
             struct_size: size_of::<LeafGpuiApiV2>() as u32,
             abi: 2,
-            capabilities: 0,
+            capabilities: LEAF_CAP_TASK_PUMP,
             run: Some(run),
         })
     };
@@ -521,5 +547,72 @@ mod tests {
             .unwrap();
         assert_eq!(reply.revision, 2);
         assert_eq!(reply.scope_error.as_deref(), Some("scope cleanup failed"));
+    }
+
+    #[test]
+    fn task_pump_config_combines_frame_bit_and_query_advertises_support() {
+        let mut api = LeafGpuiApiV2::default();
+        assert_eq!(
+            unsafe {
+                leaf_gpui_query_v2(
+                    2,
+                    &mut api,
+                    size_of::<LeafGpuiApiV2>() as u64,
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        assert_ne!(api.capabilities & LEAF_CAP_TASK_PUMP, 0);
+        let mut config = config();
+        config.flags = (1 | LEAF_CONFIG_TASK_PUMP) as u32;
+        let host =
+            unsafe { AttachedHost::attach(&config, &callbacks(false), std::ptr::null_mut()) }
+                .unwrap();
+        assert!(
+            host.bridge()
+                .request(&host.bridge().command(LEAF_REQUEST_READY))
+                .is_ok()
+        );
+        assert!(
+            host.bridge()
+                .request(&host.bridge().command(LEAF_REQUEST_TASKS))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn task_pump_invalid_ready_reply_cannot_authorize_tasks() {
+        unsafe extern "C" fn ready_reply(
+            ctx: *mut c_void,
+            _: *const LeafRequest,
+            reply: *mut LeafReply,
+            _: *mut LeafError,
+        ) -> i32 {
+            unsafe {
+                *reply = *(ctx as *const LeafReply);
+            }
+            0
+        }
+        let mut config = config();
+        config.flags = LEAF_CONFIG_TASK_PUMP as u32;
+        for size in [0, size_of::<LeafReply>() as u32] {
+            let mut reply = LeafReply {
+                struct_size: size,
+                status: if size == 0 { 0 } else { 5 },
+                flags: LEAF_REPLY_TASKS_PENDING,
+                ..Default::default()
+            };
+            let mut callbacks = callbacks(false);
+            callbacks.request = Some(ready_reply);
+            let host = unsafe {
+                AttachedHost::attach(&config, &callbacks, &mut reply as *mut _ as *mut c_void)
+            }
+            .unwrap();
+            let bridge = host.bridge();
+            let _ = bridge.request(&bridge.command(LEAF_REQUEST_READY));
+            assert!(!bridge.tasks_pending());
+            assert!(bridge.request(&bridge.command(LEAF_REQUEST_TASKS)).is_err());
+        }
     }
 }

@@ -3,6 +3,10 @@ use crate::bridge_v2::AttachedHost;
 use gpui::test::TestWindowExt;
 use std::ffi::c_void;
 struct Fixture {
+    task_enabled: bool,
+    task_pending: bool,
+    task_ticks: usize,
+    task_ready_rejected: bool,
     api: LeafRendererApi,
     ctx: *mut c_void,
     revision: u64,
@@ -18,6 +22,10 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         Self {
+            task_enabled: false,
+            task_pending: false,
+            task_ticks: 0,
+            task_ready_rejected: false,
             api: Default::default(),
             ctx: std::ptr::null_mut(),
             revision: 0,
@@ -168,6 +176,11 @@ impl Fixture {
         let config = LeafConfig {
             struct_size: size_of::<LeafConfig>() as u32,
             session_id: 9,
+            flags: if self.task_enabled {
+                LEAF_CONFIG_TASK_PUMP as u32
+            } else {
+                0
+            },
             width: 640,
             height: 480,
             ..Default::default()
@@ -202,7 +215,20 @@ unsafe extern "C" fn request(
 ) -> i32 {
     let f = unsafe { &mut *ctx.cast::<Fixture>() };
     let req = unsafe { &*req };
+    if req.tag == LEAF_REQUEST_READY as u32 && f.task_ready_rejected {
+        return 5;
+    }
+    if req.tag == LEAF_REQUEST_TASKS as u32 {
+        f.task_ticks += 1;
+        f.value = format!("task{}", f.task_ticks);
+        // Must borrow the real HostStore mutably during reentrant renderer calls.
+        f.publish(false);
+        f.task_pending = f.task_ticks % 2 != 0;
+    }
     if req.tag == 1 {
+        if f.task_enabled {
+            f.task_pending = true;
+        }
         f.events += 1;
         if f.reject {
             unsafe { (*reply).accepted_revision = f.revision };
@@ -231,7 +257,12 @@ unsafe extern "C" fn request(
             };
         }
     }
-    unsafe { (*reply).accepted_revision = f.revision };
+    unsafe {
+        (*reply).accepted_revision = f.revision;
+        if f.task_pending {
+            (*reply).flags |= LEAF_REPLY_TASKS_PENDING;
+        }
+    }
     0
 }
 unsafe extern "C" fn detach(_: *mut c_void) {}
@@ -598,4 +629,76 @@ fn watch_status_clears_only_external_error_and_does_not_change_host_revision(
         Some("business rejection".into())
     );
     assert_eq!(f.revision, revision);
+}
+
+#[gpui::test]
+fn task_pump_root_is_unique_stops_and_child_event_reawakens_without_store_borrow(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut f = Fixture::new();
+    f.task_enabled = true;
+    f.task_pending = true;
+    f.boundaries = true;
+    let (_host, view, cx) = form(&mut f, cx);
+    cx.update(|window, app| {
+        window.render_frame(app);
+        window.simulate_next_frame(app);
+        HostView::schedule_ready(&view, window, false);
+    });
+    cx.update(|window, app| {
+        window.render_frame(app);
+        window.simulate_next_frame(app);
+    });
+    cx.run_until_parked();
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    assert_eq!(f.task_ticks, 1);
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    assert_eq!(f.task_ticks, 2);
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(64));
+    cx.run_until_parked();
+    assert_eq!(f.task_ticks, 2);
+    let child = view.read_with(cx, |view, _| {
+        view.boundaries.borrow().values().next().unwrap().clone()
+    });
+    cx.update(|window, app| {
+        child.update(app, |child, cx| {
+            child.dispatch(2, 1, "child", false, window, cx)
+        })
+    });
+    cx.update(|window, app| {
+        window.render_frame(app);
+        window.simulate_next_frame(app);
+    });
+    cx.run_until_parked();
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    assert_eq!(f.task_ticks, 3);
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    assert_eq!(f.task_ticks, 4);
+}
+#[gpui::test]
+fn task_pump_failed_typed_ready_never_starts_timer(cx: &mut gpui::TestAppContext) {
+    let mut f = Fixture::new();
+    f.task_enabled = true;
+    f.task_pending = true;
+    f.task_ready_rejected = true;
+    let (_host, view, cx) = form(&mut f, cx);
+    cx.update(|window, _app| HostView::schedule_ready(&view, window, false));
+    cx.update(|window, app| {
+        window.render_frame(app);
+        window.simulate_next_frame(app);
+    });
+    cx.run_until_parked();
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(64));
+    cx.run_until_parked();
+    assert_eq!(f.task_ticks, 0);
 }

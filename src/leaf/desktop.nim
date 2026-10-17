@@ -9,8 +9,11 @@ proc runDesktop*(app:Application,diagnostics:Diagnostics=nil):int =
   let api=loadGpui()
   if api.v2.isSome:
     let runtime=newRuntime(app,diagnostics=diagnostics)
-    return openGpuiSession(runtime,api).run()
-  let host=newDesktopBridge(app,diagnostics)
-  let snapshot = $host.runtime.snapshot.toJson()
-  # Synchronous run keeps the Nim owner and its response buffer alive throughout.
-  int(api.run(cast[ptr uint8](snapshot.cstring),csize_t(snapshot.len),desktopCallback,cast[pointer](host)))
+    try:return openGpuiSession(runtime,api).run()
+    finally:runtime.closeRuntime()
+  let host=newDesktopBridge(app,diagnostics,taskPumpSupported=api.supportsTaskPump())
+  try:
+    let snapshot = $host.runtime.snapshot.toJson()
+    # Synchronous run keeps Nim and its response buffer live through all calls.
+    int(api.run(cast[ptr uint8](snapshot.cstring),csize_t(snapshot.len),desktopCallback,cast[pointer](host)))
+  finally:host.runtime.closeRuntime()

@@ -1,5 +1,6 @@
 ## Managed component instances and affected overlays. The accepted maps are flat;
 ## successful publication replaces entries and never retains a candidate chain.
+import ./task_worker
 import std/[tables,sets,options,algorithm]
 import ./[core,component_description,component_state,host_reconcile,backend,task_service,task_contracts]
 export host_protocol.UpdateStats
@@ -726,6 +727,9 @@ method closeDeferred*(d:ManagedDriver)=
   d.data.tasks.closeTaskService()
 method deferredRetiredInternal*(d:ManagedDriver):bool=
   d.data.tasks.taskRetiredInternal()
+method taskPumpPendingDriverInternal*(d:ManagedDriver):bool=
+  let tasks=d.data.tasks
+  not tasks.taskRetiredInternal and (tasks.pendingTaskBytesInternal>0 or tasks.taskWorkerStatsInternal.reservedTasks>0)
 method pumpDeferred*(d:ManagedDriver):TaskPumpReport=
   d.data.tasks.pumpTaskService()
 proc componentApplication*(root:UiDescription,title:string,width=640,height=480,

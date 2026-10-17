@@ -63,6 +63,10 @@ typedef struct LeafFrameSample { double elapsed_ms, draw_ms, rust_prepare_ms, ru
 #define LEAF_REQUEST_READY UINT64_C(4)
 #define LEAF_REQUEST_LOCATE UINT64_C(5)
 #define LEAF_REQUEST_RENDERING UINT64_C(6)
+#define LEAF_CAP_TASK_PUMP UINT64_C(1)
+#define LEAF_CONFIG_TASK_PUMP UINT64_C(2)
+#define LEAF_REPLY_TASKS_PENDING UINT64_C(4)
+#define LEAF_REQUEST_TASKS UINT64_C(8)
 #define LEAF_REQUEST_FRAME UINT64_C(7)
 /* Props.numbers: gap,padding,grow,shrink,min_w,min_h,max_w,max_h,radius,border,opacity,font_size,progress. */
 /* Colors are 0xRRGGBBAA. Presence is authoritative; zero is a valid explicit value. */

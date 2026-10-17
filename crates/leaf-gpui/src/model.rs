@@ -128,6 +128,8 @@ impl Snapshot {
 }
 #[derive(Deserialize)]
 pub struct Response {
+    #[serde(default)]
+    pub tasks_pending: bool,
     pub snapshot: Snapshot,
     #[serde(default)]
     pub error: Option<String>,
@@ -136,4 +138,36 @@ pub struct Response {
     #[serde(default)]
     pub close: bool,
     pub index: Option<usize>,
+}
+
+#[cfg(test)]
+mod task_pump_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn task_pump_response_defaults_false_and_rejects_non_boolean() {
+        let initial = json!({"snapshot":{"title":"tasks","width":200,"height":200,
+            "root":{"id":"root","kind":"text"}}});
+        assert!(
+            !serde_json::from_value::<Response>(initial.clone())
+                .unwrap()
+                .tasks_pending
+        );
+        for pending in [
+            json!(false),
+            json!(true),
+            json!("true"),
+            json!(1),
+            json!(null),
+        ] {
+            let mut value = initial.clone();
+            value["tasks_pending"] = pending.clone();
+            let parsed = serde_json::from_value::<Response>(value);
+            if let Some(expected) = pending.as_bool() {
+                assert_eq!(parsed.unwrap().tasks_pending, expected);
+            } else {
+                assert!(parsed.is_err());
+            }
+        }
+    }
 }

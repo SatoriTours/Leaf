@@ -146,6 +146,7 @@ method find*(driver:RuntimeDriver,key:string):MountedNode {.base.}=nil
 method stats*(driver:RuntimeDriver):PerformanceStats {.base.}=default(PerformanceStats)
 method publish*(driver:RuntimeDriver) {.base,raises:[].}=discard
 method reject*(driver:RuntimeDriver) {.base,raises:[].}=discard
+method taskPumpPendingDriverInternal*(driver:RuntimeDriver):bool {.base.}=false
 method pumpDeferred*(driver:RuntimeDriver):TaskPumpReport {.base.}=
   newTaskPumpReportInternal(0,0,0,0,false)
 method configureTaskPumpDriverInternal*(driver:RuntimeDriver,supported:bool) {.base.}=discard
@@ -575,6 +576,10 @@ proc pumpTasks*(runtime:Runtime):TaskPumpReport=
     fail("cannot pump another executing Runtime")
   if runtime.driver==nil:return newTaskPumpReportInternal(0,0,0,0,false)
   runtime.driver.pumpDeferred()
+
+proc taskPumpPending*(runtime:Runtime):bool=
+  if runtime==nil:fail("missing Runtime")
+  runtime.driver!=nil and not runtime.runtimeClosedInternal and runtime.driver.taskPumpPendingDriverInternal()
 
 proc configureTaskPumpInternal*(runtime:Runtime,supported:bool)=
   if runtime==nil or runtime.isCandidate or runtime.inUpdate or runtime.hookInstallation or

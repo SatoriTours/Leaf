@@ -140,6 +140,7 @@ impl ListSlot {
 #[derive(Default)]
 struct BoundaryCoordinator {
     measure: Cell<bool>,
+    task_wake_scheduled: Cell<bool>,
     #[cfg(feature = "native-test-support")]
     viewport_requests: Cell<u64>,
     views: RefCell<HashMap<u64, WeakEntity<HostView>>>,
@@ -160,6 +161,7 @@ pub struct HostView {
     external_error: Option<String>,
     settling: Option<u64>,
     ready_sent: bool,
+    task_running: bool,
     frame_start: Option<std::time::Instant>,
     closing: bool,
     _bounds_subscription: Option<Subscription>,
@@ -181,6 +183,7 @@ impl HostView {
             external_error: None,
             settling: None,
             ready_sent: false,
+            task_running: false,
             frame_start: None,
             closing: false,
             _bounds_subscription: None,
@@ -202,6 +205,7 @@ impl HostView {
             view.refresh_boundaries(DirtyReason::InheritedStyle, cx)
         }));
         view._quit_subscription = Some(cx.on_app_quit(|view, _| {
+            view.closing = true;
             view.inputs.borrow_mut().clear();
             view.lists.borrow_mut().clear();
             view.boundaries.borrow_mut().clear();
@@ -226,6 +230,66 @@ impl HostView {
             .detach();
         }
         view
+    }
+    fn arm_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.closing || !self.bridge.tasks_pending() {
+            return;
+        }
+        if self.boundary_id != 0 {
+            // A child response wakes the window owner after its current update.
+            // Boundary views share negotiation metadata, never a second timer.
+            if self.coordinator.task_wake_scheduled.replace(true) {
+                return;
+            }
+            let coordinator = self.coordinator.clone();
+            window.defer(cx, move |window, app| {
+                coordinator.task_wake_scheduled.set(false);
+                let root = coordinator.views.borrow().get(&0).cloned();
+                if let Some(root) = root {
+                    let _ = root.update(app, |view, cx| view.arm_tasks(window, cx));
+                }
+            });
+            return;
+        }
+        if self.task_running {
+            return;
+        }
+        self.task_running = true;
+        cx.spawn_in(window, async move |view, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+                let keep = view.update_in(cx, |view, window, cx| {
+                    if view.closing || !view.bridge.tasks_pending() {
+                        view.task_running = false;
+                        return false;
+                    }
+                    // Copy only revision metadata, ending the HostStore borrow
+                    // before Nim can synchronously prepare/apply a new batch.
+                    let revision = view.store.borrow().revision();
+                    let result = view
+                        .bridge
+                        .request(&view.bridge.command(LEAF_REQUEST_TASKS));
+                    let success = result.is_ok();
+                    view.accept(result);
+                    if !success || view.store.borrow().revision() != revision {
+                        view.sync_inputs(window, cx);
+                        view.notify_dirty(cx);
+                        cx.notify();
+                    }
+                    let pending = success && view.bridge.tasks_pending();
+                    if !pending {
+                        view.task_running = false;
+                    }
+                    pending
+                });
+                if !matches!(keep, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
     fn poll_watch_status(&mut self, cx: &mut Context<Self>) {
         if self.closing {
@@ -375,6 +439,7 @@ impl HostView {
         request.revision = revision;
         request.sequence = self.bridge.next_sequence();
         self.accept(self.bridge.request(&request));
+        self.arm_tasks(window, cx);
         self.settling = Some(handle);
         self.sync_inputs(window, cx);
         self.settling = None;
@@ -722,6 +787,7 @@ impl HostView {
             }
             self.sync_inputs(window, cx);
         }
+        self.arm_tasks(window, cx);
         cx.notify();
     }
     fn render_list(&self, node: &HostNode, cx: &mut Context<Self>) -> AnyElement {
@@ -992,6 +1058,7 @@ impl HostView {
                     view.bridge
                         .request(&view.bridge.command(LEAF_REQUEST_READY)),
                 );
+                view.arm_tasks(window, cx);
                 cx.notify();
                 if frames {
                     view.coordinator.measure.set(true);
@@ -1031,6 +1098,7 @@ impl Render for HostView {
                 .entry(self.boundary_id)
                 .or_default() += 1;
         }
+        self.arm_tasks(window, cx);
         self.notify_dirty(cx);
         self.boundaries
             .borrow_mut()

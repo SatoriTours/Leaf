@@ -57,6 +57,10 @@ const
   LEAF_REQUEST_READY* = 4'u64
   LEAF_REQUEST_LOCATE* = 5'u64
   LEAF_REQUEST_RENDERING* = 6'u64
+  LEAF_CAP_TASK_PUMP* = 1'u64
+  LEAF_CONFIG_TASK_PUMP* = 2'u64
+  LEAF_REPLY_TASKS_PENDING* = 4'u64
+  LEAF_REQUEST_TASKS* = 8'u64
   LEAF_REQUEST_FRAME* = 7'u64
 type
   LeafPrepareFn* = proc(ctx: pointer, batch: ptr LeafBatch, error: ptr LeafError): int32 {.cdecl, raises: [].}

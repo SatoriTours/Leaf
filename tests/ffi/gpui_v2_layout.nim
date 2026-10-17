@@ -155,3 +155,12 @@ echo "LeafGpuiApiV2.struct_size=", offsetOf(LeafGpuiApiV2, struct_size)
 echo "LeafGpuiApiV2.abi=", offsetOf(LeafGpuiApiV2, abi)
 echo "LeafGpuiApiV2.capabilities=", offsetOf(LeafGpuiApiV2, capabilities)
 echo "LeafGpuiApiV2.run=", offsetOf(LeafGpuiApiV2, run)
+
+static: doAssert LEAF_CAP_TASK_PUMP == 1
+echo "LEAF_CAP_TASK_PUMP=", LEAF_CAP_TASK_PUMP
+static: doAssert LEAF_CONFIG_TASK_PUMP == 2
+echo "LEAF_CONFIG_TASK_PUMP=", LEAF_CONFIG_TASK_PUMP
+static: doAssert LEAF_REPLY_TASKS_PENDING == 4
+echo "LEAF_REPLY_TASKS_PENDING=", LEAF_REPLY_TASKS_PENDING
+static: doAssert LEAF_REQUEST_TASKS == 8
+echo "LEAF_REQUEST_TASKS=", LEAF_REQUEST_TASKS

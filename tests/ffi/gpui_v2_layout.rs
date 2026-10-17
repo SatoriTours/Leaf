@@ -158,4 +158,12 @@ println!("LeafGpuiApiV2.struct_size={}", std::mem::offset_of!(LeafGpuiApiV2,stru
 println!("LeafGpuiApiV2.abi={}", std::mem::offset_of!(LeafGpuiApiV2,abi));
 println!("LeafGpuiApiV2.capabilities={}", std::mem::offset_of!(LeafGpuiApiV2,capabilities));
 println!("LeafGpuiApiV2.run={}", std::mem::offset_of!(LeafGpuiApiV2,run));
+assert_eq!(LEAF_CAP_TASK_PUMP, 1);
+println!("LEAF_CAP_TASK_PUMP={}", LEAF_CAP_TASK_PUMP);
+assert_eq!(LEAF_CONFIG_TASK_PUMP, 2);
+println!("LEAF_CONFIG_TASK_PUMP={}", LEAF_CONFIG_TASK_PUMP);
+assert_eq!(LEAF_REPLY_TASKS_PENDING, 4);
+println!("LEAF_REPLY_TASKS_PENDING={}", LEAF_REPLY_TASKS_PENDING);
+assert_eq!(LEAF_REQUEST_TASKS, 8);
+println!("LEAF_REQUEST_TASKS={}", LEAF_REQUEST_TASKS);
 }

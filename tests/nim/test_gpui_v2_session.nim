@@ -89,7 +89,7 @@ suite "ABI selection and synchronous attach":
     check session.run()!=0
     check session.readyCalls==0
     check rt.committerOwner==0
-  test "terminal detach removes callbacks even when scope refuses cleanup":
+  test "terminal detach removes callbacks without entering cleanup scope":
     putEnv("LEAF_GPUI_ABI","2")
     defer:delEnv("LEAF_GPUI_ABI")
     let api=loadGpui(absolutePath("target/ffi-v2/VALID.so"))
@@ -102,6 +102,23 @@ suite "ABI selection and synchronous attach":
     let session=openGpuiSession(rt,api)
     check session.run()==0
     check session.readyCalls==1
-    check entries==4
+    check entries==3
     check rt.committerOwner==0
-    check rt.eventsFrozen
+    check not rt.eventsFrozen
+    rt.closeRuntime()
+    check rt.runtimeClosedInternal
+  test "preparer installation failure after host attach closes at the ordinary boundary":
+    putEnv("LEAF_GPUI_ABI","2")
+    defer:delEnv("LEAF_GPUI_ABI")
+    let api=loadGpui(absolutePath("target/ffi-v2/VALID.so"))
+    var entries=0
+    let scope:ExecutionScope=proc(body:proc())=
+      inc entries
+      body()
+      if entries==3:raise newException(UiError,"preparer scope exit rejected")
+    let rt=newRuntime(app(scope))
+    let session=openGpuiSession(rt,api)
+    check session.run()!=0
+    check session.readyCalls==0
+    check rt.committerOwner==0
+    check rt.runtimeClosedInternal

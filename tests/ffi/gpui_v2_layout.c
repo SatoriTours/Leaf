@@ -157,5 +157,13 @@ int main(void) {
   printf("LeafGpuiApiV2.abi=%zu\n", offsetof(LeafGpuiApiV2,abi));
   printf("LeafGpuiApiV2.capabilities=%zu\n", offsetof(LeafGpuiApiV2,capabilities));
   printf("LeafGpuiApiV2.run=%zu\n", offsetof(LeafGpuiApiV2,run));
+  _Static_assert(LEAF_CAP_TASK_PUMP == 1, "LEAF_CAP_TASK_PUMP");
+  printf("LEAF_CAP_TASK_PUMP=%llu\n", (unsigned long long)LEAF_CAP_TASK_PUMP);
+  _Static_assert(LEAF_CONFIG_TASK_PUMP == 2, "LEAF_CONFIG_TASK_PUMP");
+  printf("LEAF_CONFIG_TASK_PUMP=%llu\n", (unsigned long long)LEAF_CONFIG_TASK_PUMP);
+  _Static_assert(LEAF_REPLY_TASKS_PENDING == 4, "LEAF_REPLY_TASKS_PENDING");
+  printf("LEAF_REPLY_TASKS_PENDING=%llu\n", (unsigned long long)LEAF_REPLY_TASKS_PENDING);
+  _Static_assert(LEAF_REQUEST_TASKS == 8, "LEAF_REQUEST_TASKS");
+  printf("LEAF_REQUEST_TASKS=%llu\n", (unsigned long long)LEAF_REQUEST_TASKS);
   return 0;
 }

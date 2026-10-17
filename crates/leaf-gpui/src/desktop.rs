@@ -57,6 +57,10 @@ struct Desktop {
     ready_sent: bool,
     closing: bool,
     rendering_supported: bool,
+    tasks_supported: bool,
+    tasks_pending: bool,
+    task_running: bool,
+    _task_quit_subscription: Subscription,
     last_rendering: Option<serde_json::Value>,
     _bounds_subscription: Subscription,
 }
@@ -78,6 +82,14 @@ impl Desktop {
             ready_sent: false,
             closing: false,
             rendering_supported: false,
+            tasks_supported: false,
+            tasks_pending: false,
+            task_running: false,
+            _task_quit_subscription: cx.on_app_quit(|view, _| {
+                view.closing = true;
+                view.tasks_pending = false;
+                async {}
+            }),
             last_rendering: None,
             _bounds_subscription: cx.observe_window_bounds(window, |view, window, _| {
                 view.sample_rendering(window);
@@ -163,7 +175,8 @@ impl Desktop {
                 view.last_rendering = Some(sample.clone());
                 let response = view.bridge.ready(sample);
                 match response {
-                    Ok((response, supported)) => {
+                    Ok((response, supported, tasks)) => {
+                        view.tasks_supported = tasks;
                         view.rendering_supported = supported;
                         view.accept(Ok(response));
                     }
@@ -171,6 +184,7 @@ impl Desktop {
                         view.accept(Err(error));
                     }
                 }
+                view.arm_tasks(window, cx);
                 cx.notify();
             });
             if frames {
@@ -178,9 +192,52 @@ impl Desktop {
             }
         });
     }
+    fn arm_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.closing || !self.tasks_supported || !self.tasks_pending || self.task_running {
+            return;
+        }
+        self.task_running = true;
+        cx.spawn_in(window, async move |view, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+                let keep = view.update_in(cx, |view, window, cx| {
+                    if view.closing || !view.tasks_supported || !view.tasks_pending {
+                        view.task_running = false;
+                        return false;
+                    }
+                    match view.bridge.tasks() {
+                        Ok(tick) => {
+                            view.tasks_pending = tick.pending;
+                            if let Some(response) = tick.response {
+                                view.accept(Ok(response));
+                                view.sync_inputs(window, cx);
+                                cx.notify();
+                            }
+                        }
+                        Err(error) => {
+                            view.error = Some(error);
+                            view.tasks_pending = false;
+                            cx.notify();
+                        }
+                    }
+                    if !view.tasks_pending {
+                        view.task_running = false;
+                    }
+                    view.tasks_pending
+                });
+                if !matches!(keep, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
     fn accept(&mut self, response: Result<Response, String>) -> Vec<Node> {
         match response {
             Ok(response) => {
+                self.tasks_pending = response.tasks_pending;
                 self.snapshot = response.snapshot;
                 self.error = response.error;
                 response.rows
@@ -534,6 +591,7 @@ impl Render for Desktop {
                 });
             });
         }
+        self.arm_tasks(window, cx);
         self.sync_lists();
         self.sync_inputs(window, cx);
         let tree = self.render_node(&self.snapshot.root, cx);
@@ -665,6 +723,9 @@ mod dpi_tests {
     // Preserve the old Nim handler's persistent error and receipt semantics.
     struct LegacyHost {
         snapshot: Value,
+        task_capability: Value,
+        tasks_pending: bool,
+        task_ticks: usize,
         response: CString,
         capability: Value,
         error: Option<String>,
@@ -686,6 +747,9 @@ mod dpi_tests {
                     "root":{"id":"root","kind":"text","text":"中文"}}),
                 response: CString::new("").unwrap(),
                 capability,
+                task_capability: Value::Null,
+                tasks_pending: false,
+                task_ticks: 0,
                 error: None,
                 reject_ready: false,
                 null_ready: false,
@@ -710,6 +774,12 @@ mod dpi_tests {
         let host = unsafe { &mut *(ctx as *mut LegacyHost) };
         let request: Value =
             serde_json::from_slice(unsafe { std::slice::from_raw_parts(data, len) }).unwrap();
+        if request["op"] == "tasks" {
+            host.task_ticks += 1;
+            host.tasks_pending = false;
+            host.response = CString::new(json!({"tasks_pending":false}).to_string()).unwrap();
+            return host.response.as_ptr();
+        }
         let mut transient_error = None;
         match request["op"].as_str().unwrap() {
             "ready" => {
@@ -743,12 +813,14 @@ mod dpi_tests {
                 host.error = Some("unknown GPUI request".into());
             }
         }
-        let mut response = json!({"snapshot":host.snapshot,"rows":[]});
+        let mut response =
+            json!({"snapshot":host.snapshot,"rows":[],"tasks_pending":host.tasks_pending});
         if let Some(error) = transient_error.as_ref().or(host.error.as_ref()) {
             response["error"] = json!(error);
         }
         if request["op"] == "ready" && host.error.is_none() && !host.capability.is_null() {
-            response["capabilities"] = json!({"rendering_diagnostics":host.capability});
+            response["capabilities"] =
+                json!({"rendering_diagnostics":host.capability,"task_pump":host.task_capability});
         }
         host.response = CString::new(response.to_string()).unwrap();
         host.response.as_ptr()
@@ -890,5 +962,55 @@ mod dpi_tests {
         assert!(host.error.is_none());
         assert!(view.read_with(cx, |view, _| view.error.is_none()));
         assert_eq!(host.ready_count, 1);
+    }
+
+    #[gpui::test]
+    fn task_pump_ready_requires_success_and_true_then_stops_and_list_reawakens(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for capability in [
+            Value::Null,
+            json!(false),
+            json!("true"),
+            json!(1),
+            json!(true),
+        ] {
+            for rejected in [false, true] {
+                let mut host = LegacyHost::new(json!(true));
+                host.task_capability = capability.clone();
+                host.tasks_pending = true;
+                host.reject_ready = rejected;
+                let (view, cx) = form(&mut host, cx);
+                handshake(&view, cx);
+                cx.background_executor
+                    .advance_clock(std::time::Duration::from_millis(16));
+                cx.run_until_parked();
+                let enabled = capability == json!(true) && !rejected;
+                assert_eq!(host.task_ticks, usize::from(enabled));
+                cx.background_executor
+                    .advance_clock(std::time::Duration::from_millis(64));
+                cx.run_until_parked();
+                assert_eq!(host.task_ticks, usize::from(enabled));
+                if enabled {
+                    host.tasks_pending = true;
+                    cx.update(|window, cx| {
+                        view.update(cx, |view, cx| {
+                            view.accept(view.bridge.request(json!({"op":"list"})));
+                            cx.notify();
+                            let _ = window;
+                        })
+                    });
+                    cx.update(|window, app| {
+                        window.render_frame(app);
+                        window.simulate_next_frame(app);
+                    });
+                    cx.run_until_parked();
+                    cx.background_executor
+                        .advance_clock(std::time::Duration::from_millis(16));
+                    cx.run_until_parked();
+                    assert_eq!(host.task_ticks, 2);
+                }
+            }
+        }
     }
 }

@@ -6,6 +6,7 @@ type
   GpuiApi* = ref object
     library:LibHandle
     v2*:Option[LeafGpuiApiV2]
+    taskPumpVersion*:proc():cuint {.cdecl.}
     abi*:proc():cuint {.cdecl.}
     frames*:proc(data:ptr uint8,len:csize_t,callback:GpuiCallback,context:pointer):cint {.cdecl.}
     run*:proc(data:ptr uint8,len:csize_t,callback:GpuiCallback,context:pointer):cint {.cdecl.}
@@ -40,6 +41,7 @@ proc loadGpui*(path=""):GpuiApi =
       unloadLib(library)
       fail("incompatible GPUI bridge: " & name)
     result=GpuiApi(library:library,abi:abi,run:run,frames:frames)
+    result.taskPumpVersion=cast[typeof(result.taskPumpVersion)](symAddr(library,"leaf_gpui_task_pump_version"))
     if selection!="1":
       type QueryV2=proc(abi:uint32,api:ptr LeafGpuiApiV2,size:uint64,error:ptr LeafError):int32 {.cdecl.}
       let query=cast[QueryV2](symAddr(library,"leaf_gpui_query_v2"))
@@ -63,3 +65,8 @@ proc loadGpui*(path=""):GpuiApi =
     return
   fail("GPUI bridge could not be loaded: " & failures.join(", ") &
     "; run cargo build -p leaf-gpui or set LEAF_GPUI_LIBRARY")
+
+proc supportsTaskPump*(api:GpuiApi):bool=
+  if api==nil:return false
+  if api.v2.isSome:(api.v2.get.capabilities and LEAF_CAP_TASK_PUMP)!=0
+  else:api.taskPumpVersion!=nil and api.taskPumpVersion()==1

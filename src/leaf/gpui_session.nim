@@ -1,7 +1,7 @@
 ## Typed, synchronous ABI 2 owner. All returned buffers are copied by Rust
 ## before the next request; no exception crosses the C calling convention.
 import std/[options, unicode, os, math, tables, json]
-import ./[core, backend, host_session, gpui_api, gpui_ffi_v2, watch_ipc,managed_runtime]
+import ./[core, backend, host_session, gpui_api, gpui_ffi_v2, watch_ipc,managed_runtime,task_contracts]
 type
   GpuiSession* = ref object
     runtime*:Runtime
@@ -9,8 +9,9 @@ type
     host:HostSession
     renderer:LeafRendererApi
     rendererCtx:pointer
-    id:uint64
-    running,detached:bool
+    id,hostOwnerToken:uint64
+    taskCapable,tasksReady:bool
+    running,detached,installed:bool
     lastError,viewportError,externalError:string
     renderingRecorded:bool
     lastRendering:tuple[scale,width,height:float64]
@@ -62,6 +63,7 @@ proc attach(ctx:pointer,api:ptr LeafRendererApi,rendererCtx:pointer,error:ptr Le
     sink.accept=proc(revision:uint64) {.raises:[].}=session.renderer.accept(session.rendererCtx,revision)
     sink.discardPrepared=proc() {.raises:[].}=session.renderer.`discard`(session.rendererCtx)
     session.host=attachHostSession(session.runtime,sink)
+    session.hostOwnerToken=session.runtime.committerOwner
     # Managed candidates retain accepted rows and restore changed sources
     # transactionally in the driver. Only legacy root renders need replay.
     if not session.runtime.managed:
@@ -78,6 +80,7 @@ proc attach(ctx:pointer,api:ptr LeafRendererApi,rendererCtx:pointer,error:ptr Le
           for key in keys:
             if indices.hasKey(key):active.add(indices[key])
           if active.len>0:discard candidate.materialize(id,0,0,active))
+    session.installed=true
     0
   except Exception as failure:
     if session!=nil:session.lastError=failure.msg
@@ -109,6 +112,11 @@ proc request(ctx:pointer,raw:ptr LeafRequest,reply:ptr LeafReply,error:ptr LeafE
     if raw.session_id!=session.id:fail("foreign request session")
     reply[]=LeafReply(struct_size:uint32(sizeof(LeafReply)),accepted_revision:before)
     case raw.tag
+    of uint32(LEAF_REQUEST_TASKS):
+      if not session.taskCapable or not session.tasksReady:fail("typed task pump was not negotiated")
+      let report=session.runtime.pumpTasks()
+      if report.failed>0:fail("task delivery failed; see lifecycle diagnostics")
+      session.lastError=""
     of uint32(LEAF_REQUEST_EVENT):
       if raw.kind>uint32(ord(high(EventKind))) or raw.composition>uint32(ord(high(CompositionPhase))) or raw.checked>1:
         fail("invalid event enum")
@@ -139,6 +147,7 @@ proc request(ctx:pointer,raw:ptr LeafRequest,reply:ptr LeafReply,error:ptr LeafE
       let path=getEnv("LEAF_WATCH_READY")
       if path.len>0:writeReady(path,getEnv("LEAF_WATCH_TOKEN"),getCurrentProcessId())
       inc session.readyCalls
+      session.tasksReady=session.taskCapable
     of uint32(LEAF_REQUEST_STATUS):
       let status=readStatus(getEnv("LEAF_WATCH_STATUS"))
       if status.valid:
@@ -183,6 +192,7 @@ proc request(ctx:pointer,raw:ptr LeafRequest,reply:ptr LeafReply,error:ptr LeafE
         if session.onFrame(sample):reply.flags=1
     else:fail("unknown typed request")
     reply.accepted_revision=session.runtime.acceptedRevision
+    if session.taskCapable and session.runtime.taskPumpPending():reply.flags=reply.flags or LEAF_REPLY_TASKS_PENDING
     int32(reply.status)
   except Exception as failure:
     if session!=nil:
@@ -205,29 +215,39 @@ proc request(ctx:pointer,raw:ptr LeafRequest,reply:ptr LeafReply,error:ptr LeafE
           except Exception:discard
     if reply!=nil:
       reply.status=status
-      if session!=nil:reply.accepted_revision=session.runtime.acceptedRevision
+      if session!=nil:
+        reply.accepted_revision=session.runtime.acceptedRevision
+        try:
+          if session.taskCapable and session.runtime.taskPumpPending():reply.flags=reply.flags or LEAF_REPLY_TASKS_PENDING
+        except Exception:discard
     int32(status)
-proc detach(ctx:pointer) {.cdecl,raises:[].}=
-  let session=cast[GpuiSession](ctx)
+proc releaseSession(session:GpuiSession,terminal:bool) {.raises:[].}=
   if session==nil or session.detached:return
-  try:
-    session.runtime.clearPreparer(session.preparerToken)
-    session.host.close()
-    session.detached=true
-    session.rendererCtx=nil
-    session.renderer=default(LeafRendererApi)
-  except Exception as failure:
-    session.runtime.freezeEvents("typed detach failed: " & failure.msg)
-    session.lastError=failure.msg
-    session.runtime.retirePreparerOwner(session.preparerToken)
-    session.host.retire()
-    session.detached=true
-    session.rendererCtx=nil
-    session.renderer=default(LeafRendererApi)
+  let current=session.hostOwnerToken!=0 and session.runtime.committerOwner==session.hostOwnerToken
+  session.detached=true
+  session.tasksReady=false
+  # Token equality protects a replacement binding from stale/late callbacks.
+  if terminal and current and session.runtime.runtimeDriver!=nil:
+    session.runtime.runtimeDriver.retireDeferred()
+  session.runtime.retirePreparerOwner(session.preparerToken)
+  session.host.retire()
+  session.rendererCtx=nil
+  session.renderer=default(LeafRendererApi)
+proc detach(ctx:pointer) {.cdecl,raises:[].}=
+  cast[GpuiSession](ctx).releaseSession(true)
 proc openGpuiSession*(runtime:Runtime,api:GpuiApi):GpuiSession=
   if runtime==nil or api==nil or api.v2.isNone:fail("GPUI ABI 2 is unavailable")
+  let capable=runtime.managed and api.supportsTaskPump()
+  try:runtime.configureTaskPumpInternal(capable)
+  except UiError as error:
+    let message=error.msg & "; rebuild the GPUI bridge with task pump support"
+    try:runtime.closeRuntime()
+    except Exception as cleanup:
+      try:runtime.diagnostic("gpui","error",%*{"message":"startup cleanup: " & cleanup.msg})
+      except Exception:discard
+    fail(message)
   inc nextSession
-  GpuiSession(runtime:runtime,api:api,id:nextSession)
+  GpuiSession(runtime:runtime,api:api,id:nextSession,taskCapable:capable)
 proc run*(session:GpuiSession):int=
   if session.running or session.detached:fail("GPUI session already used")
   session.running=true
@@ -236,11 +256,19 @@ proc run*(session:GpuiSession):int=
   var config=LeafConfig(struct_size:uint32(sizeof(LeafConfig)),session_id:session.id,width:uint32(snapshot.width),height:uint32(snapshot.height),
     title:LeafBytes(`ptr`:cast[ptr uint8](snapshot.title.cstring),len:uint64(snapshot.title.len)))
   if session.onFrame!=nil:config.flags=1
+  if session.taskCapable:config.flags=config.flags or uint32(LEAF_CONFIG_TASK_PUMP)
   var callbacks=LeafHostCallbacks(struct_size:uint32(sizeof(LeafHostCallbacks)),attach:attach,request:request,detach:detach)
   var bytes:array[2048,uint8]
   var error=LeafError(`ptr`:addr bytes[0],capacity:uint64(bytes.len))
-  result=int(session.api.v2.get.run(addr config,addr callbacks,cast[pointer](session),addr error))
-  if not session.detached:detach(cast[pointer](session))
+  try:result=int(session.api.v2.get.run(addr config,addr callbacks,cast[pointer](session),addr error))
+  finally:
+    session.releaseSession(false)
+    if result!=0 and not session.installed:
+      # Installation failed. Cleanup is outside the protected C attach.
+      try:session.runtime.closeRuntime()
+      except Exception as cleanup:
+        try:session.runtime.diagnostic("gpui","error",%*{"message":"startup cleanup: " & cleanup.msg})
+        except Exception:discard
 proc close*(session:GpuiSession)=
   if session.running:fail("cannot close a running GPUI session outside detach")
-  detach(cast[pointer](session))
+  session.releaseSession(false)

@@ -54,6 +54,10 @@ pub const LEAF_REQUEST_STATUS: u64 = 3;
 pub const LEAF_REQUEST_READY: u64 = 4;
 pub const LEAF_REQUEST_LOCATE: u64 = 5;
 pub const LEAF_REQUEST_RENDERING: u64 = 6;
+pub const LEAF_CAP_TASK_PUMP: u64 = 1;
+pub const LEAF_CONFIG_TASK_PUMP: u64 = 2;
+pub const LEAF_REPLY_TASKS_PENDING: u64 = 4;
+pub const LEAF_REQUEST_TASKS: u64 = 8;
 pub const LEAF_REQUEST_FRAME: u64 = 7;
 pub type LeafPrepareFn =
     Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const LeafBatch, *mut LeafError) -> i32>;
