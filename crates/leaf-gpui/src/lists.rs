@@ -214,6 +214,7 @@ impl Desktop {
         };
         let protected_keys = self.protected_keys(id, window, cx);
         self.accept(self.bridge.request(json!({"op":"list","id":id,"first":0,"finish":0,"protected":indices,"protected_keys":protected_keys})));
+        self.arm_tasks(window, cx);
         self.sync_inputs(window, cx);
     }
     fn render_list_range(
@@ -266,6 +267,7 @@ impl Desktop {
         } else {
             Vec::new()
         };
+        self.arm_tasks(window, cx);
         if !success {
             if let Some(slot) = self.list_slots.borrow_mut().get_mut(id) {
                 slot.frame_failed = true;
@@ -300,5 +302,124 @@ impl Desktop {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod task_pump_tests {
+    use super::*;
+    use gpui::test::TestWindowExt;
+    use std::ffi::{CString, c_char, c_void};
+    struct Host {
+        pending: bool,
+        mount_on_list: bool,
+        list_replies: usize,
+        ticks: usize,
+        reply: CString,
+    }
+    fn snapshot() -> serde_json::Value {
+        json!({"title":"List tasks","width":640,"height":480,
+            "root":{"kind":"virtual_list","id":"items","styles":{"width":"full","height":"400"},
+            "list":{"generation":1,"count":100,"row_height":32,"estimated_height":32,"overscan":0}}})
+    }
+    unsafe extern "C" fn callback(ctx: *mut c_void, data: *const u8, len: usize) -> *const c_char {
+        let host = unsafe { &mut *ctx.cast::<Host>() };
+        let request: serde_json::Value =
+            serde_json::from_slice(unsafe { std::slice::from_raw_parts(data, len) }).unwrap();
+        let mut reply = if request["op"] == "tasks" {
+            host.ticks += 1;
+            host.pending = false;
+            json!({"tasks_pending":false})
+        } else {
+            let mut rows = Vec::new();
+            if request["op"] == "list" {
+                host.list_replies += 1;
+                host.pending = host.mount_on_list;
+                for index in request["first"].as_u64().unwrap()..request["finish"].as_u64().unwrap()
+                {
+                    rows.push(
+                        json!({"kind":"text","id":format!("row{index}"),"text":"loading",
+                        "item_key":format!("key{index}"),"list_index":index}),
+                    );
+                }
+            }
+            json!({"snapshot":snapshot(),"rows":rows,"tasks_pending":host.pending})
+        };
+        if request["op"] == "ready" {
+            reply["capabilities"] = json!({"task_pump":true});
+        }
+        host.reply = CString::new(reply.to_string()).unwrap();
+        host.reply.as_ptr()
+    }
+    #[gpui::test]
+    fn task_pump_successful_real_list_paths_wake_idle_without_notify(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for finish_only in [false, true] {
+            let mut host = Host {
+                pending: false,
+                mount_on_list: false,
+                list_replies: 0,
+                ticks: 0,
+                reply: CString::new("").unwrap(),
+            };
+            cx.update(gpui::init);
+            let bridge = Bridge {
+                callback,
+                context: (&mut host as *mut Host).cast(),
+            };
+            let mut desktop = None;
+            let (_, cx) = cx.add_window_view(|window, cx| {
+                let view = cx.new(|cx| {
+                    Desktop::new(
+                        Snapshot::parse(&snapshot().to_string()).unwrap(),
+                        bridge,
+                        window,
+                        cx,
+                    )
+                });
+                desktop = Some(view.clone());
+                gpui::base::Root::new(view, window, cx)
+            });
+            let view = desktop.unwrap();
+            cx.update(|window, _| Desktop::schedule_ready(&view, window, false));
+            cx.update(|window, app| {
+                window.render_frame(app);
+                window.simulate_next_frame(app);
+            });
+            cx.run_until_parked();
+            assert_eq!(host.ticks, 0);
+            assert!(!view.read_with(cx, |view, _| view.task_running));
+            host.mount_on_list = true;
+            let before = host.list_replies;
+            if finish_only {
+                cx.update(|window, app| {
+                    view.update(app, |view, cx| view.finish_list_frame("items", window, cx))
+                });
+            } else {
+                // A real scroll/layout invokes the uniform-list row provider
+                // after root render has already checked the idle pending flag.
+                cx.update(|window, app| {
+                    view.update(app, |view, _| {
+                        let slots = view.list_slots.borrow();
+                        if let Scroll::Uniform(handle) = &slots["items"].scroll {
+                            handle.scroll_to_item_strict(50, ScrollStrategy::Top);
+                        }
+                    });
+                    window.render_frame(app);
+                });
+            }
+            assert!(host.list_replies > before);
+            // No notify, render_frame or unrelated event after this real list callback.
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.run_until_parked();
+            assert_eq!(host.ticks, 1, "finish_only={finish_only}");
+            cx.background_executor
+                .advance_clock(std::time::Duration::from_millis(64));
+            cx.run_until_parked();
+            assert_eq!(host.ticks, 1);
+        }
     }
 }
