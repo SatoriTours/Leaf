@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-17-component-async-lifecycle-design.md`（用户在原会话回复“继续”，确认规格后进入本计划阶段）。
 
-状态：计划已获批准并执行中。Task1–5 已实现并独立验收；Task6–7 待执行。实际命令、退出码及审查证据见同日期验证记录和执行 ledger；以下预期断言本身不代表已取得的证据。
+状态：计划已获批准并执行中。Task1–5 已实现并独立验收；Task6代码与静态审查完成，Windows平台执行仍NotRun；Task7待执行。实际命令、退出码及审查证据见同日期验证记录和执行 ledger；以下预期断言本身不代表已取得的证据。
 
 ## Global Constraints
 
@@ -163,11 +163,11 @@ check statusRevision == revisionBeforeStatus
 
 ## Task 6：Win32安全tick与关闭
 
-**Files:** 修改`src/leaf/backends/win32/host.nim`、必要的`host_bridge.nim/api.nim`；新`tests/windows/test_component_tasks.nim`，扩展`tests/windows/test_win32_host.nim`；仅若公共native session需声明泵能力时修改`src/leaf/backend_session.nim`。
+**Files:** 修改`src/leaf/backends/win32/host.nim`及公开运行入口`src/leaf/backends/win32.nim`（仅最终收尾与owner移交）、必要的`host_bridge.nim/api.nim`；新`tests/windows/test_component_tasks.nim`，扩展`tests/windows/test_win32_host.nim`；仅若公共native session需声明泵能力时修改`src/leaf/backend_session.nim`。
 
 **Interfaces:** Win32宿主调用Task4的pumpTasks/closeRuntime和Task5的configureTaskPump/taskPumpPending；新增内部`armTaskTick(host)`、`disarmTaskTick(host)`，使用与close重试不同的timer/message编号；WndProc只设待处理标记。继承现有host拥有线程与session lease检查，不自建后台宿主服务。
 
-- [ ] **Step 1: 写Windows RED测试。** 用户未点击时worker结果可更新界面；WndProc/busy/hook期间不执行回调，普通tick恢复后交付；初始无任务后动态挂载；task timer与close重试同时发生时均不丢失；临时换绑保留任务，final close失效旧结果。
+- [x] **Step 1: 写Windows RED测试。** 用户未点击时worker结果可更新界面；WndProc/busy/hook期间不执行回调，普通tick恢复后交付；初始无任务后动态挂载；task timer与close重试同时发生时均不丢失；临时换绑保留任务，final close失效旧结果。
 
 ```nim
 check callbacksInsideWndProc == 0
@@ -178,9 +178,11 @@ check deliveredAfterFinalClose == 0
 ```
 
 - [ ] **Step 2: 验证RED。** 在真实Windows环境运行`nim c -r scripts/test_win32.nim`，新测试必须对缺失行为失败；没有Windows时只完成可用的源码/交叉编译检查并记NotRun，不能宣称已取得Windows RED/GREEN。
-- [ ] **Step 3: 实现host集成。** 待任务标记在原有普通Nim安全tick消费；close/busy优先级、消息编号、取消timer和资源lease关闭按既有host协议处理。宿主关闭路径不join worker；最终Runtime清理按Task4普通边界处理。
+- [x] **Step 3: 实现host集成。** 待任务标记在原有普通Nim安全tick消费；close/busy优先级、消息编号、取消timer和资源lease关闭按既有host协议处理。宿主关闭路径不join worker；最终Runtime清理按Task4普通边界处理。
 - [ ] **Step 4: 验证GREEN。** Windows重跑官方runner及已有控件/输入/测量回归；记录实际工具链、系统和提交身份。当前Linux只能跑平台无关任务/host_state测试及可用交叉编译，不把它们记为Windows运行通过。
-- [ ] **Step 5: 提交。** `feat: pump component tasks at Win32 safe boundaries`；平台证据不足时任务代码与验收状态分开记录。
+- [x] **Step 5: 提交。** `feat: pump component tasks at Win32 safe boundaries`；平台证据不足时任务代码与验收状态分开记录。
+
+代码及静态Spec/Quality验收已通过，Critical0/Important0/Minor0。Step2/4真实Windows执行仍NotRun，保留未完成勾选；Linux36项与六套目标语义/C生成不替代平台行为。按本计划允许的无Windows分支，Task7可继续，最终交付仍明确这一平台限制。
 
 ## Task 7：示例、SDK搬迁、性能与整体验收
 

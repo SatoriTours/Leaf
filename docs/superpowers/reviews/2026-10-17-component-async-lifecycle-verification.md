@@ -152,3 +152,19 @@ Task5 round1修复已冻结：I1 `9e8ac94`在真实list range/finish成功响应
 Task5 round1独立局部复核已确认I1/I2/I3全部resolved，Spec compliance/Quality Approved，Critical0/Important0/Minor0。协调完整读取`task-5-review-fix-1.md`，报告及只读审计副本保存空间外保管区。Task5任务门禁通过，最终源码`071d3ffac8f04244e257a838f435e285b4b50273`；这不代表官方Nim全量、真实native四组合、SDK或跨平台验收已完成。Task6在保存本阶段干净基线后接入Win32普通安全tick、独立任务timer及最终关闭。
 
 Task7公共文档须说明GpuiRunError与cleanupOwner两种显式重试方式、out slot必须为空、exitStatus的none/some(0)/some(nonzero)、普通边界重试及成功后释放owner/异常引用。两项未动态覆盖的异常组合继续NotRun，不冒称本轮已运行。
+
+## Task6 接口与环境裁定（代码已静态验收）
+
+只读核对确认公开runNative此前newRuntime后仅defer destroyHost；BackendSession.dispose为可复用卸载，不终结Runtime。因此最小扩展授权backends/win32.nim在native资源退出后的普通边界closeRuntime，错误/status与未完成Host/Runtime owner明确移交。Host失败时必须以Win32RunError保留双owner，不仅输出Runtime后返回整数；caller先destroyHost、再closeRuntime。无GPUI依赖/core扩展，WndProc及通用卸载不join。
+
+工具发现已纠正：残留Linux LLVM-MinGW目录的wrapper --version实际失败127，clang-23目标、windows.h及libuser32.a缺失，不能算可用交叉工具链；PE版gcc当前不能运行。现有Nim2.2.6 Linux及系统LLVM仅支持进一步尝试语义/C生成等检查，完整PE构建尚未确认，真实Windows仍NotRun。不启动停止的Windows容器或安装工具；最终以真实命令/日志身份记录，目录存在不当作工具可用证据。
+
+## Task6 实际检查（静态Approved，Windows NotRun）
+
+源码提交`6d3ea46b57ccfa55af4f13a60dd9ab13a5bc6028`仅含五个授权Win32源码/测试文件。协调完整读报告，核对五文件checkout/Git/改动集合、30日志SHA、110备份产物SHA及467个生成文件归档身份。Linux host_state6/delivery15/shutdown15共36项实际通过，不能证明Win32新行为；最终六Windows套件仅Nim目标语义及C生成EXIT0，未编译C SDK ABI断言、未链接PE、未执行Windows用例。新任务/公开入口最终全输入一致，其他五目标套件只差未导入的新测试；Linux广域输入差异为三Windows文件，按实际未改Linux依赖复用记录。
+
+已编写15个任务/公开入口及一个构造失败用例，覆盖timer、busy/hook、换绑、双owner、整数/异常与重试；真实USER32 CBT veto仅存在测试中，均尚未执行。官方Windows runner在Linux包装1/直接2明确NotRun；clang Windows C探针缺目标CRT退出1、残留MinGW wrapper127属于环境失败，不是行为RED。旧库SHA不变，完整证据已空间外稳定保存。固定范围交同一架构验收Agent，Task6尚未通过门禁，Task7未开始实现。
+
+Task6独立验收已确认静态Spec compliance/Quality Approved，Critical0/Important0/Minor0，未发现固定五文件明确缺陷；Windows平台行为验收明确NotRun，不授予平台通过结论。协调完整读取`task-6-review.md`，审查报告与独立只读审计另存空间外保管区。验收核对103项artifact-index、110项备份与467个生成文件逐SHA，不只依据文件数量；WindowsC生成depfiles为空时用源import、生成模块列表及输入字节判断复用，没有把空depfiles当完整依赖证明。
+
+Task6代码门禁通过，最终源码`6d3ea46b57ccfa55af4f13a60dd9ab13a5bc6028`。计划保留Step2/4真实Windows执行未勾选，Task7按既定无Windows分支推进；取得可用Windows环境后仍需另行跑官方runner、平台ABI断言及实际timer/关闭/双owner用例。后续Linux/native/SDK验收不能消除这一限制。
