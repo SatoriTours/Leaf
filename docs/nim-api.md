@@ -101,3 +101,19 @@ let actions = views:
 页面生命周期由框架维护：默认 `PageRetention.retainState`，离开时移除该页宿主与活动事件、保留组件身份和 State，返回时分配新宿主句柄；`PageRetention.disposeOnLeave` 在离开被接受后递归卸载页面组件，旧 State 句柄变为 disposed，返回时重新初始化。隐藏页仍可接受 State 写入，但不 render、不导出；恢复时读取最新已接受值。整组保留页与列表暖行在 router 组件卸载时释放。保留不承诺光标、选区、焦点、滚动位置或未完成 IME 组合；重新挂载的输入控件建立新 Entity。
 
 `PageOutletSpec`、`pageOutlet`、`outletSpec` 以及 owner/accounting helper 都是运行时内部入口，不从 `leaf/components` 导出。`DescriptionKind` 是可见枚举，新增 `pageOutlet` 值：对描述类型写穷尽 `case` 的低层代码需要显式处理该值，普通 `host`/`component` 使用方式不变。`ComponentRouter` 的配置字节与所属组件一起计入现有 `MaxTreeBytes` 预算，未显示的 controller 也不例外。完整可运行示例见 `examples/component_pages.nim`。
+
+## 组件任务与生命周期
+
+`import leaf/components` 导出 `ctx.onMount/onActivate/onDeactivate/onDispose`、`ctx.taskScope(retention=cancelOnDeactivate)`、`startTask` 和 `cancel`。初始化只登记回调；只有接受的转换才触发生命周期。首次可见也可能是 `onActivate`（例如最初为暖行的组件），不要假定 `onMount` 总先到，或在两处无条件重复启动任务。示例 [component_tasks.nim](../examples/component_tasks.nim) 导出 `tasksApplication(title="Leaf component tasks")`，演示加载、错误重试、默认离开取消、隐藏继续和离开销毁。
+
+`work(input:string,ctx:WorkerContext):string {.nimcall,gcsafe.}` 只能接收复制的字节和借用的取消信号，不能捕获 UI 闭包、State、Runtime、Model/Query 或连接；不使用 `cast(gcsafe)` 绕过检查。`ctx.cancelled` 是协作式取消，work 不得保存 ctx。结果/错误处理器留在 UI scope，更新 State 后走正常宿主接受门禁。相同 owner/key 的新请求替代旧请求，旧完成不可写回重建或换绑后的 owner。取消不会撤销已经发生的外部写入，重试应考虑幂等性。
+
+默认离开页面/活动列表行取消；`keepWhileRetained` 允许隐藏继续，隐藏 State 更新不 render，返回时呈现完成结果。`disposeOnLeave`、暖行淘汰和 Runtime 关闭仍取消保留任务。取消或替换的旧 work 在真正退出并 ack 前仍占任务/结果额度。默认两条 worker、64 个未收尾任务；单 input 1MiB、key 256 UTF-8 字节、总 input 8MiB；默认结果 65536 字节，上限 1MiB，总结果预留 8MiB。错误消息有界为 4KiB 且保持 UTF-8。
+
+`pumpTasks(runtime)` 每轮最多认领 64 条完成/回调，4ms 是开始下一条的调度预算，不抢占当前 handler。`TaskPumpReport.delivered` 包括有效 work 错误的完成 claim；`callbacks` 是实际 handler 数；`failed` 是交付/作用域异常数，不是 work 错误数。未提供 onError 仍消费完成并记录有界错误。完成回调失败或其 UI 更新拒绝不会重放同一消息。`taskPumpPending` 只查 metadata，不消费、render、导出 Snapshot 或变更 revision。
+
+GPUI 和 Win32 在 ordinary UI 安全点自动泵；headless 工具/SDK fixture 自行在有界循环显式 `pumpTasks`，CLI 普通 `--headless` 不等待后台任务。空 tick 不 render、不导出 Snapshot、不发送 UI 树、不增加 revision。ABI1 实际更新仍可能传完整活动树，不能套用 typed 增量路径的成本结论。
+
+普通退出必须 `closeRuntime`。业务回调内关闭先使 State 无效/关投递门，未 claim 的 dispose 与 pool 回收留到 ordinary 边界。scope 拒绝后可显式再次关闭，不能把 closed 当全部清理完成。`runDesktop(...,cleanupOwner=addr owner)` 和 `GpuiRunError(cleanupRuntime,exitStatus)` 可移交待重试 Runtime；out slot 必须预先为 nil，无 out 时整数状态（含 0）保存在异常的 `some(status)`，原异常无整数时为 none，msg/parent 保留。重试成功后释放 owner/异常引用。
+
+Win32 `runNative` 同样支持 `cleanupOwner` 和 `Win32RunError(cleanupRuntime,cleanupHost,exitStatus)`。若 Host 资源仍未释放，即使提供 Runtime out 也必须处理双 owner 异常：先 ordinary `cleanupHost.destroyHost()` 成功，再 `cleanupRuntime.closeRuntime()`；失败继续持有 owner。WndProc/renderer/native callback 不负责最终 join，也没有析构自动重试。

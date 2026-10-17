@@ -84,9 +84,9 @@ proc isolatedFixtureCommand*(sdk, project, test: string): tuple[exe: string, arg
     cache = windows_paths.compilerPath(cache)
     output = windows_paths.compilerPath(output)
     entry = windows_paths.compilerPath(entry)
-  result.args = @["c", "-r", "--skipUserCfg:on", "--skipParentCfg:on", "--skipProjCfg:on", "--noNimblePath",
-    "--path:" & sources, "--nimcache:" & cache, "--out:" & output]
-  result.args.add(ormCompilerArgs(sources))
+  result.args = @["c", "-r", "--threads:on", "--skipUserCfg:on", "--skipParentCfg:on", "--skipProjCfg:on", "--noNimblePath",
+    "--path:" & sources.replace("$", "$$"), "--nimcache:" & cache.replace("$", "$$"), "--out:" & output.replace("$", "$$")]
+  for argument in ormCompilerArgs(sources): result.args.add(argument.replace("$", "$$"))
   when defined(windows):
     # The relocated SDK ships MinGW at toolchain/mingw; never let the smoke
     # fall back to the runner's global gcc.
@@ -96,11 +96,40 @@ proc isolatedFixtureCommand*(sdk, project, test: string): tuple[exe: string, arg
     result.args.add(@["--cc:gcc", "--gcc.exe:" & configuredGcc, "--gcc.linkerexe:" & configuredGcc])
   result.args.add(entry)
 
+const sdkTaskFixtureSource* = """
+import std/[os, monotimes, times]
+import leaf/[core, widgets, components]
+proc work(input: string, ctx: WorkerContext): string {.nimcall, gcsafe.} = input
+var caption: State[string]
+var disposed = 0
+let Owner = defineComponent[int, State[string]]("SdkTaskFixture",
+  proc(ctx: MountContext, p: int): State[string] =
+    caption = ctx.state("loading")
+    ctx.onMount(proc(e: LifecycleContext) =
+      discard startTask(e.taskScope, "load", "后台完成", work,
+        proc(value: string) = discard caption.set(value)))
+    ctx.onDispose(proc(e: LifecycleContext) = inc disposed)
+    caption,
+  proc(ctx: ComponentContext, p: int, s: State[string]): UiDescription = host(text(ctx.value(s))))
+let rt = newRuntime(componentApplication(component(Owner, 0), "SDK task"))
+try:
+  let deadline = getMonoTime() + initDuration(seconds = 5)
+  while caption.read() != "后台完成":
+    discard rt.pumpTasks()
+    doAssert getMonoTime() < deadline, "SDK task completion timeout"
+    sleep(1)
+  doAssert caption.read() == "后台完成"
+  echo "SDK_TASK_RESULT=", caption.read()
+finally:
+  rt.closeRuntime()
+doAssert disposed == 1
+"""
+
 proc smokeSdk*(sdkPath: string, headlessOnly = false) =
   let sdk = absolutePath(sdkPath)
   let cli = sdk / (when defined(windows): "bin/leaf.exe" else: "bin/leaf")
   let environment = processEnvironment()
-  for key in ["NIM", "LEAF_LIBRARY", "LEAF_GPUI_ROOT", "LEAF_GPUI_LIBRARY"]: environment.del(key)
+  for key in ["NIM", "LEAF_LIBRARY", "LEAF_GPUI_ROOT", "LEAF_GPUI_LIBRARY", "LEAF_SDK"]: environment.del(key)
   let root = createTempDir("leaf sdk smoke ", "")
   defer: removeDir(root)
   let project = root / "smoke-app"
@@ -145,6 +174,13 @@ proc smokeSdk*(sdkPath: string, headlessOnly = false) =
   for test in ["test_home", "test_notes"]:
     let fixture = isolatedFixtureCommand(sdk, project, test)
     discard checkedCommand(fixture.exe, fixture.args, project, environment)
+  # This fixture owns its explicit headless task pump; CLI --headless keeps
+  # its existing synchronous semantics. Compile solely against relocated src.
+  writeFile(project / "tests/test_component_tasks.nim", sdkTaskFixtureSource)
+  let taskFixture = isolatedFixtureCommand(sdk, project, "test_component_tasks")
+  let taskOutput = checkedCommand(taskFixture.exe, taskFixture.args, project, environment)
+  require("SDK_TASK_RESULT=后台完成" in taskOutput, "relocated SDK worker did not deliver its result: " & taskOutput)
+  echo "SDK_TASK_RESULT=后台完成 (relocated SDK, explicit pumpTasks)"
   let otherProject = root / "other-app"
   environment["LEAF_DATABASE_PATH"] = root / "other.sqlite3"
   createDir(otherProject)

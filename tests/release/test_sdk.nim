@@ -791,3 +791,26 @@ try {
         "-Helper",RepositoryRoot/"scripts/prepare_windows_https.ps1","-GitRoot",gitRoot])
       checkpoint executed.output
       check executed.exitCode==0
+
+suite "SDK component worker result fixture":
+  test "fixture runs a real worker and asserts completion rather than only compiling":
+    let base = createTempDir("leaf SDK task 中文 $ ", "")
+    defer: removeDir(base)
+    createDir(base / "tests")
+    writeFile(base / "tests/task_fixture.nim", sdkTaskFixtureSource)
+    let compiler = getEnv("NIM", findExe("nim"))
+    check compiler.len > 0
+    var arguments: seq[string]
+    when not defined(windows):
+      # Run the real SDK fixture argument builder. This unit uses current src;
+      # the final smoke executes the same fixture against the relocated SDK.
+      arguments = isolatedFixtureCommand(RepositoryRoot, base, "task_fixture").args
+    else:
+      arguments = @["c", "-r", "--threads:on", "--skipUserCfg:on", "--skipParentCfg:on",
+        "--skipProjCfg:on", "--noNimblePath", "--path:" & (RepositoryRoot / "src").replace("$", "$$"),
+        "--nimcache:" & (base / "cache").replace("$", "$$"),
+        "--out:" & (base / "task_fixture").replace("$", "$$"), base / "tests/task_fixture.nim"]
+    let executed = runCommand(compiler, arguments, base)
+    checkpoint executed.output
+    check executed.exitCode == 0
+    check "SDK_TASK_RESULT=后台完成" in executed.output

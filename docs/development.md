@@ -69,3 +69,27 @@ JSONL 的 `dpi` 记录包含 `awareness`、`status` 和 `error_code`。首帧的
 `benchmarks/components_native.nim` 使用真实 GPUI 窗口。设置 `LEAF_GPUI_LIBRARY` 和 `LEAF_BENCH_MODE`，参数由 `LEAF_BENCH_STATIC/ITERATIONS/WARMUP/ROUNDS/OUTPUT` 指定。typed 模式测量 Rust prepare/apply 与显式 GPUI draw（layout+paint 合计），event-to-frame 含调度；纯 layout 无公开独立测量时保留空值。报告必须标明 Rust profile、库 hash、实际 GPU 或软件渲染，不能与 CPU 微基准混算。
 
 SDK 打包复制所有新 Nim 模块及 `include/leaf_gpui_v2.h`。实际搬迁回归应清除 `NIM/LEAF_LIBRARY/LEAF_GPUI_ROOT/LEAF_GPUI_LIBRARY` 覆盖，检查 doctor 指向随包编译器和源码，默认 GPUI build 的 staged DLL hash 与 SDK lib 相同，再运行组件应用。Linux 测试不能替代 Windows ABI、IME、DPI 和窗口验收。
+
+## 后台任务的线程与退出边界
+
+用 `examples/component_tasks.nim` 的 load/retry/status/go-other/go-retained/go-disposed 稳定 key 复现任务流程；`fail` 模拟 work 错误。worker 只用输入字符串和 `WorkerContext.cancelled`，示例操作约 500ms 且每步检查取消。真实 I/O 应设置自身超时/截止时间，框架的 4ms 泵预算不限制 work，也不能中断一个正在执行的业务 handler。窗口资源释放时间与进程最终等待非合作 work 的退出时间是两个指标，不能以窗口消失宣称 worker 已结束。
+
+数据库任务必须在线程内自建连接，Model/Query 也不能从 UI 线程传入。同步 `withDatabase` 只在本次调用栈中使用，不跨 await；退出时 finally 关闭本任务拥有的连接。例如只从 input 接收数据库路径：
+
+```nim
+import leaf/[sqlite, model, components]
+
+proc databaseWork(input: string, ctx: WorkerContext): string {.nimcall, gcsafe.} =
+  if ctx.cancelled: return "cancelled"
+  let db = openDatabase(input)
+  try:
+    withDatabase(db):
+      # Model/Query operations created here use this thread's own connection.
+      result = $db.query("SELECT 1").len
+  finally:
+    db.close()
+```
+
+SQLite 默认 busy timeout 为 5 秒；这不是整个任务的总超时。长查询、网络调用和第三方库需各自的操作超时及取消策略；取消不能回滚框架外已经提交的副作用。业务需要幂等键/事务时由业务定义。最终 ordinary close 可能等待不合作的 work，报告窗口与进程退出观测时间时须分列。
+
+新旧 GPUI 必须严格协商 task pump，旧库在任何新 work 启动前明确拒绝。不要用普通 HostConsumer 的存在推断支持，也不要在 status/ready/rendering 查询中驱动任务。Win32 任务 timer 独立于 close-retry timer；WndProc 只置任务标记，业务交付在保留 thread/lease/session/busy/hook 保护的 ordinary safeTurn。

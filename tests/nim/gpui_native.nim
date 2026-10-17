@@ -36,7 +36,8 @@ proc main():int =
     writeStatus(env["LEAF_WATCH_STATUS"],0,"")
   let example=getEnv("LEAF_TEST_EXAMPLE")=="1"
   let pages=getEnv("LEAF_TEST_PAGES")=="1"
-  if not example and not pages and getEnv("LEAF_TEST_SKIP_FAIL")!="1":
+  let tasks=getEnv("LEAF_TEST_TASKS")=="1"
+  if not example and not pages and not tasks and getEnv("LEAF_TEST_SKIP_FAIL")!="1":
     block:
       env["LEAF_TEST_FAIL_LIST"]="1"
       let failedLog=directory/"failed-events.jsonl"
@@ -62,7 +63,7 @@ proc main():int =
     require(not child.poll(),"GPUI window exited before readiness: " & child.output)
     require(getMonoTime()<deadline,"GPUI window readiness timeout")
     sleep(20)
-  let window=command(xdotool,@["search","--name",(if example:"^Leaf" elif pages:"^Leaf component pages$" else:"^Leaf GPUI native smoke$")],root).splitLines()[0]
+  let window=command(xdotool,@["search","--name",(if example:"^Leaf" elif pages:"^Leaf component pages$" elif tasks:"^Leaf component tasks$" else:"^Leaf GPUI native smoke$")],root).splitLines()[0]
   discard command(xdotool,@["windowfocus",window],root)
   if getEnv("LEAF_TEST_RENDERING")=="1":
     let receipt=readFile(directory/"ready.json")
@@ -160,7 +161,7 @@ proc main():int =
         clickTarget("row-" & $index)
         awaitCaption("row-" & $index,$index & ":1")
     echo "Passed batched variable-height viewport, independent Counter, visible row State and scrolling"
-  elif pages:
+  elif pages or tasks:
     discard  # the pages fixture starts on its own main page; no initial counter click
   else:
     clickTarget("add")
@@ -173,11 +174,86 @@ proc main():int =
       require(getMonoTime()<deadline,"expected " & expected & "; got " & status())
       require(not child.poll(),"GPUI test application exited")
       sleep(20)
+  var taskMainResultsBeforeClose = 0
   if lists:discard
   elif example:
     awaitStatus("1")
     clickTarget("reset")
     awaitStatus("0")
+  elif tasks:
+    proc taskCaption(): string =
+      proc find(node: JsonNode): string =
+        if node.kind != JObject: return ""
+        if node{"id"}.getStr.endsWith(":status"): return node{"text"}.getStr
+        if node.hasKey("children"):
+          for item in node["children"]:
+            let caption = find(item)
+            if caption.len > 0: return caption
+      find(parseFile(dump)["root"])
+    proc awaitTask(expected: string) =
+      let until = getMonoTime() + initDuration(seconds = 5)
+      while taskCaption() != expected:
+        require(not child.poll(), "task window exited: " & child.output)
+        require(getMonoTime() < until, "expected " & expected & "; got " & taskCaption())
+        sleep(10)
+    proc awaitTrace(expected: string) =
+      let until = getMonoTime() + initDuration(seconds = 5)
+      while expected notin child.output:
+        require(not child.poll(), "task window exited: " & child.output)
+        require(getMonoTime() < until, "task event missing: " & expected)
+        sleep(10)
+    awaitTask("main:idle")
+    clickTarget("load")
+    awaitTask("main:loading")
+    awaitTask("main:后台完成") # no additional click/event drives this completion
+    clickTarget("fail")
+    awaitTask("main:error")
+    awaitTrace("tasks:error:main")
+    clickTarget("retry")
+    awaitTask("main:后台完成")
+    discard child.poll()
+    let beforeCancel = child.output.count("tasks:result:main")
+    clickTarget("load")
+    awaitTask("main:loading")
+    clickTarget("go-other")
+    awaitTask("other:idle")
+    awaitTrace("tasks:deactivate:main")
+    sleep(700) # exceeds the example worker's bounded 500ms operation
+    discard child.poll()
+    require(child.output.count("tasks:result:main") == beforeCancel, "default leave delivered stale completion")
+    clickTarget("go-main")
+    awaitTask("main:cancelled")
+    awaitTrace("tasks:activate:main")
+    clickTarget("go-retained")
+    awaitTask("retained:idle")
+    clickTarget("load")
+    awaitTask("retained:loading")
+    clickTarget("go-other")
+    awaitTask("other:idle")
+    awaitTrace("tasks:result:retained") # hidden completion without another input
+    require(taskCaption() == "other:idle", "hidden State changed the visible page")
+    clickTarget("go-retained")
+    awaitTask("retained:后台完成")
+    clickTarget("go-disposed")
+    awaitTask("disposed:idle")
+    clickTarget("load")
+    awaitTask("disposed:loading")
+    clickTarget("go-other")
+    awaitTask("other:idle")
+    awaitTrace("tasks:dispose:disposed")
+    sleep(700)
+    discard child.poll()
+    require("tasks:result:disposed" notin child.output, "disposed page received completion")
+    clickTarget("go-disposed")
+    awaitTask("disposed:idle") # new owner, not previous loading/completed State
+    clickTarget("go-main")
+    awaitTask("main:cancelled")
+    discard child.poll()
+    require(child.output.count("tasks:mount:main") == 1, "main owner mounted twice")
+    taskMainResultsBeforeClose = child.output.count("tasks:result:main")
+    clickTarget("load")
+    awaitTask("main:loading") # close with independent work still in flight
+    echo "Passed task window: timer completion, error/retry, cancel, keep hidden/return, dispose/recreate"
   elif pages:
     proc pagesCaption(key:string):string =
       proc find(node:JsonNode,key:string):string =
@@ -264,13 +340,35 @@ proc main():int =
         require(getMonoTime()<until,"watch error did not show/clear at revision " & $revision)
         sleep(20)
     echo "Passed native watch error show and clear"
+  let closeStarted = getMonoTime()
   discard command(xdotool,@["key","ctrl+q"],root)
+  var windowGoneMs = -1.0
   let closing=getMonoTime()+initDuration(seconds=5)
   while not child.poll():
     require(getMonoTime()<closing,"GPUI close timeout")
-    sleep(20)
+    if tasks and windowGoneMs < 0:
+      let probe = startManaged(xdotool, @["getwindowname", window], root)
+      while not probe.poll():
+        require(getMonoTime() < closing, "window close observation timeout")
+        sleep(1)
+      if probe.code != 0: windowGoneMs = float64((getMonoTime()-closeStarted).inNanoseconds)/1e6
+      probe.close()
+    sleep(10)
   require(child.code==0,"GPUI close failed: " & child.output)
-  if lists:echo "Passed real variable-height list window and close"
+  if tasks:
+    if windowGoneMs < 0:
+      let probe = startManaged(xdotool, @["getwindowname", window], root)
+      while not probe.poll(): sleep(1)
+      require(probe.code != 0, "task process exited but its window is still live")
+      probe.close()
+      windowGoneMs = float64((getMonoTime()-closeStarted).inNanoseconds)/1e6
+    require(child.output.count("tasks:result:main") == taskMainResultsBeforeClose, "completion delivered after terminal close")
+    for mode in ["main", "retained", "other"]:
+      require(child.output.count("tasks:dispose:" & mode) == 1, "final dispose count wrong: " & mode)
+    require(child.output.count("tasks:dispose:disposed") == 2, "dispose-on-leave/recreated owner cleanup count wrong")
+    echo $(%*{"window_gone_observed_ms": windowGoneMs, "process_exit_observed_ms": float64((getMonoTime()-closeStarted).inNanoseconds)/1e6})
+    echo "Passed real task window and independent final lifecycle/close assertions"
+  elif lists:echo "Passed real variable-height list window and close"
   elif example:echo "Passed real component example window, increment, reset, ready and close"
   elif pages:echo "Passed real component pages window: navigate, edit, reset, unknown address and close"
   else:echo "Passed real Nim + GPUI + GPUI Kit window, click, input, Enter, ready, failed viewport and close"
