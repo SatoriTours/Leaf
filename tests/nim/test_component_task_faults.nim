@@ -354,3 +354,155 @@ suite "metadata snapshot cache and publication":
     finally:
       session.close()
       rt.finalizeTaskPoolInternal()
+
+var viewportInspectRequest,viewportInspectAck:Atomic[int]
+var viewportInspectedCancel:Atomic[bool]
+proc viewportObservedWork(input:string,ctx:WorkerContext):string {.nimcall,gcsafe.}=
+  if input=="old":
+    discard oldBegan.fetchAdd(1)
+    while not finishOld.load():
+      let inspection=viewportInspectRequest.load()
+      if inspection>viewportInspectAck.load():
+        viewportInspectedCancel.store(ctx.cancelled)
+        viewportInspectAck.store(inspection)
+      sleep(1)
+    if ctx.cancelled:discard oldSawCancel.fetchAdd(1)
+    discard oldEnded.fetchAdd(1)
+  else:discard newBegan.fetchAdd(1)
+  input
+
+var viewportScope:TaskScope
+var viewportState:State[int]
+var viewportRouter:ComponentRouter
+var viewportMounts:seq[int]
+let ViewportRow=defineComponent[int,int]("TaskViewportRow",
+  proc(ctx:MountContext,index:int):int=
+    ctx.onMount(proc(event:LifecycleContext)=viewportMounts.add(index))
+    index,
+  proc(ctx:ComponentContext,index,model:int):UiDescription=host(text($index)))
+let ViewportOwner=defineComponent[int,State[int]]("TaskViewportOwner",
+  proc(ctx:MountContext,p:int):State[int]=
+    viewportScope=ctx.taskScope()
+    viewportRouter=newComponentRouter(ctx,
+      @[Route(name:"a",path:"/",page:"page",view:"a"),Route(name:"b",path:"/b",page:"page",view:"b")],
+      @[ComponentPageDefinition(name:"page",views: @["a","b"],
+        build:proc(view:string):UiDescription=host(text(view,key="viewport-page")))],"/")
+    result=ctx.state(0);viewportState=result,
+  proc(ctx:ComponentContext,p:int,s:State[int]):UiDescription=
+    hostShell(column(@[]), @[
+      renderPage(ctx,viewportRouter),
+      componentList("viewport-rows",@["0","1"],proc(index:int):UiDescription=component(ViewportRow,index),rowHeight=20,overscan=0),
+      host(text($ctx.value(s),key="viewport-value"))]))
+
+suite "independent viewport task recovery":
+  test "prepare and apply viewport rejection release the attempt for State route start and cancel recovery":
+    for gate in ["prepare","apply"]:
+      oldBegan.store(0);oldEnded.store(0);oldSawCancel.store(0);newBegan.store(0);finishOld.store(false)
+      viewportMounts.setLen(0)
+      viewportInspectRequest.store(0);viewportInspectAck.store(0);viewportInspectedCancel.store(false)
+      var armed=false
+      let rt=newRuntime(componentApplication(component(ViewportOwner,0),"viewport-reject"))
+      discard rt.materialize("viewport-rows",0,1)
+      discard rt.pumpTasks()
+      let service=rt.taskServiceInternal()
+      var consumerRevision:uint64
+      let session=attachHostSession(rt,HostConsumer(sessionId:841,
+        prepare:proc(batch:HostBatch)=
+          if armed and gate=="prepare":fail("viewport prepare"),
+        apply:proc()=
+          if armed and gate=="apply":fail("viewport apply"),
+        accept:proc(revision:uint64) {.raises:[].}=consumerRevision=revision,
+        discardPrepared:proc() {.raises:[].}=discard))
+      var original,recovered:TaskHandle
+      try:
+        rt.uiTask(proc()=original=startTask(viewportScope,"request","old",viewportObservedWork,proc(v:string)=discard))
+        discard rt.pumpTasks()
+        awaitAtomic(oldBegan,1)
+        let before=rt.acceptedRevision
+        let rowId=rt.find("viewport-rows").children[0].id
+        let rowHandle=session.handleFor(rowId)
+        armed=true
+        expect UiError:discard rt.materialize("viewport-rows",1,2)
+        armed=false
+        check rt.acceptedRevision==before
+        check consumerRevision==before
+        check session.revision==before
+        check viewportRouter.currentRoute.path=="/"
+        check viewportState.read()==0
+        check rt.find("viewport-rows").children[0].listIndex==0
+        check uint64(session.handleFor(rowId))==uint64(rowHandle)
+        check service.taskCurrentInternal(original)
+        check service.taskWorkerStatsInternal().reservedTasks==1
+        check service.taskWorkerStatsInternal().inputBytes==3
+        check service.taskWorkerStatsInternal().resultBytes==65536
+        check newBegan.load()==0
+        viewportInspectRequest.store(1)
+        awaitAtomic(viewportInspectAck,1)
+        check not viewportInspectedCancel.load()
+        var recoveryError=""
+        try:
+          rt.uiTask(proc()=
+            cancel(original)
+            recovered=startTask(viewportScope,"request","new",viewportObservedWork,proc(v:string)=discard)
+            viewportState.set(7)
+            discard viewportRouter.navigate("/b"))
+        except UiError as error:recoveryError=error.msg
+        check recoveryError==""
+        check rt.acceptedRevision==before+1
+        check consumerRevision==before+1
+        check session.revision==before+1
+        check viewportRouter.currentRoute.path=="/b"
+        check viewportState.read()==7
+        check rt.find("viewport-value").node.text=="7"
+        check not service.taskCurrentInternal(original)
+        check service.taskCurrentInternal(recovered)
+        check newBegan.load()==0
+        if recoveryError.len==0:
+          discard rt.pumpTasks()
+          awaitAtomic(newBegan,1)
+        finishOld.store(true)
+        awaitAtomic(oldEnded,1)
+        check oldSawCancel.load()==1
+      finally:
+        armed=false;finishOld.store(true)
+        session.close()
+        rt.finalizeTaskPoolInternal()
+
+  test "accepted viewport scope-exit error keeps publication and lifecycle without replay":
+    viewportMounts.setLen(0)
+    var rejectExit=false
+    let execution:ExecutionScope=proc(body:proc() {.closure.})=
+      body()
+      if rejectExit:fail("viewport accepted scope exit")
+    let rt=newRuntime(componentApplication(component(ViewportOwner,0),"viewport-exit",executionScope=execution))
+    discard rt.materialize("viewport-rows",0,1)
+    discard rt.pumpTasks()
+    var consumerRevision:uint64
+    let session=attachHostSession(rt,HostConsumer(sessionId:842,
+      prepare:proc(batch:HostBatch)=discard,
+      apply:proc()=discard,
+      accept:proc(revision:uint64) {.raises:[].}=consumerRevision=revision,
+      discardPrepared:proc() {.raises:[].}=discard))
+    try:
+      let before=rt.acceptedRevision
+      rejectExit=true
+      expect UiError:discard rt.materialize("viewport-rows",1,2)
+      rejectExit=false
+      check rt.acceptedRevision==before+1
+      check consumerRevision==before+1
+      check session.revision==before+1
+      check rt.find("viewport-rows").children[0].listIndex==1
+      check viewportMounts == @[0]
+      discard rt.pumpTasks()
+      check viewportMounts == @[0,1]
+      discard rt.pumpTasks()
+      check viewportMounts == @[0,1]
+      let accepted=rt.acceptedRevision
+      discard rt.flush()
+      check rt.acceptedRevision==accepted
+      rt.uiTask(proc()=viewportState.set(9))
+      check viewportState.read()==9
+    finally:
+      rejectExit=false
+      session.close()
+      rt.finalizeTaskPoolInternal()

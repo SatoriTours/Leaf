@@ -1013,6 +1013,10 @@ proc materializeImpl(runtime: Runtime, key: string, first, finish: int,
     result = materializeInto(candidate, key, first, finish, protected)
     runtime.gateAndPublish(candidate)
     runtime.safeDump()
+  except CatchableError:
+    if candidate.driver != nil and candidate.driver != runtime.driver:
+      candidate.driver.reject()
+    raise
   finally:
     runtime.inUpdate = false
 
