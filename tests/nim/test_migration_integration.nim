@@ -34,12 +34,14 @@ proc stamp(path: string): string =
   $value.toUnix & "." & $value.nanosecond
 
 proc snapshotTree(root: string): Table[string, string] =
-  ## Bytes plus exact mtime for the root, every file and every directory.
-  result["."] = "dir:" & stamp(root)
+  ## Bytes plus exact mtime for every file; directories by presence only,
+  ## because Windows commits a directory timestamp lazily and the parent of a
+  ## file written just before the snapshot can still report its previous stamp.
+  result["."] = "dir"
   for path in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
     let rel = relativePath(path, root)
     if dirExists(path):
-      result[rel & "/"] = "dir:" & stamp(path)
+      result[rel & "/"] = "dir"
     else:
       result[rel] = "file:" & stamp(path) & ":" & readFile(path)
 
