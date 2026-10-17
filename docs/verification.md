@@ -133,3 +133,17 @@ Linux 私有 Xvfb/Mesa 显示环境下，ABI1/2 × CACHE0/1 四组真实任务�
 完整 argv/exit、源码/库/工具链/profile SHA、失败分类及证据复用边界保留在 `target/verification/component-async-lifecycle/task7`，并有独立空间外报告与 manifests 备份；二进制不提交。Task1–6 已接受的接口和历史 RED/GREEN 以协调专门验证记录为准，本项没有冒称找回缺失原始日志。
 
 NotRun：真实 Windows/macOS、完整 Windows PE 构建、系统 IME、跨屏 DPI、内存工具/长期稳态 RSS、Snapshot-export 独立故障注入、diagnostic 异常及联合 Snapshot+error 原缺口、动态 wrongthread。Task6 代码/静态通过不代表 Windows 行为通过；框架额度归零也不证明系统零泄漏。Task7 与整分支仍需独立架构审查，不自动合并、推送或归档。
+
+## 最终整分支修复波（2026-10-17）
+
+独立整分支审查 `0159895415eba0f3da8634fa858f83c1d84afdf4` 为 Needs fixes（C0/I6/M0），发现首次接受构造的 cleanup owner 丢失、headless 不关闭、高层 run 吞 owner、ABI1 error 丢 pending、私有旧库路径及 native 关闭观测无界等待。原 Task7 通过记录属于历史输入，不代替这些边界；本波以源码提交 `1a79640bbf4b69b0fdb02ba978612a61f88f8a1e` 一组修复，仍待一次固定差异的独立 scoped 复核。
+
+共用 `RuntimeCleanupError` 接通构造/launcher ownership，保留原错误、status 和一次 close 尝试；headless 所有普通出口关闭 Runtime，继续不泵/不等任务；run 传播 pending Runtime/Host，有 out 的 status0 仍须检查 owner 并 ordinary retry。各 I1–I6 均有独立保存的真实 RED→GREEN。受影响 22 个 Nim 套件实际 EXIT0；后续公开 launcher 最终 10 项单独重跑替换该套件早期9项，合并口径为220个 OK标记、0 FAILED，默认真实旧库integration一项SKIPPED。显式原旧库integration另行双ABI验证实际 SHA `63ef5b8104253b14bfcda7dca45fe84cc8a8e3ce8840c1f2555cfdfec63af9a1` 和 startup 拒绝通过，普通兼容套件使用可构建双 ABI fixture。
+
+实际 worker 回归证明一个已 claim handler scope-exit 失败不重放、另一 worker 在途/入场拒绝保持 pending、恢复后只交付一次；Rust GPUI TestAppContext 验证合法 error+pending 后唯一 root timer 无额外 input/notify/二次 arm 自动继续并 idle 停止。两边分别测试，不冒称完整 Nim+GPUI 错误窗口。无 Snapshot 的合法响应没有虚构 Snapshot，transport/畸形响应单独拒绝。native probe 的共享 deadline、立即 defer close、挂起进程组和 FD 回收均实际验证；清理沿既有最多500ms TERM grace，最终测试预算仍可使旧无限轮询逻辑真实 RED。
+
+本波实际 Rust workspace55测试、fmt、clippy、production新库构建及 ABI161 均 EXIT0；没有把旧Rust52复用为新输入。新 production 库 default features/dev debug=0，SHA `353e5ba4d40bdeafe4b373dc3bee35f2522d796918ceb5b8ddcb695df3e8d545`。Windows现有task/host两套及高层native入口只做Nim语义/C生成，未编译C SDK、链接PE或运行Windows。
+
+新 SDK 以真实 `--commit 1a79640bbf4b69b0fdb02ba978612a61f88f8a1e`、新CLI/production库重新打包，包 SHA `0997f5ebf85e9d93dad4bf575cec6440d472288e053212861d7fa91d421fa43c`，仓库外 `/tmp/Leaf SDK 最终修复 搬迁 $ 1a79640b/leaf-sdk` 实际解包，210 个源码/头文件一致。清五项覆盖后 doctor、普通 build、完整 migration/CRUD/持久化 smoke、任务实际“后台完成”和公开 launcher 清理/重试 fixture 全部 EXIT0；后者断言重复headless/check/help/error退出的 State/dispose/线程回基线、workCalls=0，以及out/default拒绝后retry。Nim/source来自SDK自身，系统GCC与OS依赖库路径仍保留。旧三包不覆盖，a3包仅历史通过。
+
+本波没有重跑官方100套/4套或历史四native矩阵，也不把旧成功称本波新输入；本波具体argv/exit/输入/日志、每项复用差异和完整报告位于 `target/verification/component-async-lifecycle/final-fix-0159895`，空间外备份 `/tmp/leaf-component-async-final-fix-0159895`。所有旧报告与失败证据保留，协调专门verification不在本提交范围。真实Windows/macOS/PE/IME/DPI、内存工具/长期RSS、线程创建失败注入、原独立Snapshot-export/diagnostic异常/联合Snapshot+error/动态wrongthread仍NotRun；未采样GPU帧/FPS/renderer。不得据此宣称全平台或系统零泄漏；没有合并、推送或归档。
