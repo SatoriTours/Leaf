@@ -1,6 +1,6 @@
 # Leaf 组件异步任务与生命周期设计
 
-状态：用户已在原会话确认本规格；实施计划已形成，待审阅及确认执行方式。尚未实现产品代码。
+状态：规格与计划已获批准；Task1–7代码及任务独立门禁已完成，Task6 Windows平台行为仍NotRun。整分支最终审查尚未完成，未合并、推送或归档。
 
 日期：2026-10-17。基线：`53368cf2a554c52af092d129f0aeb2b592c8d78f`。
 
@@ -210,3 +210,11 @@ C detach只标记最终投递门关闭和取消，返回后的普通Nimfinally�
 执行workspace：`wks_43c47436537996f7`，标题`【自动】组件异步任务与生命周期`，路径`/home/jimxl/.paseo/worktrees/1c1rvoii/component-async-lifecycle`，分支`feat/component-async-lifecycle`，基线如文首。设计、编码、修复和验收复用此空间。
 
 用户回复“继续”后进入实施计划阶段；计划为`docs/superpowers/plans/2026-10-17-component-async-lifecycle.md`，包含实际profiles配置、编码边界和独立验收。计划阶段仅补充接口、容量及兼容细节，并澄清安全点入场与uiTask保护体的区别；尚未派发实现Agent或执行产品测试。合并/推送另按用户授权执行；尚未获本功能合并/推送授权。成功合并及推送后的归档须先完成仓库、成果及活跃会话检查。
+
+## 12. 实施期间的最小SDK路径例外
+
+Task7真实SDK搬迁到中文、空格及`$`路径，普通build/doctor成功但migration配置失败，暴露两处独立NimScript路径入口。协调先授权orm_config.nims仅path值在switch前`$→$$`（4e1b9a9），该真实include回归通过但scaffold内联生成入口仍失败；随后明确只对scaffold.nim生成config的`--path`值作同样转义（a3c63c7）。非path参数、默认页面、应用模板及任务语义不改。此为既有“默认脚手架不改”约束的编译配置局部例外，不授权其他脚手架行为变更。
+
+回归使用实际generateScaffold产物，普通及中文空格`$`/`$$`两入口、define/deepcopy均实际RED→GREEN；新a3真实commit SDK完整migration/CRUD/持久化/任务smoke通过，前两轮失败包及日志保留。此例外增加两份既有配置/生成器源码的兼容风险，实际生成产物及完整发布链验证负责约束，不以include单测替代发布链。详细代价、复用和其他裁定见同日期实施裁定及验证记录。
+
+当前执行空间为wks_dcbf3caf03171704，恢复路径/home/jimxl/.paseo/worktrees/1c1rvoii/component-async-lifecycle-recovery，保留原分支和基线53368cf。前述第11节为初始阶段历史；恢复前客户端归档与旧日志缺口另见验证记录。合并/推送仍未授权。

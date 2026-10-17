@@ -1,6 +1,6 @@
 # 组件异步任务与生命周期验证记录
 
-状态：Task1–3 已实现并独立验收；Task4 已提交，独立审查进行中；Task5–7 尚未实现。不能据本记录声称整个异步功能已完成。
+状态：Task1–7代码及各任务独立门禁已完成；Task6仅静态Approved，Windows平台NotRun。Task7冻结7abb798，Spec/Quality Approved、C0/I0/M2；最终整分支审查尚未完成。各节保留按时间追加的历史证据，不把早期“待审查”当作当前状态。
 
 ## 身份与执行空间
 
@@ -168,3 +168,31 @@ Task7公共文档须说明GpuiRunError与cleanupOwner两种显式重试方式、
 Task6独立验收已确认静态Spec compliance/Quality Approved，Critical0/Important0/Minor0，未发现固定五文件明确缺陷；Windows平台行为验收明确NotRun，不授予平台通过结论。协调完整读取`task-6-review.md`，审查报告与独立只读审计另存空间外保管区。验收核对103项artifact-index、110项备份与467个生成文件逐SHA，不只依据文件数量；WindowsC生成depfiles为空时用源import、生成模块列表及输入字节判断复用，没有把空depfiles当完整依赖证明。
 
 Task6代码门禁通过，最终源码`6d3ea46b57ccfa55af4f13a60dd9ab13a5bc6028`。计划保留Step2/4真实Windows执行未勾选，Task7按既定无Windows分支推进；取得可用Windows环境后仍需另行跑官方runner、平台ABI断言及实际timer/关闭/双owner用例。后续Linux/native/SDK验收不能消除这一限制。
+
+## Task7 实际检查与独立验收
+
+精确范围`40b514ad97742a565d33e875229f257b8b0f6315..7abb798054eeeef9de7ba6b8811b4a762e36da02`，4提交、11文件；最后产品/测试身份与真实SDK --commit均为`a3c63c710611ec1bad7ef3663bcccbf210166223`，7abb仅一般验证文档。两项SDK路径局部例外已同步规格/计划；原f088及4e1完整migration smoke失败包/日志保留，最终a3才完整成功。
+
+| 检查 | 真实记录及身份 |
+| --- | --- |
+| 官方Nim normal | EXIT0，100 suites；957 OK、0 FAILED、5 SKIPPED；785.2806766秒，最终a3产品/测试输入 |
+| 独立release-only | EXIT0，4 suites；42 OK、0 FAILED、5 SKIPPED；22.8402121秒，非借用normal内发布套件 |
+| Rust test/fmt/clippy及两库构建 | 本Task7实际EXIT0，test52；最终20项Cargo/crates输入未变、记录工具/库匹配，非复用旧Task5数字 |
+| C/Nim/Rust ABI | 本轮实际161条EXIT0，后续scaffold/test不改布局输入 |
+| Linux native ABI1/2×CACHE0/1 | f088四组真实窗口EXIT0，无后续点击完成、error/retry、取消/keep/重建/terminal断言，后续复用范围如下 |
+| 搬迁SDK | a3新包完整migration/rollback/CRUD/持久化/任务smoke与独立bundled Nim task均EXIT0，输出“后台完成” |
+| 实际scaffold配置 | include与generateScaffold产物普通/中文空格/$/$$实际RED→GREEN；非path定义/deepcopy不变，现有scaffold18项EXIT0 |
+
+5个SKIPPED为PowerShell/Windows专属项，不计平台通过。normal保留117条既有代码/依赖Warning，四native各有MESA-EGL/DRI3提示，退出0不代表无警告；本Task7改动源码没有新增指向自身的Warning。SDK生产桥接为default features/dev debug=0，SHA05b6112f0c371f17726566ea75cf484b0cf12805f155ed654c49451defadd599；native-test-support独立库SHA25e3213182a4b616cd22a484c47ab8e8115a580e5e3a2d5026d6c1846a2e0bd0，不能称生产库是release profile。
+
+SDK真实路径`/tmp/Leaf SDK 搬迁 $ Task7 a3c63c71/leaf-sdk`，包SHA7fbe8ef270190248e6c68d87e67e176427f775579aa3ea22f6e11454665b851b；210源码/header与checkout、解包根三方SHA一致。五项NIM/LEAF覆盖变量已清，OS库路径/tmp/mui-display/usr/lib与外部GCC保留，不声称无任何系统依赖。数据库示例仅Nim check通过，不声称实际执行DB worker。
+
+性能样本100/1000/5000兄弟均仅目标render1、额外Snapshot0、worker1、无关handles逐一不变；完成墙钟样本2.308106/2.328006/2.322388ms，不是恒定复杂度、GPU帧或FFI总量结论。四native窗口消失观测34.03–34.09ms、进程退出34.07–44.19ms，包含xdotool/轮询开销，不证明任意非合作work的join上界。本轮没有独立采样具体renderer型号、FPS或GPUI帧耗时。
+
+复用范围：native实际f088执行，最终nims依赖bytes确有差异；只改path中$转义，当前无$绝对repo路径有效选项不变、普通配置探针通过、运行应用/宿主/harness/lib未变，因此保留原窗口证据，不称a3重跑或全部输入bytes相同。scaffold/SDK测试不是窗口runtime依赖；Rust/Cargo/工具和ABI布局分别按final-input-comparison判定，早期未记录rustc SHA不倒填。末尾纯文档变更不触发重复全量。
+
+协调核对最终11文件Git/checkout/集合、262证据及5库/包SHA、304空间外payload逐SHA；独立审查再次核对71条命令的实际argv/exit/log/input身份和原始关键正文。report SHA8315ea3d7cff469c731f7fdb0b83f3df743c3d42dbeaebc17744c2246efe864f，final-manifest SHA17719b98ce3c166febc0d7a64d157ddb88644a10d773bbfc2d67179db312b4e0。完整304payload约1.15GB另存主工作区忽略目录`.superpowers/recovery/component-async-lifecycle/task-7-final-7abb798/`，不会随执行worktree归档删除。原Task1–4全部独立原始输出仍未找回，不能用本轮封存覆盖该历史限制。
+
+独立task-7-review判定Spec compliance/Quality Approved，Critical0/Important0/Minor2：M1新增native close fallback等待没有deadline且异常未保证probe.close；M2继承编译与显示环境告警。M1不是本次四组成功运行的失败，静态缺口仍真实，交最终全分支审查分级；M2按已披露噪声保留，不越界清旧代码。Task1–6内部跨任务语义由冻结任务审查及本次normal回归保留，Task7不冒称独立重验全部实现；最终全分支审查将另行覆盖跨任务接口。
+
+继续NotRun：真实Windows/macOS、PE/Windows SDK ABI断言、IME/DPI、内存工具/长期RSS/系统零泄漏、独立Snapshot-export注入、diagnostic再抛异常、同tick Snapshot+error联合响应、动态wrongthread、renderer型号/帧/FPS。所有裁定及代价详见[实施裁定记录](2026-10-17-component-async-lifecycle-rulings.md)。当前无合并/推送/归档授权，整分支最终结论尚待审查。

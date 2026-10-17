@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-17-component-async-lifecycle-design.md`（用户在原会话回复“继续”，确认规格后进入本计划阶段）。
 
-状态：计划已获批准并执行中。Task1–5 已实现并独立验收；Task6代码与静态审查完成，Windows平台执行仍NotRun；Task7待执行。实际命令、退出码及审查证据见同日期验证记录和执行 ledger；以下预期断言本身不代表已取得的证据。
+状态：Task1–7代码与各任务独立门禁已完成；Task6仅代码/静态Approved，Windows平台执行仍NotRun。Task7冻结HEAD为7abb798，独立审查C0/I0/M2；两项Minor交最终整分支审查裁定。整分支最终审查、合并与推送尚未完成。实际命令、退出码及审查证据见同日期验证记录和执行 ledger；以下预期断言本身不代表已取得的证据。
 
 ## Global Constraints
 
@@ -21,7 +21,7 @@
 - 一次泵最多64条回调/完成消息、4ms开始下一条的调度预算；不抢占用户回调、不承诺业务work内存或取消即时生效。
 - 生命周期只由已接受转换决定；publish/accept/discard/detach不调用业务代码，发布容量在host apply前准备。
 - 新typed常量：`LEAF_CAP_TASK_PUMP=1`、`LEAF_CONFIG_TASK_PUMP=2`、`LEAF_REQUEST_TASKS=8`；ABI1可选导出`leaf_gpui_task_pump_version`返回1，严格ready布尔能力协商。
-- 不改旧State线程限制和拒绝语义；不改NodeKind、既有结构布局、依赖锁文件或默认脚手架。
+- 不改旧State线程限制和拒绝语义；不改NodeKind、既有结构布局、依赖锁文件或默认应用页面/业务模板。Task7经实际SDK特殊路径失败授权局部例外：仅orm_config.nims及scaffold.nim生成config的path值在Nim switch前转义`$→$$`；非path不变，详见同日期裁定记录。
 - 无消息不render、不Snapshot、不发UI树、不变revision；ABI1真实更新仍允许既有完整活动树成本。
 - Windows/macOS窗口、IME、跨屏DPI没有实际执行就记录NotRun；Linux/Xvfb结果不能替代。
 
@@ -190,7 +190,7 @@ check deliveredAfterFinalClose == 0
 
 **Interfaces:** 示例导出`tasksApplication(title="Leaf component tasks"):Application`；稳定key为load/retry/status/go-other/go-retained/go-disposed。native harness增加`LEAF_TEST_TASKS=1`分支，继续使用`LEAF_TEST_APP`，不改变pages/counter/list旧分支。CLI普通headless语义不改；SDK任务fixture以自己显式pumpTasks驱动验收。
 
-- [ ] **Step 1: 写用户行为RED测试。** 在100/1000/5000静态兄弟下由真实worker结果更新单个组件；真实窗口加载无需后续点击、错误后重试、离开取消、隐藏继续与返回、关闭均有独立caption/事件断言。新增SDK fixture断言实际result，不只验证模块存在或编译成功。
+- [x] **Step 1: 写用户行为RED测试。** 在100/1000/5000静态兄弟下由真实worker结果更新单个组件；真实窗口加载无需后续点击、错误后重试、离开取消、隐藏继续与返回、关闭均有独立caption/事件断言。新增SDK fixture断言实际result，不只验证模块存在或编译成功。
 
 ```nim
 check after.componentRenders - before.componentRenders == 1
@@ -199,9 +199,9 @@ check unrelatedHostHandlesAfter == unrelatedHostHandlesBefore
 check sdkCompletionCaption == "后台完成"
 ```
 
-- [ ] **Step 2: 验证RED。** 跑`test_component_task_performance.nim`及SDK/native新增路径；按缺失fixture/行为记录真实失败，平台依赖缺失记NotRun，不能当产品RED。
-- [ ] **Step 3: 实现示例与发布接入。** 示例包含loading/error/retry、默认取消与显式保留两种页面；work中自有数据库连接示例放入文档，连接finally释放。SDK沿现有整树复制规则包含新增模块和头文件；移除环境覆盖后实际搬迁编译运行。记录取消不能撤销外部副作用、work超时及窗口/进程退出时间差异。
-- [ ] **Step 4: 执行最终验收。** 先跑定向新套件，再跑下列官方命令；最终源码改变后重跑受影响检查，未变的Rust等只在源码/锁文件/工具链身份一致时复用证据。
+- [x] **Step 2: 验证RED。** 跑`test_component_task_performance.nim`及SDK/native新增路径；按缺失fixture/行为记录真实失败，平台依赖缺失记NotRun，不能当产品RED。
+- [x] **Step 3: 实现示例与发布接入。** 示例包含loading/error/retry、默认取消与显式保留两种页面；work中自有数据库连接示例放入文档，连接finally释放。SDK沿现有整树复制规则包含新增模块和头文件；移除环境覆盖后实际搬迁编译运行。记录取消不能撤销外部副作用、work超时及窗口/进程退出时间差异。
+- [x] **Step 4: 执行最终验收。** 先跑定向新套件，再跑下列官方命令；最终源码改变后重跑受影响检查，未变的Rust等只在源码/锁文件/工具链身份一致时复用证据。
 
 ```sh
 NIM=/tmp/nim-2.2.6/bin/nim /tmp/nim-2.2.6/bin/nim c -r --out:target/nim/test_runner scripts/test.nim
@@ -216,7 +216,7 @@ Native依次运行ABI=1/2、CACHE=0/1共四组：`NIM=/tmp/nim-2.2.6/bin/nim LEA
 
 SDK使用新CLI、production-feature桥接库及`package_sdk.nim`的真实`--nim-root/--cli/--bridge/--output/--target/--channel/--version/--commit`参数打包，在仓库外中文/空格/`$`目录解包，清除NIM/LEAF_LIBRARY/LEAF_GPUI_ROOT/LEAF_GPUI_LIBRARY/LEAF_SDK覆盖；运行doctor、普通应用build和任务fixture。保存源码/库SHA、编译器/profile、命令/退出码和行为断言。纯CPU计数、真实GPUI帧和软件渲染结果分别报告；证据摘要提交文档，原始产物保留功能workspace的target/verification/component-async-lifecycle，不提交二进制。
 
-- [ ] **Step 5: 提交并交架构验收。** `test: verify component task lifecycle across hosts and SDK`。验收逐条映射规格第10节，包含全部任务RED/GREEN、未运行平台和已知限制；本项结束不自动合并、推送或归档。
+- [x] **Step 5: 提交并交架构验收。** `test: verify component task lifecycle across hosts and SDK`。验收逐条映射规格第10节，包含全部任务RED/GREEN、未运行平台和已知限制；本项结束不自动合并、推送或归档。
 
 ## 执行角色、记录与交付
 
@@ -236,3 +236,11 @@ SDK使用新CLI、production-feature桥接库及`package_sdk.nim`的真实`--nim
 原协调Agent=`22171a3c-32d8-4ff6-baab-8ed6a7a22963`，原workspace=`wks_fd0d6c1dbee5f84c`；执行workspace=`wks_43c47436537996f7`，路径`/home/jimxl/.paseo/worktrees/1c1rvoii/component-async-lifecycle`，分支`feat/component-async-lifecycle`，产品基线`53368cf2a554c52af092d129f0aeb2b592c8d78f`，设计提交`247cda9`。
 
 进入编码前由用户审阅本计划并确认执行方式。实现后在本会话报告实际完成和测试证据；合并/推送仍待授权，验证主分支与GitHub远端包含本批成果、worktree无待保留文件/运行会话后才可安全归档自动执行空间，原会话空间保留。
+
+## 最终验收进度
+
+Task7精确范围40b514a..7abb798（4提交11文件），最终产品/测试身份a3c63c710611ec1bad7ef3663bcccbf210166223。官方normal100套/957OK/0FAILED/5SKIPPED、独立release-only4套/42OK/0FAILED/5SKIPPED均EXIT0；Rust52/fmt/clippy、ABI161、Linux真实native四组合及a3特殊路径完整SDK任务/migration/CRUD/持久化成功，具体复用身份和未运行项见验证记录。
+
+Task7独立Spec/Quality Approved，C0/I0/M2。M1新增native close观测fallback无deadline及probe异常清理；M2遗留编译/显示告警。均记录交最终整分支审查分级，不静默丢弃。全分支审查以产品初始基线53368cf至本次协调文档提交为固定范围，尚无结论。Task6步骤2/4保持未勾选，不能把静态C生成称Windows平台通过。
+
+本轮两项SDK路径范围例外及其根因纠正、全部协调裁定与代价见 [实施裁定记录](../reviews/2026-10-17-component-async-lifecycle-rulings.md)。主分支/远端合并推送仍待用户明确授权，功能空间保留。
