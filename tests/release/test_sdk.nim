@@ -1,7 +1,7 @@
 ## Real archives and installers; file URLs keep tests independent of networking.
 import std/[unittest, os, strutils, tempfiles, json, strtabs, streams]
 import ../../scripts/[package_sdk, smoke_sdk, verify_sdk_install]
-import ../../src/leaf/[checksum, archives]
+import ../../src/leaf/[checksum, archives, scaffold]
 import ../nim/archive_reader
 when defined(windows): import std/winlean
 
@@ -828,10 +828,15 @@ suite "SDK component worker result fixture":
       # Resolving this module proves the path was parsed exactly once. A
       # double-escaped path would point elsewhere instead of merely warning.
       writeFile(source / "leaf/vendor/orm/norm/src/sdk_path_probe.nim", "const sdkPathMarker* = \"resolved\"\n")
-      let project = base / directory / "app"
-      createDir(project)
-      writeFile(project / "config.nims", "include " & escape((source / "leaf/orm_config.nims").replace("$", "$$")) & "\n")
-      writeFile(project / "app.nim", """
+      for configKind in ["include", "generated"]:
+        let project = base / directory / configKind
+        createDir(project)
+        if configKind == "generated":
+          # Keep the actual generated config byte-for-byte, including imports.
+          discard generateScaffold(ScaffoldOptions(mode: smApplication), project)
+        else:
+          writeFile(project / "config.nims", "include " & escape((source / "leaf/orm_config.nims").replace("$", "$$")) & "\n")
+        writeFile(project / "probe.nim", """
 import sdk_path_probe
 const leafOrmSqliteLibrary {.strdefine.} = ""
 when defined(windows): doAssert leafOrmSqliteLibrary == "winsqlite3.dll"
@@ -845,10 +850,11 @@ doAssert original[0] == 1
 doAssert sdkPathMarker == "resolved"
 echo "SDK_ORM_CONFIG_OK"
 """)
-      let compiler = getEnv("NIM", findExe("nim"))
-      let executed = runCommand(compiler, @["c", "-r", "--skipUserCfg:on", "--skipParentCfg:on",
-        "--nimcache:" & (project / "cache").replace("$", "$$"),
-        "--out:" & (project / "app").replace("$", "$$"), project / "app.nim"], project)
-      checkpoint directory & "\n" & executed.output
-      check executed.exitCode == 0
-      check "SDK_ORM_CONFIG_OK" in executed.output
+        let compiler = getEnv("NIM", findExe("nim"))
+        let executed = runCommand(compiler, @["c", "-r", "--skipUserCfg:on", "--skipParentCfg:on",
+          "--path:" & source.replace("$", "$$"),
+          "--nimcache:" & (project / "cache").replace("$", "$$"),
+          "--out:" & (project / "probe").replace("$", "$$"), project / "probe.nim"], project)
+        checkpoint directory & " / " & configKind & "\n" & executed.output
+        check executed.exitCode == 0
+        check "SDK_ORM_CONFIG_OK" in executed.output

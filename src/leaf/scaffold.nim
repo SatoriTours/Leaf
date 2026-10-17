@@ -99,7 +99,7 @@ proc appFiles(name: string, taskVersion: int64): seq[ScaffoldFile] =
     of "README.md": selected = modelReadme
     else: discard
     result.add(ScaffoldFile(path: path, content: selected.replace("{{name}}", name)))
-  result.add(ScaffoldFile(path: "config.nims", content: "import std/strutils\nimport leaf/orm_config\nfor argument in ormCompilerArgs(OrmSourceRoot):\n  let pair = argument.split(\":\", 1)\n  switch(pair[0].strip(chars = {'-'}), pair[1])\n"))
+  result.add(ScaffoldFile(path: "config.nims", content: "import std/strutils\nimport leaf/orm_config\nfor argument in ormCompilerArgs(OrmSourceRoot):\n  let pair = argument.split(\":\", 1)\n  switch(pair[0].strip(chars = {'-'}), if pair[0] == \"--path\": pair[1].replace(\"$\", \"$$\") else: pair[1])\n"))
   result.add(ScaffoldFile(path: "app/models/application_record.nim", content: "import leaf/model\n\ntype ApplicationRecord* = ref object of TimestampedRecord\ndefineAbstractModel(ApplicationRecord)\n"))
   result.add(ScaffoldFile(path: "leaf.json", content: pretty(newProjectConfig(name, "main.nim",
     @["main.nim", "app", "config", "db", "assets"])) & "\n"))
