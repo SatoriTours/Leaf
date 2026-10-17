@@ -14,3 +14,6 @@ export routing.Route
 import ./managed_runtime
 export managed_runtime.componentApplication,managed_runtime.updateStats,managed_runtime.invalidateRoot,managed_runtime.listStats
 export core.flush,core.batch,core.uiTask,core.pumpTasks
+
+import ./component_tasks
+export component_tasks

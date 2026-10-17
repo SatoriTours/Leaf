@@ -97,6 +97,7 @@ type
     context: BuildContext
     counters: PerformanceStats
     inUpdate: bool
+    taskBody: bool
     batchDepth:int
     rowCaches: Table[string, RowCache]
     rowClock: uint64
@@ -145,6 +146,9 @@ method publish*(driver:RuntimeDriver) {.base,raises:[].}=discard
 method reject*(driver:RuntimeDriver) {.base,raises:[].}=discard
 method pumpDeferred*(driver:RuntimeDriver):TaskPumpReport {.base.}=
   newTaskPumpReportInternal(0,0,0,0,false)
+method configureTaskPumpDriverInternal*(driver:RuntimeDriver,supported:bool) {.base.}=discard
+method retireTaskPoolDriverInternal*(driver:RuntimeDriver) {.base.}=discard
+method finalizeTaskPoolDriverInternal*(driver:RuntimeDriver) {.base.}=discard
 proc runtimeDriver*(runtime:Runtime):RuntimeDriver=runtime.driver
 proc applicationConfig*(runtime:Runtime):tuple[title:string,width,height:int]=
   (runtime.app.title,runtime.app.width,runtime.app.height)
@@ -359,6 +363,7 @@ template inExecutionScope(runtime: Runtime, body: untyped) =
 proc acceptedRevision*(runtime: Runtime): uint64 = runtime.revision
 
 proc installingUpdate*(runtime: Runtime): bool = runtime.inUpdate
+proc taskBodyInternal*(runtime:Runtime):bool=runtime.taskBody
 
 proc installingHook*(runtime: Runtime): bool = runtime.hookInstallation
 
@@ -531,11 +536,13 @@ proc batch*(runtime:Runtime,body:proc() {.closure.})=
   inExecutionScope(runtime):
     runtime.inUpdate=true
     runtime.batchDepth=1
+    runtime.taskBody=true
     try:body()
     except CatchableError:
       if runtime.driver!=nil:runtime.driver.reject()
       raise
     finally:
+      runtime.taskBody=false
       runtime.batchDepth=0
       runtime.inUpdate=false
     discard (if runtime.driver==nil:runtime.refreshImpl() else:runtime.flushDriverImpl(false))
@@ -551,6 +558,18 @@ proc pumpTasks*(runtime:Runtime):TaskPumpReport=
     fail("cannot pump another executing Runtime")
   if runtime.driver==nil:return newTaskPumpReportInternal(0,0,0,0,false)
   runtime.driver.pumpDeferred()
+
+proc configureTaskPumpInternal*(runtime:Runtime,supported:bool)=
+  if runtime==nil or runtime.isCandidate or runtime.inUpdate or runtime.hookInstallation or
+      executionRuntimeIdentity()!=0:fail("task configuration requires an ordinary UI boundary")
+  if runtime.driver!=nil:runtime.driver.configureTaskPumpDriverInternal(supported)
+proc retireTaskPoolInternal*(runtime:Runtime)=
+  if runtime==nil:fail("missing Runtime")
+  if runtime.driver!=nil:runtime.driver.retireTaskPoolDriverInternal()
+proc finalizeTaskPoolInternal*(runtime:Runtime)=
+  if runtime==nil or runtime.isCandidate or runtime.inUpdate or runtime.hookInstallation or
+      executionRuntimeIdentity()!=0:fail("task pool cleanup requires an ordinary UI finally")
+  if runtime.driver!=nil:runtime.driver.finalizeTaskPoolDriverInternal()
 
 proc refresh*(runtime: Runtime): bool =
   var completed: bool
@@ -795,14 +814,18 @@ proc dispatchImpl(runtime: Runtime, key: string, event: Event): bool =
   if runtime.driver!=nil:
     try:
       runtime.inUpdate=true
+      runtime.taskBody=true
       let invoked=runtime.driver.invokeAccepted(key,event)
+      runtime.taskBody=false
       runtime.inUpdate=false
       if not invoked:return false
       return runtime.flushDriverImpl(false)
     except CatchableError:
       runtime.driver.reject()
       raise
-    finally:runtime.inUpdate=false
+    finally:
+      runtime.taskBody=false
+      runtime.inUpdate=false
   let n = runtime.find(key).description
   if n.inactive: return false
   let callback = n.handlers[event.kind]

@@ -1,7 +1,7 @@
 ## UI-only lifecycle registrations and accepted deferred events. This layer
 ## knows Runtime/State contracts, never component descriptions or managed trees.
-import std/[tables, sets, algorithm, monotimes, times]
-import ./[core, component_state, task_contracts]
+import std/[tables, sets, algorithm, monotimes, times, options, unicode]
+import ./[core, component_state, task_contracts, task_worker]
 
 const
   LifecycleRecordBytesInternal* = 128
@@ -13,7 +13,7 @@ type
   OwnerRegistration* = ref object
     service: TaskService
     stamp: OwnerStamp
-    sealed, hasScope, accepted, active: bool
+    sealed, hasScope, explicitScope, accepted, active: bool
     epoch: uint64
     scope: TaskScope
     hooks: array[LifecyclePhase, LifecycleCallback]
@@ -38,8 +38,27 @@ type
     kind: LifecyclePhase
     epoch: uint64
     active: bool
+  TaskRequest = ref object
+    identity, generation: uint64
+    scope: TaskScope
+    key, input: string
+    work: TaskWork
+    onResult: TaskResultHandler
+    onError: TaskErrorHandler
+    maxResultBytes: int
+    ticket: WorkerTicket
+    current, submitted: bool
+  TaskIntent = object
+    request: TaskRequest
+    cancelId: uint64
+  TaskIntentFrame* = ref object
+    intents: seq[TaskIntent]
+    starts: seq[TaskRequest]
+    cancellations: seq[TaskRequest]
+    published, rejected: bool
   TaskAttempt* = ref object
     service: TaskService
+    frame: TaskIntentFrame
     updates: seq[OwnerUpdate]
     batch: EventBatch
     pendingRecords: int
@@ -51,7 +70,11 @@ type
     first, last: EventBatch
     pendingRecords: int
     nextGeneration: uint64
-    pumping: bool
+    pumping, supported, retired, intentsTouched: bool
+    nextIdentity, nextRequestGeneration: uint64
+    intents: seq[TaskIntent]
+    records: array[64, TaskRequest]
+    pool: TaskWorkerPool
     when compileOption("threads"): threadId: int
 
 proc requireUi(service: TaskService) =
@@ -64,7 +87,7 @@ proc requireUi(service: TaskService) =
 proc newTaskService*(runtime: Runtime, states: StateStore): TaskService =
   if runtime == nil or states == nil: fail("task service requires Runtime and StateStore")
   result = TaskService(runtime: runtime, states: states,
-    owners: initTable[uint64, OwnerRegistration](MaxNodes*2))
+    supported: true, owners: initTable[uint64, OwnerRegistration](MaxNodes*2))
   when compileOption("threads"): result.threadId = getThreadId()
 
 proc newOwnerRegistration*(service: TaskService, owner: uint64): OwnerRegistration =
@@ -110,15 +133,234 @@ proc pendingTaskBytesInternal*(service: TaskService): int =
 proc preparedTaskBytesInternal*(attempt: TaskAttempt): int =
   if attempt == nil: 0 else: attempt.pendingRecords * LifecycleRecordBytesInternal
 
-proc prepareTasks*(service: TaskService, revision: uint64,
-    transitions: seq[OwnerTransition], registrations: seq[OwnerRegistration]): TaskAttempt =
+# An explicit thread-local owner pins pools independently of Runtime/service
+# cycles. Only finalizeTaskPoolServiceInternal removes a pin, after UI join.
+var poolPins {.threadvar.}: seq[TaskWorkerPool]
+
+proc configureTaskServiceInternal*(service: TaskService, supported: bool) =
   service.requireUi()
-  result = TaskAttempt(service: service, pendingRecords: service.pendingRecords)
+  if not supported:
+    for registration in service.owners.values:
+      if registration.hasScope: fail("host does not support task pumping")
+  service.supported = supported
+
+proc scopeChargeInternal*(registration: OwnerRegistration): int =
+  if registration.explicitScope: fail("duplicate explicit task scope")
+  if registration.hasScope: 0 else: LifecycleRecordBytesInternal
+
+proc configureScopeInternal*(registration: OwnerRegistration,
+    retention: TaskRetention): TaskScope =
+  registration.explicitScope = true
+  registration.hasScope = true
+  registration.scope = newTaskScopeInternal(registration.service,
+    registration.stamp.owner, registration.stamp.generation, retention)
+  registration.scope
+
+proc requireTaskAccess*(service: TaskService, scope: TaskScope) =
+  service.requireUi()
+  if service.retired: fail("task service is retired")
+  if executionRuntimeIdentity() != service.runtime.runtimeIdentity or not service.runtime.taskBodyInternal:
+    fail("task API requires its Runtime UI task")
+  service.states.requireIdle()
+  if scope.taskDomainInternal != service: fail("task scope belongs to another Runtime")
+  let registration = service.owners.getOrDefault(scope.taskOwnerInternal)
+  if registration == nil or registration.stamp.generation != scope.taskGenerationInternal:
+    fail("task scope owner is disposed or unaccepted")
+  if not registration.active and registration.scope.retention != keepWhileRetained:
+    fail("task scope owner is inactive")
+
+proc requireTaskBoundary(service: TaskService) =
+  service.requireUi()
+  if service.retired: fail("task service is retired")
+  if executionRuntimeIdentity() != service.runtime.runtimeIdentity or not service.runtime.taskBodyInternal:
+    fail("task API requires its Runtime UI task")
+  service.states.requireIdle()
+
+proc hasTaskIntents*(service: TaskService): bool = service.intentsTouched
+proc sealTaskIntentsInternal*(service: TaskService): TaskIntentFrame =
+  service.requireUi()
+  service.intentsTouched = false
+  TaskIntentFrame(intents: move(service.intents))
+
+proc validTaskKey(key: string): bool =
+  if key.len == 0 or key.len > 256 or validateUtf8(key) != -1: return false
+  for rune in key.runes:
+    if int(rune) > 0x10FFFF or int(rune) in 0xD800..0xDFFF: return false
+  true
+
+proc startTaskInternal*(service: TaskService, scope: TaskScope, key, input: string,
+    work: TaskWork, onResult: TaskResultHandler, onError: TaskErrorHandler,
+    maxResultBytes: int): TaskHandle =
+  service.requireTaskAccess(scope)
+  if not validTaskKey(key): fail("task key must be 1..256 valid UTF-8 bytes")
+  if input.len > 1048576: fail("task input exceeds 1 MiB")
+  if maxResultBytes notin 1..1048576: fail("task result reservation must be 1..1048576 bytes")
+  if work == nil or onResult == nil: fail("task requires work and onResult")
+  # Pending replacements retain only their final bytes/closures. Include every
+  # still-unsettled worker reservation, even if a cancellation is also pending.
+  var inputs = input.len
+  var results = maxResultBytes
+  var count = 1
+  if service.pool != nil:
+    let stats = service.pool.workerPoolStats()
+    inputs += stats.inputBytes
+    results += stats.resultBytes
+    count += stats.reservedTasks
+  for intent in service.intents:
+    let pending = intent.request
+    if pending != nil and not (pending.scope.taskOwnerInternal == scope.taskOwnerInternal and pending.key == key):
+      inputs += pending.input.len
+      results += pending.maxResultBytes
+      inc count
+  if count > 64 or inputs > 8388608 or results > 8388608:
+    fail("task pending reservation capacity exceeded")
+  if service.nextIdentity == high(uint64): fail("task identity exhausted")
+  inc service.nextIdentity
+  for i in countdown(service.intents.high, 0):
+    let pending = service.intents[i].request
+    if pending != nil and pending.scope.taskOwnerInternal == scope.taskOwnerInternal and pending.key == key:
+      service.intents.delete(i)
+  let request = TaskRequest(identity: service.nextIdentity, scope: scope,
+    key: key, input: input, work: work, onResult: onResult, onError: onError,
+    maxResultBytes: maxResultBytes)
+  service.intents.add(TaskIntent(request: request))
+  service.intentsTouched = true
+  newTaskHandleInternal(service, request.identity)
+
+proc cancelTaskInternal*(service: TaskService, handle: TaskHandle) =
+  service.requireTaskBoundary()
+  if handle.taskDomainInternal != service: fail("task handle belongs to another Runtime")
+  var found = false
+  for request in service.records:
+    if request != nil and request.current and request.identity == handle.taskIdInternal: found = true
+  for intent in service.intents:
+    if intent.request != nil and intent.request.identity == handle.taskIdInternal: found = true
+    if intent.cancelId == handle.taskIdInternal: found = false
+  if found:
+    service.intentsTouched = true
+    var pendingOnly = false
+    for i in countdown(service.intents.high, 0):
+      if service.intents[i].request != nil and service.intents[i].request.identity == handle.taskIdInternal:
+        service.intents.delete(i)
+        pendingOnly = true
+    if not pendingOnly: service.intents.add(TaskIntent(cancelId: handle.taskIdInternal))
+
+proc taskCurrentInternal*(service: TaskService, handle: TaskHandle): bool =
+  service.requireUi()
+  if handle.taskDomainInternal != service: return false
+  for request in service.records:
+    if request != nil and request.identity == handle.taskIdInternal: return request.current
+
+proc taskWorkerStatsInternal*(service: TaskService): WorkerPoolStats =
+  service.requireUi()
+  if service.pool != nil: service.pool.workerPoolStats() else: default(WorkerPoolStats)
+
+proc clearPrepared(service: TaskService, frame: TaskIntentFrame) {.raises: [].} =
+  if frame == nil or frame.published: return
+  for request in frame.starts:
+    if service.pool != nil:
+      try: service.pool.ackCompletion(request.ticket)
+      except ValueError as error: raiseAssert(error.msg)
+    request.ticket = default(WorkerTicket)
+  frame.starts.setLen(0)
+  frame.cancellations.setLen(0)
+
+proc rejectTaskIntentsInternal*(service: TaskService, frame: TaskIntentFrame) {.raises: [].} =
+  service.clearPrepared(frame)
+  if frame != nil and not frame.published:
+    frame.rejected = true
+    frame.intents.setLen(0)
+  service.intents.setLen(0)
+  service.intentsTouched = false
+
+proc finalOwner(service: TaskService, request: TaskRequest,
+    updates: seq[OwnerUpdate]): bool =
+  let owner = request.scope.taskOwnerInternal
+  var registration = service.owners.getOrDefault(owner)
+  var active = registration != nil and registration.active
+  for update in updates:
+    if update.registration.stamp.owner == owner:
+      registration = if update.kind == LifecyclePhase.dispose: nil else: update.registration
+      active = update.active
+  registration != nil and registration.stamp.generation == request.scope.taskGenerationInternal and
+    (active or registration.scope.retention == keepWhileRetained)
+
+proc prepareIntents(service: TaskService, frame: TaskIntentFrame, updates: seq[OwnerUpdate]) =
+  if frame == nil: return
+  service.clearPrepared(frame)
+  var latest: seq[TaskRequest]
+  for intent in frame.intents:
+    if intent.request != nil:
+      let request = intent.request
+      for i in countdown(latest.high, 0):
+        if latest[i].scope.taskOwnerInternal == request.scope.taskOwnerInternal and latest[i].key == request.key:
+          latest.delete(i)
+      latest.add(request)
+    else:
+      for i in countdown(latest.high, 0):
+        if latest[i].identity == intent.cancelId: latest.delete(i)
+      for old in service.records:
+        if old != nil and old.current and old.identity == intent.cancelId:
+          frame.cancellations.add(old)
+  for old in service.records:
+    if old == nil or not old.current: continue
+    if not service.finalOwner(old, updates): frame.cancellations.add(old)
+  for request in latest:
+    if not service.finalOwner(request, updates): continue
+    for old in service.records:
+      if old != nil and old.current and old.scope.taskOwnerInternal == request.scope.taskOwnerInternal and old.key == request.key:
+        frame.cancellations.add(old)
+    frame.starts.add(request)
+  if frame.starts.len == 0: return
+  if service.pool == nil:
+    try: service.pool = newTaskWorkerPool()
+    except CatchableError as error: fail("task worker startup failed: " & error.msg)
+    poolPins.add(service.pool)
+  try:
+    for request in frame.starts:
+      request.ticket = service.pool.reserveWork(request.identity, request.input, request.work, request.maxResultBytes)
+    if uint64(frame.starts.len) > high(uint64)-service.nextRequestGeneration:
+      fail("task request generation exhausted")
+  except CatchableError as error:
+    service.clearPrepared(frame)
+    fail("task reservation failed: " & error.msg)
+
+proc retireTaskPoolServiceInternal*(service: TaskService) =
+  service.requireUi()
+  service.retired = true
+  if service.pool != nil: service.pool.retirePool()
+
+proc finalizeTaskPoolServiceInternal*(service: TaskService) =
+  service.requireUi()
+  if service.runtime.installingUpdate or service.runtime.installingHook or service.pumping or
+      executionRuntimeIdentity() != 0:
+    fail("task pool cleanup requires an ordinary noncallback UI finally")
+  service.retireTaskPoolServiceInternal()
+  service.intents.setLen(0)
+  service.intentsTouched = false
+  if service.pool != nil:
+    service.pool.joinPool()
+    for request in service.records.mitems: request = nil
+    for i in countdown(poolPins.high, 0):
+      if poolPins[i] == service.pool: poolPins.delete(i)
+    service.pool = nil
+
+proc prepareTasks*(service: TaskService, revision: uint64,
+    transitions: seq[OwnerTransition], registrations: seq[OwnerRegistration], frame: TaskIntentFrame = nil): TaskAttempt =
+  service.requireUi()
+  result = TaskAttempt(service: service, frame: frame, pendingRecords: service.pendingRecords)
   var fresh: Table[uint64, OwnerRegistration]
   for registration in registrations:
     if registration == nil or registration.service != service or not registration.sealed:
       fail("invalid candidate lifecycle registration")
     fresh[registration.stamp.owner] = registration
+  if service.retired: fail("task service is retired")
+  if not service.supported:
+    for registration in service.owners.values:
+      if registration.hasScope: fail("host does not support task pumping")
+    for registration in registrations:
+      if registration.hasScope: fail("host does not support task pumping")
+    if frame != nil and frame.intents.len > 0: fail("host does not support task pumping")
   var ordered = transitions
   ordered.sort(proc(a, b: OwnerTransition): int =
     let aEnter = a.kind in {LifecyclePhase.mount, LifecyclePhase.activate}
@@ -149,6 +391,7 @@ proc prepareTasks*(service: TaskService, revision: uint64,
       inc result.pendingRecords
       events.add LifecycleEvent(registration: registration, kind: transition.kind,
         revision: revision, epoch: epoch, callback: callback, scope: registration.scope)
+  service.prepareIntents(frame, result.updates)
   if events.len > 0: result.batch = EventBatch(events: move(events))
 
 proc publishTasks*(service: TaskService, attempt: TaskAttempt) {.raises: [].} =
@@ -165,6 +408,22 @@ proc publishTasks*(service: TaskService, attempt: TaskAttempt) {.raises: [].} =
     else: service.last.next = attempt.batch
     service.last = attempt.batch
   service.pendingRecords = attempt.pendingRecords
+  let frame = attempt.frame
+  if frame != nil and not frame.published:
+    for request in frame.cancellations:
+      request.current = false
+      request.ticket.requestCancel()
+    for request in frame.starts:
+      inc service.nextRequestGeneration
+      request.generation = service.nextRequestGeneration
+      request.current = true
+      request.input = ""
+      for slot in service.records.mitems:
+        if slot == nil:
+          slot = request
+          break
+    frame.published = true
+    frame.intents.setLen(0)
   attempt.published = true
 
 proc rejectTasks*(service: TaskService, attempt: TaskAttempt) {.raises: [].} =
@@ -225,10 +484,32 @@ proc pumpTaskService*(service: TaskService): TaskPumpReport =
   service.requireUi()
   if service.runtime.installingUpdate or service.runtime.installingHook or service.pumping:
     fail("lifecycle pump requires an ordinary UI safe point")
+  if not service.supported or service.retired: fail("task service cannot pump")
   service.pumping = true
   var callbacks, dropped, failed, processed: int
   let deadline = getMonoTime() + initDuration(milliseconds = 4)
   try:
+    if service.pool != nil:
+      for request in service.records.mitems:
+        if request == nil: continue
+        if not request.current:
+          request.ticket.requestCancel()
+          if not request.submitted:
+            service.pool.ackCompletion(request.ticket)
+            request = nil
+        elif not request.submitted:
+          if service.pool.submitReserved(request.ticket): request.submitted = true
+      while processed < 64 and (processed == 0 or getMonoTime() < deadline):
+        let completion = service.pool.peekCompletion()
+        if completion.isNone: break
+        var index = -1
+        for i, request in service.records:
+          if request != nil and request.identity == completion.get.id: index = i
+        if index < 0 or service.records[index].current: break
+        service.pool.ackCompletion(service.records[index].ticket)
+        service.records[index] = nil
+        inc dropped
+        inc processed
     while service.first != nil and processed < 64 and
         (processed == 0 or getMonoTime() < deadline):
       let event = service.first.events[service.first.cursor]
@@ -256,4 +537,4 @@ proc pumpTaskService*(service: TaskService): TaskPumpReport =
       if not entered: break
       inc processed
   finally: service.pumping = false
-  newTaskPumpReportInternal(0, dropped, callbacks, failed, service.pendingRecords > 0)
+  newTaskPumpReportInternal(0, dropped, callbacks, failed, service.pendingRecords > 0 or (service.pool != nil and service.pool.workerPoolStats.reservedTasks > 0))

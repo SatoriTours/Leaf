@@ -63,6 +63,8 @@ type
     globalRefresh:bool
     preparedOutlets:Table[uint64,uint64]
     taskAttempt:TaskAttempt
+    taskFrame:TaskIntentFrame
+    metadataOnly:bool
 var nextManagedId:uint64
 proc current(d:ManagedDriver,id:uint64):Instance=
   if d.edits.hasKey(id):d.edits.getOrDefault(id) else:d.data.instances.getOrDefault(id)
@@ -485,7 +487,7 @@ proc prepareLifecycle(d:ManagedDriver)=
   for i,transition in ordered:
     transitions.add(ownerTransitionInternal(transition.registration,transition.kind,transition.depth,uint64(i),transition.active))
   if d.taskAttempt!=nil:d.data.tasks.rejectTasks(d.taskAttempt)
-  d.taskAttempt=d.data.tasks.prepareTasks(d.data.owner.acceptedRevision+1,transitions,registrations)
+  d.taskAttempt=d.data.tasks.prepareTasks(d.data.owner.acceptedRevision+1,transitions,registrations,d.taskFrame)
   if d.taskAttempt.preparedTaskBytesInternal > MaxTreeBytes-d.bytes:
     fail("managed description and pending lifecycle events exceed 16 MiB")
 
@@ -516,9 +518,10 @@ method stage*(base:ManagedDriver,forceRoot:bool):RuntimeDriver=
   let forceRoot=forceRoot or data.forceRoot
   data.forceRoot=false
   let queued=data.states.pendingOwners()
-  if not forceRoot and queued.len==0 and data.invalid.len==0:return nil
+  if not forceRoot and queued.len==0 and data.invalid.len==0 and not data.tasks.hasTaskIntents:return nil
   let d=ManagedDriver(data:data,count:data.count,componentCount:data.componentCount,bytes:data.bytes,root:data.root,globalRefresh:forceRoot)
   try:
+    d.taskFrame=data.tasks.sealTaskIntentsInternal()
     d.attempt=data.states.beginAttempt()
     d.dirty=data.invalid
     data.invalid.clear()
@@ -542,6 +545,7 @@ method stage*(base:ManagedDriver,forceRoot:bool):RuntimeDriver=
     if data.root==0:
       let config=data.owner.applicationConfig
       d.changes.window=some(HostWindow(title:config.title,width:config.width,height:config.height))
+    d.metadataOnly=d.edits.len==0 and d.changes.upserts.len==0 and d.changes.removals.len==0
     d.prepareHost()
     result=d
   except CatchableError:
@@ -554,6 +558,7 @@ method stageViewport*(base:ManagedDriver,key:string,first,finish:int,protected:s
     if staged!=nil:d=ManagedDriver(staged)
     else:
       d=ManagedDriver(data:base.data,count:base.data.count,componentCount:base.data.componentCount,bytes:base.data.bytes,root:base.data.root)
+      d.taskFrame=d.data.tasks.sealTaskIntentsInternal()
       d.attempt=d.data.states.beginAttempt()
   try:
     var target:Instance
@@ -567,6 +572,7 @@ method stageViewport*(base:ManagedDriver,key:string,first,finish:int,protected:s
       target=d.current(id)
     if target==nil or target.description.hostNode.kind!=NodeKind.virtualList:fail("not a virtual list")
     target=target.copyInstance()
+    d.metadataOnly=false
     d.materializeList(target,first,finish,protected)
     d.prepareHost()
     result=d
@@ -603,8 +609,9 @@ method publish*(d:ManagedDriver) {.raises:[].}=
     if owner==0:data.outlets.del(token)
     else:data.outlets[token]=owner
   data.root=d.root;data.count=d.count;data.componentCount=d.componentCount;data.bytes=d.bytes
-  data.snapshotValid=d.exported.isSome
-  if d.exported.isSome:data.snapshot=d.exported.get
+  if not d.metadataOnly:
+    data.snapshotValid=d.exported.isSome
+    if d.exported.isSome:data.snapshot=d.exported.get
   let h=d.candidate.stats
   data.totals.componentRenders+=d.measurements.componentRenders
   data.totals.normalizedHosts+=d.measurements.normalizedHosts
@@ -614,7 +621,10 @@ method publish*(d:ManagedDriver) {.raises:[].}=
   d.edits.clear();d.changes=default(HostChanges);d.candidate=nil;d.attempt=nil
   d.created.setLen(0);d.computed.clear();d.dirty.clear()
   d.taskAttempt=nil
+  d.taskFrame=nil
 method reject*(d:ManagedDriver) {.raises:[].}=
+  d.data.tasks.rejectTaskIntentsInternal(d.taskFrame)
+  d.taskFrame=nil
   d.data.tasks.rejectTasks(d.taskAttempt)
   d.taskAttempt=nil
   if d.attempt!=nil:d.data.states.rejectAttempt(d.attempt)
@@ -643,6 +653,7 @@ proc exportNode(d:ManagedDriver,id:uint64,rowIndex= -1):MountedNode=
     for child in item.children:children.add(d.exportNode(child))
     mountedDescription(item.description.hostNode,item.path,children,itemIndex=index)
 method exportSnapshot*(d:ManagedDriver):Snapshot=
+  if d.metadataOnly and d.data.snapshotValid:return d.data.snapshot
   if d.candidate!=nil:
     let config=d.data.owner.applicationConfig
     if d.exported.isNone:
@@ -675,6 +686,12 @@ method invokeAccepted*(d:ManagedDriver,key:string,event:Event):bool=
 method stats*(d:ManagedDriver):PerformanceStats=
   PerformanceStats(renders:d.data.totals.componentRenders,builtNodes:d.data.totals.normalizedHosts,
     mountedNodes:d.data.count,treeBytes:d.data.bytes+d.data.tasks.pendingTaskBytesInternal)
+method configureTaskPumpDriverInternal*(d:ManagedDriver,supported:bool)=
+  d.data.tasks.configureTaskServiceInternal(supported)
+method retireTaskPoolDriverInternal*(d:ManagedDriver)=
+  d.data.tasks.retireTaskPoolServiceInternal()
+method finalizeTaskPoolDriverInternal*(d:ManagedDriver)=
+  d.data.tasks.finalizeTaskPoolServiceInternal()
 method pumpDeferred*(d:ManagedDriver):TaskPumpReport=
   d.data.tasks.pumpTaskService()
 proc componentApplication*(root:UiDescription,title:string,width=640,height=480,
@@ -725,3 +742,7 @@ proc listStats*(runtime:Runtime,key:string):tuple[activeRows,warmRows,instances,
 
 proc recordFfiBytes*(runtime:Runtime,bytes:uint64) {.raises:[].}=
   if runtime.managed:ManagedDriver(runtime.runtimeDriver).data.totals.ffiBytes+=bytes
+
+proc taskServiceInternal*(runtime:Runtime):TaskService=
+  if not runtime.managed:fail("Runtime is not managed")
+  ManagedDriver(runtime.runtimeDriver).data.tasks
