@@ -814,3 +814,41 @@ suite "SDK component worker result fixture":
     checkpoint executed.output
     check executed.exitCode == 0
     check "SDK_TASK_RESULT=后台完成" in executed.output
+
+  test "SDK ORM config include accepts ordinary and literal dollar Unicode space paths once":
+    let base = createTempDir("leaf-orm-sdk-", "")
+    defer: removeDir(base)
+    for directory in ["ordinary SDK", "SDK 中文 $ $$"]:
+      let source = base / directory / "src"
+      createDir(source / "leaf")
+      for name in ["orm_config.nim", "orm_config.nims"]:
+        copyFile(RepositoryRoot / "src/leaf" / name, source / "leaf" / name)
+      for package in ["norm", "lowdb", "db_connector"]:
+        createDir(source / "leaf/vendor/orm" / package / "src")
+      # Resolving this module proves the path was parsed exactly once. A
+      # double-escaped path would point elsewhere instead of merely warning.
+      writeFile(source / "leaf/vendor/orm/norm/src/sdk_path_probe.nim", "const sdkPathMarker* = \"resolved\"\n")
+      let project = base / directory / "app"
+      createDir(project)
+      writeFile(project / "config.nims", "include " & escape((source / "leaf/orm_config.nims").replace("$", "$$")) & "\n")
+      writeFile(project / "app.nim", """
+import sdk_path_probe
+const leafOrmSqliteLibrary {.strdefine.} = ""
+when defined(windows): doAssert leafOrmSqliteLibrary == "winsqlite3.dll"
+elif defined(macosx): doAssert leafOrmSqliteLibrary == "libsqlite3.dylib"
+else: doAssert leafOrmSqliteLibrary == "libsqlite3.so(|.0)"
+var original = @[1]
+var copied: seq[int]
+deepCopy(copied, original)
+copied[0] = 2
+doAssert original[0] == 1
+doAssert sdkPathMarker == "resolved"
+echo "SDK_ORM_CONFIG_OK"
+""")
+      let compiler = getEnv("NIM", findExe("nim"))
+      let executed = runCommand(compiler, @["c", "-r", "--skipUserCfg:on", "--skipParentCfg:on",
+        "--nimcache:" & (project / "cache").replace("$", "$$"),
+        "--out:" & (project / "app").replace("$", "$$"), project / "app.nim"], project)
+      checkpoint directory & "\n" & executed.output
+      check executed.exitCode == 0
+      check "SDK_ORM_CONFIG_OK" in executed.output
