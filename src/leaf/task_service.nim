@@ -1,11 +1,12 @@
 ## UI-only lifecycle registrations and accepted deferred events. This layer
 ## knows Runtime/State contracts, never component descriptions or managed trees.
-import std/[tables, sets, algorithm, monotimes, times, options]
+import std/[tables, sets, algorithm, monotimes, options]
 import ./[core, component_state, task_contracts, task_worker]
 
 const
   LifecycleRecordBytesInternal* = 128
   MaxLifecycleEventsInternal* = 4 * MaxNodes
+  MaxCleanupRecordsInternal* = MaxLifecycleEventsInternal + MaxNodes
 
 type
   OwnerStamp* = object
@@ -32,14 +33,15 @@ type
   EventBatch = ref object
     events: seq[LifecycleEvent]
     cursor: int
-    next: EventBatch
+    exitCursor, exitEnd: int
+    next, nextExit: EventBatch
   OwnerUpdate = object
     registration: OwnerRegistration
     kind: LifecyclePhase
     epoch: uint64
     active: bool
   TaskRequest = ref object
-    identity, generation: uint64
+    identity, generation, closeEpoch, activityEpoch: uint64
     scope: TaskScope
     key, input: string
     work: TaskWork
@@ -67,7 +69,7 @@ type
     runtime: Runtime
     states: StateStore
     owners: Table[uint64, OwnerRegistration]
-    first, last: EventBatch
+    first, last, firstExit, lastExit: EventBatch
     pendingRecords: int
     nextGeneration: uint64
     pumping, supported, retired, intentsTouched: bool
@@ -75,6 +77,11 @@ type
     intents: seq[TaskIntent]
     records: array[64, TaskRequest]
     pool: TaskWorkerPool
+    closeEpoch: uint64
+    cleanup: seq[LifecycleEvent]
+    cleanupCursor: int
+    closePrepared: bool
+    clock: proc():int64 {.closure.}
     when compileOption("threads"): threadId: int
 
 proc requireUi(service: TaskService) =
@@ -415,7 +422,11 @@ proc prepareTasks*(service: TaskService, revision: uint64,
       events.add LifecycleEvent(registration: registration, kind: transition.kind,
         revision: revision, epoch: epoch, callback: callback, scope: registration.scope)
   service.prepareIntents(frame, result.updates)
-  if events.len > 0: result.batch = EventBatch(events: move(events))
+  if events.len > 0:
+    var exitEnd = 0
+    while exitEnd < events.len and events[exitEnd].kind in {LifecyclePhase.deactivate,LifecyclePhase.dispose}:
+      inc exitEnd
+    result.batch = EventBatch(events: move(events), exitEnd: exitEnd)
 
 proc publishTasks*(service: TaskService, attempt: TaskAttempt) {.raises: [].} =
   if attempt == nil or attempt.service != service or attempt.published or attempt.rejected: return
@@ -430,6 +441,10 @@ proc publishTasks*(service: TaskService, attempt: TaskAttempt) {.raises: [].} =
     if service.last == nil: service.first = attempt.batch
     else: service.last.next = attempt.batch
     service.last = attempt.batch
+    if attempt.batch.exitEnd > 0:
+      if service.lastExit == nil: service.firstExit = attempt.batch
+      else: service.lastExit.nextExit = attempt.batch
+      service.lastExit = attempt.batch
   service.pendingRecords = attempt.pendingRecords
   let frame = attempt.frame
   if frame != nil and not frame.published:
@@ -440,6 +455,8 @@ proc publishTasks*(service: TaskService, attempt: TaskAttempt) {.raises: [].} =
       inc service.nextRequestGeneration
       request.generation = service.nextRequestGeneration
       request.current = true
+      request.closeEpoch = service.closeEpoch
+      request.activityEpoch = service.owners.getOrDefault(request.scope.taskOwnerInternal).epoch
       request.input = ""
       for slot in service.records.mitems:
         if slot == nil:
@@ -455,14 +472,109 @@ proc rejectTasks*(service: TaskService, attempt: TaskAttempt) {.raises: [].} =
   attempt.batch = nil
   attempt.updates.setLen(0)
 
-proc popEvent(service: TaskService) =
-  let batch = service.first
-  batch.events[batch.cursor] = default(LifecycleEvent)
-  inc batch.cursor
+proc nextEvent(service: TaskService, exitsOnly: bool): tuple[batch:EventBatch,index:int] =
+  if exitsOnly:
+    let batch = service.firstExit
+    if batch != nil: return (batch,batch.exitCursor)
+  elif service.first != nil:
+    return (service.first,service.first.cursor)
+
+proc popEvent(service: TaskService, batch: EventBatch, index: int) =
+  batch.events[index] = default(LifecycleEvent)
   dec service.pendingRecords
-  if batch.cursor == batch.events.len:
-    service.first = batch.next
-    if service.first == nil: service.last = nil
+  # Prepared batches put exits first. A second, preallocated link chain avoids
+  # rescanning retained entering records for every exit or stale entering drop.
+  if index < batch.exitEnd:
+    inc batch.exitCursor
+    if batch.exitCursor == batch.exitEnd:
+      service.firstExit = batch.nextExit
+      batch.nextExit = nil
+      if service.firstExit == nil: service.lastExit = nil
+  while service.first != nil:
+    let head = service.first
+    while head.cursor < head.events.len and head.events[head.cursor].callback == nil:inc head.cursor
+    if head.cursor < head.events.len:break
+    service.first = head.next
+  if service.first == nil:service.last = nil
+
+proc readyTaskCountInternal*(service: TaskService): int =
+  service.requireUi()
+  if service.pool != nil:
+    for request in service.records:
+      if request != nil and service.pool.completionReadyInternal(request.ticket):inc result
+
+proc setTaskClockInternal*(service:TaskService,clock:proc():int64 {.closure.})=
+  service.requireUi()
+  if service.pumping or service.runtime.installingUpdate or executionRuntimeIdentity()!=0:
+    fail("task clock requires an ordinary boundary")
+  service.clock=clock
+proc now(service:TaskService):int64=
+  if service.clock==nil:getMonoTime().ticks else:service.clock()
+
+proc requireCloseTaskAccessInternal*(service:TaskService)=
+  service.requireUi()
+  service.states.requireIdle()
+
+proc prepareCloseTaskServiceInternal*(service:TaskService,owners:seq[OwnerRegistration])=
+  service.requireUi()
+  if service.closePrepared:return
+  var seen:HashSet[(uint64,uint64)]
+  var cleanup:seq[LifecycleEvent]
+  var batch=service.first
+  while batch!=nil:
+    for index in batch.cursor..<batch.events.len:
+      let event=batch.events[index]
+      if event.callback==nil or event.kind!=LifecyclePhase.dispose:continue
+      let stamp=(event.registration.stamp.owner,event.registration.stamp.generation)
+      if stamp notin seen:
+        if cleanup.len>=MaxCleanupRecordsInternal:fail("closing cleanup exceeds 50000 records")
+        seen.incl(stamp);cleanup.add(event)
+    batch=batch.next
+  for registration in owners:
+    let stamp=(registration.stamp.owner,registration.stamp.generation)
+    if registration.hooks[LifecyclePhase.dispose]!=nil and stamp notin seen:
+      if cleanup.len>=MaxCleanupRecordsInternal:fail("closing cleanup exceeds 50000 records")
+      seen.incl(stamp)
+      cleanup.add(LifecycleEvent(registration:registration,kind:LifecyclePhase.dispose,
+        revision:service.runtime.acceptedRevision,epoch:registration.epoch,
+        callback:registration.hooks[LifecyclePhase.dispose],scope:registration.scope))
+  service.cleanup=move(cleanup)
+  service.closePrepared=true
+
+proc retireTaskService*(service:TaskService) {.raises:[].}=
+  # Terminal detach seam: metadata/atomic cancellation only; never scopes,
+  # State invalidation, user cleanup, joins, or final pool-reference release.
+  if service==nil or service.retired:return
+  service.retired=true
+  inc service.closeEpoch
+  for request in service.records:
+    if request!=nil:
+      request.current=false
+      request.ticket.requestCancel()
+  if service.pool!=nil:service.pool.retirePool()
+
+proc cleanupPendingInternal*(service:TaskService):int=
+  service.requireUi()
+  service.cleanup.len-service.cleanupCursor
+proc cleanupBytesInternal*(service:TaskService):int=
+  service.cleanupPendingInternal()*LifecycleRecordBytesInternal
+
+proc taskRetiredInternal*(service:TaskService):bool=service.retired
+
+proc invalidateTaskStateInternal*(service:TaskService)=
+  service.requireUi()
+  service.intents.setLen(0);service.intentsTouched=false
+  for owner,registration in service.owners:
+    registration.accepted=false;registration.active=false
+    service.states.disposeOwner(owner)
+    for kind in LifecyclePhase:
+      if kind!=LifecyclePhase.dispose:registration.hooks[kind]=nil
+  service.owners.clear()
+  for request in service.records:
+    if request!=nil:
+      request.onResult=nil;request.onError=nil
+  service.first=nil;service.last=nil
+  service.firstExit=nil;service.lastExit=nil;service.pendingRecords=0
 
 proc boundedErrorMessage(message: string): string =
   # Strict Unicode scalar decoding: invalid bytes become U+FFFD. Apply the
@@ -483,6 +595,38 @@ proc logFailure(event: LifecycleEvent, error: ref CatchableError) =
       boundedErrorMessage(error.msg))
   except IOError: discard
 
+proc closeTaskService*(service:TaskService)=
+  service.requireUi()
+  while service.cleanupCursor<service.cleanup.len:
+    let event=service.cleanup[service.cleanupCursor]
+    var entered=false
+    try:
+      service.runtime.runRuntimeCleanup(proc()=
+        entered=true
+        service.cleanup[service.cleanupCursor]=default(LifecycleEvent)
+        inc service.cleanupCursor
+        event.registration.hooks[LifecyclePhase.dispose]=nil
+        event.callback(newLifecycleContextInternal(event.kind,event.revision,event.scope)))
+    except CatchableError as error:
+      event.logFailure(error)
+      if not entered:raise
+  reset(service.cleanup)
+  service.cleanupCursor=0
+
+proc requestValid(service:TaskService,request:TaskRequest,generation:uint64):bool=
+  if service.retired or request==nil or not request.current or request.generation!=generation or
+      request.closeEpoch!=service.closeEpoch:return false
+  let registration=service.owners.getOrDefault(request.scope.taskOwnerInternal)
+  registration!=nil and registration.accepted and
+    registration.stamp.generation==request.scope.taskGenerationInternal and
+    (registration.scope.retention==keepWhileRetained or
+      (registration.active and registration.epoch==request.activityEpoch))
+
+proc logTaskFailure(request:TaskRequest,message:string)=
+  try:stderr.writeLine("leaf: task owner=" & $request.scope.taskOwnerInternal &
+    " request=" & $request.identity & ": " & boundedErrorMessage(message))
+  except IOError:discard
+
 proc currentEntry(service: TaskService, event: LifecycleEvent): bool =
   if event.kind notin {LifecyclePhase.mount, LifecyclePhase.activate}: return true
   let registration = service.owners.getOrDefault(event.registration.stamp.owner)
@@ -491,58 +635,94 @@ proc currentEntry(service: TaskService, event: LifecycleEvent): bool =
 proc pumpTaskService*(service: TaskService): TaskPumpReport =
   service.requireUi()
   if service.runtime.installingUpdate or service.runtime.installingHook or service.pumping:
-    fail("lifecycle pump requires an ordinary UI safe point")
-  if not service.supported or service.retired: fail("task service cannot pump")
-  service.pumping = true
-  var callbacks, dropped, failed, processed: int
-  let deadline = getMonoTime() + initDuration(milliseconds = 4)
+    fail("task pump requires an ordinary UI safe point")
+  if service.retired:return newTaskPumpReportInternal(0,0,0,0,false)
+  if not service.supported:fail("task service cannot pump")
+  service.pumping=true
+  var delivered,callbacks,dropped,failed,processed:int
+  # Only completions already visible on entry may be delivered this round.
+  # New submits and tasks started by callbacks belong to a later pump.
+  var eligible:array[64,uint64]
   try:
-    if service.pool != nil:
+    let started=service.now()
+    if service.pool!=nil:
+      for index,request in service.records:
+        if request!=nil and service.pool.completionReadyInternal(request.ticket):eligible[index]=request.identity
       for request in service.records.mitems:
-        if request == nil: continue
+        if request==nil:continue
         if not request.current:
           request.ticket.requestCancel()
           if not request.submitted:
             service.pool.ackCompletion(request.ticket)
-            request = nil
+            request=nil
         elif not request.submitted:
-          if service.pool.submitReserved(request.ticket): request.submitted = true
-      while processed < 64 and (processed == 0 or getMonoTime() < deadline):
-        let completion = service.pool.peekCompletion()
-        if completion.isNone: break
-        var index = -1
-        for i, request in service.records:
-          if request != nil and request.identity == completion.get.id: index = i
-        if index < 0 or service.records[index].current: break
-        service.pool.ackCompletion(service.records[index].ticket)
-        service.records[index] = nil
-        inc dropped
-        inc processed
-    while service.first != nil and processed < 64 and
-        (processed == 0 or getMonoTime() < deadline):
-      let event = service.first.events[service.first.cursor]
-      if not service.currentEntry(event):
-        service.popEvent()
-        inc dropped
+          if service.pool.submitReserved(request.ticket):request.submitted=true
+    while not service.retired and processed<64 and
+        (processed==0 or service.now()-started<4_000_000):
+      var selected=service.nextEvent(true)
+      if selected.batch==nil:selected=service.nextEvent(false)
+      if selected.batch!=nil:
+        let event=selected.batch.events[selected.index]
+        if not service.currentEntry(event):
+          service.popEvent(selected.batch,selected.index)
+          inc dropped;inc processed
+          continue
+        var entered=false
+        try:
+          service.runtime.uiTask(proc()=
+            entered=true
+            service.popEvent(selected.batch,selected.index)
+            if not service.retired and service.currentEntry(event):
+              inc callbacks
+              event.callback(newLifecycleContextInternal(event.kind,event.revision,event.scope))
+            else:inc dropped)
+        except CatchableError as error:
+          inc failed;event.logFailure(error)
+        if not entered:break
         inc processed
         continue
-      var entered = false
+      if service.pool==nil:break
+      let completion=service.pool.peekCompletion()
+      if completion.isNone:break
+      var index = -1
+      for i,request in service.records:
+        if request!=nil and request.identity==completion.get.id:index=i
+      if index<0:raiseAssert("completion has no task record")
+      let request=service.records[index]
+      if eligible[index]!=request.identity:break
+      let generation=request.generation
+      if not service.requestValid(request,generation):
+        service.pool.ackCompletion(request.ticket)
+        service.records[index]=nil
+        request.current=false
+        inc dropped;inc processed
+        continue
+      var entered=false
       try:
-        service.runtime.uiTask(proc() =
-          # Scope refusal before this body leaves the record and its charge
-          # intact. Once entered, callback/flush/scope-exit failures never replay.
-          entered = true
-          service.popEvent()
-          # executionScope is application code too: it may accept a different
-          # owner/activity before invoking this body. Check again at delivery.
-          if service.currentEntry(event):
-            inc callbacks
-            event.callback(newLifecycleContextInternal(event.kind, event.revision, event.scope))
-          else: inc dropped)
+        service.runtime.uiTask(proc()=
+          entered=true
+          let valid=service.requestValid(request,generation)
+          # Successful entry owns this completed message. A callback/flush/
+          # scope-exit error never replays it; a refused entry leaves it intact.
+          service.pool.ackCompletion(request.ticket)
+          service.records[index]=nil
+          request.current=false
+          if not valid:
+            inc dropped
+          else:
+            inc delivered
+            if completion.get.failure.isSome:
+              let error=completion.get.failure.get
+              if request.onError!=nil:
+                inc callbacks;request.onError(error)
+              else:request.logTaskFailure(error.message)
+            else:
+              inc callbacks;request.onResult(completion.get.value))
       except CatchableError as error:
-        inc failed
-        event.logFailure(error)
-      if not entered: break
+        inc failed;request.logTaskFailure(error.msg)
+      if not entered:break
       inc processed
-  finally: service.pumping = false
-  newTaskPumpReportInternal(0, dropped, callbacks, failed, service.pendingRecords > 0 or (service.pool != nil and service.pool.workerPoolStats.reservedTasks > 0))
+  finally:service.pumping=false
+  newTaskPumpReportInternal(delivered,dropped,callbacks,failed,
+    not service.retired and (service.pendingRecords>0 or
+      (service.pool!=nil and service.pool.workerPoolStats.reservedTasks>0)))

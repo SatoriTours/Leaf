@@ -258,6 +258,10 @@ proc submitReserved*(pool: TaskWorkerPool, ticket: WorkerTicket): bool =
   release(pool.queue.lock)
   true
 
+proc completionReadyInternal*(pool: TaskWorkerPool, ticket: WorkerTicket): bool =
+  pool.requireOwner()
+  pool.memberIndex(ticket) >= 0 and ticket.data.slot.state.load(moAcquire) == completed
+
 proc peekCompletion*(pool: TaskWorkerPool): Option[WorkerCompletion] =
   pool.requireOwner()
   for ticket in pool.tickets:

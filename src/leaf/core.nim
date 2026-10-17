@@ -98,6 +98,8 @@ type
     counters: PerformanceStats
     inUpdate: bool
     taskBody: bool
+    closed, cleanupBusy, cleanupBody: bool
+    when compileOption("threads"): uiThreadId: int
     batchDepth:int
     rowCaches: Table[string, RowCache]
     rowClock: uint64
@@ -149,6 +151,12 @@ method pumpDeferred*(driver:RuntimeDriver):TaskPumpReport {.base.}=
 method configureTaskPumpDriverInternal*(driver:RuntimeDriver,supported:bool) {.base.}=discard
 method retireTaskPoolDriverInternal*(driver:RuntimeDriver) {.base.}=discard
 method finalizeTaskPoolDriverInternal*(driver:RuntimeDriver) {.base.}=discard
+method requireCloseAccessInternal*(driver:RuntimeDriver) {.base.}=discard
+method prepareCloseDeferredInternal*(driver:RuntimeDriver) {.base.}=discard
+method invalidateCloseStateInternal*(driver:RuntimeDriver) {.base.}=discard
+method retireDeferred*(driver:RuntimeDriver) {.base,raises:[].}=discard
+method closeDeferred*(driver:RuntimeDriver) {.base.}=discard
+method deferredRetiredInternal*(driver:RuntimeDriver):bool {.base.}=false
 proc runtimeDriver*(runtime:Runtime):RuntimeDriver=runtime.driver
 proc applicationConfig*(runtime:Runtime):tuple[title:string,width,height:int]=
   (runtime.app.title,runtime.app.width,runtime.app.height)
@@ -364,6 +372,8 @@ proc acceptedRevision*(runtime: Runtime): uint64 = runtime.revision
 
 proc installingUpdate*(runtime: Runtime): bool = runtime.inUpdate
 proc taskBodyInternal*(runtime:Runtime):bool=runtime.taskBody
+proc runtimeClosedInternal*(runtime:Runtime):bool=runtime.closed or
+  (runtime.driver!=nil and runtime.driver.deferredRetiredInternal())
 
 proc installingHook*(runtime: Runtime): bool = runtime.hookInstallation
 
@@ -443,6 +453,7 @@ proc postCommitDiagnostics(runtime: Runtime) =
   runtime.safeDump()
 
 proc refreshImpl(runtime: Runtime): bool =
+  if runtime.closed: return false
   if runtime.isCandidate: fail("candidate runtime cannot render")
   if runtime.inUpdate: fail("reentrant runtime update")
   runtime.inUpdate = true
@@ -502,6 +513,9 @@ proc refreshImpl(runtime: Runtime): bool =
     runtime.inUpdate = false
 
 proc flushDriverImpl(runtime:Runtime,forceRoot:bool):bool=
+  if runtime.runtimeClosedInternal:
+    runtime.driver.reject()
+    return false
   if runtime.isCandidate or runtime.inUpdate:fail("reentrant runtime update")
   runtime.inUpdate=true
   var staged:RuntimeDriver
@@ -527,6 +541,7 @@ proc flush*(runtime:Runtime):bool=
     completed=if runtime.driver==nil:runtime.refreshImpl() else:runtime.flushDriverImpl(false)
   completed
 proc batch*(runtime:Runtime,body:proc() {.closure.})=
+  if runtime.runtimeClosedInternal:fail("Runtime is closed")
   if runtime.batchDepth>0:
     inc runtime.batchDepth
     try:body()
@@ -571,6 +586,50 @@ proc finalizeTaskPoolInternal*(runtime:Runtime)=
       executionRuntimeIdentity()!=0:fail("task pool cleanup requires an ordinary UI finally")
   if runtime.driver!=nil:runtime.driver.finalizeTaskPoolDriverInternal()
 
+proc requireCloseUi(runtime:Runtime)=
+  if runtime==nil:fail("missing Runtime")
+  when compileOption("threads"):
+    if runtime.uiThreadId!=getThreadId():fail("Runtime close requires its UI thread")
+  if executionRuntimeIdentity()!=0 and executionRuntimeIdentity()!=runtime.executionId:
+    fail("cannot close another executing Runtime")
+  if runtime.isCandidate:fail("candidate Runtime cannot close")
+
+proc runRuntimeCleanup*(runtime:Runtime,body:proc() {.closure.})=
+  runtime.requireCloseUi()
+  if not runtime.closed or runtime.inUpdate or executionRuntimeIdentity()!=0:
+    fail("cleanup requires a closed Runtime ordinary boundary")
+  runtime.inUpdate=true
+  try:
+    inExecutionScope(runtime):
+      runtime.cleanupBody=true
+      try:body()
+      finally:runtime.cleanupBody=false
+  finally:runtime.inUpdate=false
+
+proc closeRuntime*(runtime:Runtime)=
+  runtime.requireCloseUi()
+  if runtime.closed and runtime.cleanupBusy and runtime.cleanupBody:return
+  if executionRuntimeIdentity()!=0 and not runtime.taskBody:
+    fail("public close requires its Runtime business body or an ordinary boundary")
+  if runtime.hookInstallation or (runtime.inUpdate and not runtime.taskBody):
+    fail("cannot close Runtime during protected computation or commit")
+  if runtime.driver!=nil:runtime.driver.requireCloseAccessInternal()
+  if not runtime.closed:
+    if runtime.driver!=nil:runtime.driver.prepareCloseDeferredInternal()
+    runtime.closed=true
+    if runtime.driver!=nil:
+      runtime.driver.retireDeferred()
+      runtime.driver.invalidateCloseStateInternal()
+  # Legal business callbacks close admission/State immediately, but retain
+  # cleanup records and the independent pool pin for an ordinary close/finally.
+  if runtime.taskBody or runtime.inUpdate or executionRuntimeIdentity()!=0:return
+  runtime.cleanupBusy=true
+  try:
+    if runtime.driver!=nil:runtime.driver.closeDeferred()
+  finally:
+    runtime.cleanupBusy=false
+    runtime.finalizeTaskPoolInternal()
+
 proc refresh*(runtime: Runtime): bool =
   var completed: bool
   inExecutionScope(runtime):
@@ -586,6 +645,7 @@ proc newRuntime*(app: Application, validator: SnapshotValidator = nil,
   if nextRuntimeId==high(uint64):fail("Runtime identity exhausted")
   inc nextRuntimeId
   result = Runtime(executionId:nextRuntimeId,app: app, context: BuildContext(), validator: validator, diagnostics: diagnostics)
+  when compileOption("threads"): result.uiThreadId=getThreadId()
   if app.driverFactory!=nil:result.driver=app.driverFactory(result)
   discard result.refresh()
 
@@ -807,6 +867,7 @@ proc find*(runtime: Runtime, key: string): MountedNode =
   runtime.keys[key][0]
 
 proc dispatchImpl(runtime: Runtime, key: string, event: Event): bool =
+  if runtime.runtimeClosedInternal:fail("Runtime is closed")
   if runtime.eventsFrozen:
     fail("business events are frozen: " & runtime.frozenReason)
   if runtime.isCandidate: fail("candidate runtime cannot dispatch business events")
@@ -818,6 +879,9 @@ proc dispatchImpl(runtime: Runtime, key: string, event: Event): bool =
       let invoked=runtime.driver.invokeAccepted(key,event)
       runtime.taskBody=false
       runtime.inUpdate=false
+      if runtime.runtimeClosedInternal:
+        runtime.driver.reject()
+        return false
       if not invoked:return false
       return runtime.flushDriverImpl(false)
     except CatchableError:
@@ -832,10 +896,12 @@ proc dispatchImpl(runtime: Runtime, key: string, event: Event): bool =
   if callback == nil: fail("node has no " & $event.kind & " handler: " & key)
   try:
     runtime.inUpdate = true
+    runtime.taskBody = true
     try:
       callback(event)
       inc runtime.counters.dispatches
     finally:
+      runtime.taskBody = false
       runtime.inUpdate = false
     result = runtime.refresh()
     if runtime.diagnostics != nil:
@@ -1002,6 +1068,7 @@ proc materializeImpl(runtime: Runtime, key: string, first, finish: int,
   ## The accepted viewport travels through the same commit gate as refresh and
   ## prepare; a rejected list candidate leaves accepted rows and stats intact.
   ## Preparing an isolated candidate is allowed and only stages its own state.
+  if runtime.runtimeClosedInternal: fail("Runtime is closed")
   if runtime.inUpdate: fail("reentrant list request")
   if runtime.isCandidate:
     result = materializeInto(runtime, key, first, finish, protected)

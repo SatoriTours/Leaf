@@ -692,6 +692,40 @@ method retireTaskPoolDriverInternal*(d:ManagedDriver)=
   d.data.tasks.retireTaskPoolServiceInternal()
 method finalizeTaskPoolDriverInternal*(d:ManagedDriver)=
   d.data.tasks.finalizeTaskPoolServiceInternal()
+method requireCloseAccessInternal*(d:ManagedDriver)=
+  d.data.tasks.requireCloseTaskAccessInternal()
+method prepareCloseDeferredInternal*(d:ManagedDriver)=
+  var owners:seq[Instance]
+  for item in d.data.instances.values:
+    if item.description.kind==DescriptionKind.component:owners.add(item)
+  proc ranks(item:Instance):seq[int]=
+    var ancestor=item
+    while ancestor!=nil:
+      result.add(ancestor.siblingIndex)
+      ancestor=d.data.instances.getOrDefault(ancestor.parent)
+    result.reverse()
+  owners.sort(proc(a,b:Instance):int=
+    result=cmp(b.depth,a.depth)
+    if result==0:
+      let left=ranks(a);let right=ranks(b)
+      for i in 0..<min(left.len,right.len):
+        result=cmp(left[i],right[i])
+        if result!=0:break
+      if result==0:result=cmp(left.len,right.len)
+    if result==0:result=cmp(a.path,b.path))
+  var ordered:seq[OwnerRegistration]
+  for item in owners:ordered.add(item.registration)
+  d.data.tasks.prepareCloseTaskServiceInternal(ordered)
+method invalidateCloseStateInternal*(d:ManagedDriver)=
+  d.data.tasks.invalidateTaskStateInternal()
+  d.data.states.clearQueued()
+  d.data.invalid.clear()
+method retireDeferred*(d:ManagedDriver) {.raises:[].}=
+  d.data.tasks.retireTaskService()
+method closeDeferred*(d:ManagedDriver)=
+  d.data.tasks.closeTaskService()
+method deferredRetiredInternal*(d:ManagedDriver):bool=
+  d.data.tasks.taskRetiredInternal()
 method pumpDeferred*(d:ManagedDriver):TaskPumpReport=
   d.data.tasks.pumpTaskService()
 proc componentApplication*(root:UiDescription,title:string,width=640,height=480,

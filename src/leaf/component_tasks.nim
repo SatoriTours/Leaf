@@ -25,3 +25,5 @@ proc cancel*(task: TaskHandle) =
   if domain == nil: return
   if not (domain of TaskService): fail("invalid task handle")
   TaskService(domain).cancelTaskInternal(task)
+
+export core.closeRuntime
