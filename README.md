@@ -85,6 +85,8 @@ when isMainModule: quit(run(app))
 
 ## 开发与发布
 
+[当前开发进度与下一步](docs/progress.md) · [Windows 当前版本验收步骤](docs/windows-acceptance.md)。代码实现、CI 构建和实机平台验收分开记录。
+
 ```sh
 # 将源码构建的 CLI 加入当前终端 PATH。
 export PATH="$PWD/target/nim:$PATH"

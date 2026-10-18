@@ -33,6 +33,7 @@ type Win32Calls* = object
   removeSubclass*: proc(window: HWND, callback: SUBCLASSPROC, id: UINT_PTR): BOOL {.closure, raises: [CatchableError].}
   defaultSubclass*: proc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.closure, raises: [CatchableError].}
   setText*: proc(window: HWND, text: WidePtr): BOOL {.closure, raises: [CatchableError].}
+  invalidate*: proc(window: HWND, rect: pointer, erase: BOOL): BOOL {.closure, raises: [CatchableError].}
   enable*: proc(window: HWND, enabled: BOOL): BOOL {.closure, raises: [CatchableError].}
   send*: proc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.closure, raises: [CatchableError].}
   getDC*: proc(window: HWND): HDC {.closure, raises: [CatchableError].}
@@ -82,6 +83,7 @@ proc systemWin32Calls*(): Win32Calls =
   result.removeSubclass = proc(window: HWND, callback: SUBCLASSPROC, id: UINT_PTR): BOOL = RemoveWindowSubclass(window,callback,id)
   result.defaultSubclass = proc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT = DefSubclassProc(window,message,wp,lp)
   result.setText = proc(window: HWND, text: WidePtr): BOOL = SetWindowTextW(window,text)
+  result.invalidate = proc(window: HWND, rect: pointer, erase: BOOL): BOOL = InvalidateRect(window,rect,erase)
   result.enable = proc(window: HWND, enabled: BOOL): BOOL = EnableWindow(window,enabled)
   result.send = proc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT = SendMessageW(window,message,wp,lp)
   result.getDC = proc(window: HWND): HDC = GetDC(window)

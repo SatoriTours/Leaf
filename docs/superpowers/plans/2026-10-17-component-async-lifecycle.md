@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-17-component-async-lifecycle-design.md`（用户在原会话回复“继续”，确认规格后进入本计划阶段）。
 
-状态：Task1–7代码与各任务独立门禁已完成；Task6仅代码/静态Approved，Windows平台执行仍NotRun。Task7冻结HEAD为7abb798，独立审查C0/I0/M2；两项Minor交最终整分支审查裁定。整分支最终审查、合并与推送尚未完成。实际命令、退出码及审查证据见同日期验证记录和执行 ledger；以下预期断言本身不代表已取得的证据。
+当前状态（2026-10-18）：Task1–7 实现、整分支问题修复及固定差异复核已完成，已合并主分支并推送；当前代码基线 `c207e48` 的四条 CI 均成功。Task6 的首轮真实 Windows 非提权交互失败已保留；修正四处测试夹具后，七套非提权交互开发自测及独立复验均为 96/0 通过，见[环境记录](../../windows-environment.md)，Step4 的 Windows GREEN 已补齐。实施前的原始 Windows RED 证据仍未取得，Step2 保持未勾选，不能把后续失败写成实施前 RED；本批通过也不批准完整平台/H 门。最终复核、合并及 Windows SDK 后续修复见[合并验收记录](../reviews/2026-10-17-component-async-lifecycle-local-merge-verification.md)，最新固定运行和待验范围见[开发进度](../../progress.md)。下列计划步骤、各阶段冻结 HEAD 和执行 ledger 保留历史输入，不把预期断言或历史待审查状态当作当前证据。
 
 ## Global Constraints
 
@@ -179,10 +179,10 @@ check deliveredAfterFinalClose == 0
 
 - [ ] **Step 2: 验证RED。** 在真实Windows环境运行`nim c -r scripts/test_win32.nim`，新测试必须对缺失行为失败；没有Windows时只完成可用的源码/交叉编译检查并记NotRun，不能宣称已取得Windows RED/GREEN。
 - [x] **Step 3: 实现host集成。** 待任务标记在原有普通Nim安全tick消费；close/busy优先级、消息编号、取消timer和资源lease关闭按既有host协议处理。宿主关闭路径不join worker；最终Runtime清理按Task4普通边界处理。
-- [ ] **Step 4: 验证GREEN。** Windows重跑官方runner及已有控件/输入/测量回归；记录实际工具链、系统和提交身份。当前Linux只能跑平台无关任务/host_state测试及可用交叉编译，不把它们记为Windows运行通过。
+- [x] **Step 4: 验证GREEN。** 2026-10-18 在重建的 Windows 11 Enterprise Evaluation build26300 / Nim2.2.6 / GCC11.1.0 / windres2.36.1 上，官方 runner 七套（含已有控件/输入/测量）开发自测与独立复验均为 96 OK/0 FAILED/0 SKIPPED，compile/run=0/0、Session1/elevated=false。输入为 c207e48 归档加测试文件 SHA256 `42d51442134f22470502858db8377218b251bda2b3efa1d6b20de7a954244be9`，不是已提交的新 HEAD；原始日志及未验范围见[环境记录](../../windows-environment.md)。此前 Linux/静态结果仍仅作历史证据。
 - [x] **Step 5: 提交。** `feat: pump component tasks at Win32 safe boundaries`；平台证据不足时任务代码与验收状态分开记录。
 
-代码及静态Spec/Quality验收已通过，Critical0/Important0/Minor0。Step2/4真实Windows执行仍NotRun，保留未完成勾选；Linux36项与六套目标语义/C生成不替代平台行为。按本计划允许的无Windows分支，Task7可继续，最终交付仍明确这一平台限制。
+历史阶段代码及静态 Spec/Quality 验收已通过，Windows Step2/4 当时均为 NotRun，Linux36项与六套目标语义/C生成不代替平台行为。2026-10-18 已用真实 Windows 七套开发自测和独立复验补齐 Step4 GREEN；Step2 的实施前 Windows RED 仍未取得，保留未勾选。Task7 当时按无 Windows 分支推进的历史记录不改写；当前完整平台、IME/DPI/H 门仍按实际证据另行判断。
 
 ## Task 7：示例、SDK搬迁、性能与整体验收
 

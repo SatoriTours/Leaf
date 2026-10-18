@@ -192,6 +192,7 @@ const
   SM_CYHSCROLL* = 3'i32
 {.push stdcall, dynlib: "user32.dll", importc, raises: [].}
 proc SetWindowTextW*(window: HWND, text: WidePtr): BOOL
+proc InvalidateRect*(window: HWND, rect: pointer, erase: BOOL): BOOL
 proc EnableWindow*(window: HWND, enabled: BOOL): BOOL
 proc IsWindowEnabled*(window: HWND): BOOL
 proc IsWindowVisible*(window: HWND): BOOL

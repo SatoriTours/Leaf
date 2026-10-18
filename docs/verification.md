@@ -1,5 +1,15 @@
 # 验证
 
+## 当前汇总（2026-10-18）
+
+当前代码基线为 `c207e48af8b33b8e6ecaf4dc1548ec9b2541b737`，已在主分支和远端；该提交的四条 CI 均成功，Linux CI 日志确认 102 个 Nim 套件、55 项 Rust 测试通过，四平台 GPUI SDK 已发布。固定运行链接、本次本地抽检和后续计划见[开发进度](progress.md)。
+
+组件异步生命周期的最终修复已完成固定差异复核并合并，详见[合并验收记录](superpowers/reviews/2026-10-17-component-async-lifecycle-local-merge-verification.md)。本页下面按日期保留历史输入、失败与当时“待审查/未合并”的结论，不将历史测试数字改写为当前全量结果。
+
+按用户授权重建的持久 Windows 环境已运行；首轮 12 通过/4 失败的日志保留。后续只修复一份测试文件的四处夹具/观察边界，框架实现未改；Session 1/elevated=false 下七套开发自测已完整运行，编译与运行退出 0，96 项通过、0 失败/跳过；独立功能验收者对相同 SHA 另行完整执行七套，也为 96/0/0，原会话已核对 diff 和原始证据，本批测试修复通过。固定输入与逐套结果见[环境记录](windows-environment.md)。后续[Windows 真实窗口补验](windows-window-validation.md)已实际完成 GPUI ABI1/2 的本批任务流程、键盘及在途关闭，native_forms 键盘与基础 UIA 也通过；随后发现并保留了自然完成态模型标签缺字、resize才恢复的失败；现已局部重绘修复，新增屏幕回归使Win32从七套变八套，开发及独立复验均为97/0/0、compile/run=0/0，修改源重建应用的原键盘路径和自然态截图通过。全量通用回归、macOS、系统 IME、跨屏 DPI 和完整辅助技术等仍未完成，不能由 CI/SDK 绿色替代；后续步骤见[Windows 验收](windows-acceptance.md)。
+
+## 历史验证记录
+
 验收包含三条独立路径：Nim 核心与工具回归、GPUI Kit 控件测试、Linux 真实窗口测试。无窗口回归不能替代实际桌面交互。
 
 2026-10-05 在 Linux x86_64 上完成以下验收，使用 Nim 2.2.6、GPUI Kit 0.7.0 以及锁定的 Cargo 依赖。

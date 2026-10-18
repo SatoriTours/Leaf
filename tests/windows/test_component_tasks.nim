@@ -101,9 +101,10 @@ suite "Win32 ordinary task turns":
       rt.closeRuntime()
 
   test "native installation callback cannot claim lifecycle or completion in nested pump":
-    held.store(false)
+    held.store(false); started.store(false)
     var h: Win32Host
     var delivered, hookEntries: int
+    var attachingNative = false
     let rt = newRuntime(ownerApp(proc(s: State[int]) =
       inc delivered
       PostQuitMessage(0)))
@@ -111,16 +112,24 @@ suite "Win32 ordinary task turns":
     let create = c.createWindow
     c.createWindow = proc(exStyle: DWORD, className, title: WidePtr, style: DWORD,
         x, y, width, height: int32, parent: HWND, menu: HMENU, instance: HINSTANCE, param: pointer): HWND =
-      if rt.installingHook:
+      if attachingNative:
         inc hookEntries
+        # installingHook belongs to the isolated candidate; the accepted
+        # Runtime keeps installingUpdate through prepare/apply and scope exit.
+        if not rt.installingUpdate: fail("native installation lost update protection")
+        if rt.committerOwner != 0: fail("committer published during native installation")
         try: discard h.pump()
         except Exception as error: fail("nested installation pump: " & error.msg)
+        if started.load(): fail("worker started during native installation")
         if delivered != 0: fail("delivery during native installation")
       create(exStyle, className, title, style, x, y, width, height, parent, menu, instance, param)
     h = createHost("hook tasks", DipSize(width: 400, height: 300), c)
     h.setStartupScope(proc(): bool = rt.installingHook or rt.installingUpdate)
     let win = newWin32Backend(h, c)
-    let session = win.attachWin32Backend(rt)
+    var session: BackendSession
+    attachingNative = true
+    try: session = win.attachWin32Backend(rt)
+    finally: attachingNative = false
     win.bindSession(session)
     h.bindSession(session, proc(): bool = false)
     h.setSafeTick(proc() = session.drainEvents())
@@ -255,6 +264,8 @@ suite "Win32 task and close scheduling":
     held.store(false)
     var taskId, closeId: UINT_PTR
     var destroys, delivered: int
+    var hostWindow: HWND
+    var childDestroys: seq[HWND]
     var blocked = false
     var c = systemWin32Calls()
     let setTimer = c.setTimer
@@ -264,12 +275,22 @@ suite "Win32 task and close scheduling":
       if interval == 16: taskId = result
       if interval == 30: closeId = result
     c.destroyWindow = proc(w: HWND): BOOL =
-      inc destroys
-      if destroys == 1: setLastError(5); return 0
+      if w == hostWindow:
+        inc destroys
+        if destroys == 1: setLastError(5); return 0
+      else:
+        childDestroys.add(w)
       destroy(w)
     let rt = newRuntime(ownerApp(proc(s: State[int]) = inc delivered))
     let f = attach(rt, c, proc(): bool = blocked)
+    hostWindow = f.h.windowHandle
+    childWindows.setLen(0)
+    discard EnumChildWindows(hostWindow, collectChild, 0)
+    var expectedChildren: seq[HWND]
+    for child in childWindows: expectedChildren.add(child)
+    childDestroys.setLen(0) # Only count teardown, not temporary prepare probes.
     try:
+      check expectedChildren.len > 0
       blocked = true
       discard SendMessageW(f.h.windowHandle, WM_HOST_TICK, 0, 0)
       f.h.requestClose()
@@ -282,7 +303,16 @@ suite "Win32 task and close scheduling":
       check destroys == 0
       blocked = false
       check f.h.boundedPump() == 0
-      check destroys == 2
+      check destroys == 2 # One refused Host destruction, then one real retry.
+      check childDestroys.len == expectedChildren.len
+      for child in expectedChildren:
+        var attempts = 0
+        for destroyed in childDestroys:
+          if destroyed == child: inc attempts
+        check attempts == 1
+      check f.win.diagnostics.liveWindows == 0
+      check f.win.diagnostics.liveSubclasses == 0
+      check f.win.diagnostics.liveRoots == 0
       check delivered == 0
     finally:
       blocked = false
@@ -311,16 +341,24 @@ suite "Win32 task and close scheduling":
 
 suite "public native cleanup ownership":
   test "nonempty output is refused before new Runtime and preserves old owner":
-    let rt = newRuntime(Application(title: "existing", render: proc(ctx: BuildContext): Node = text("old")))
+    let rt = newRuntime(Application(title: "existing", width: 400, height: 300,
+      render: proc(ctx: BuildContext): Node = text("old")))
     var owner = rt
     var renders = 0
     try:
-      expect UiError:
-        discard runNative(Application(title: "new", render: proc(ctx: BuildContext): Node =
-          inc renders
-          text("new")), cleanupOwner = addr owner)
+      var rejected = false
+      try:
+        discard runNative(Application(title: "new", width: 400, height: 300,
+          render: proc(ctx: BuildContext): Node =
+            inc renders
+            raise newException(UiError, "unexpected new Runtime construction")), cleanupOwner = addr owner)
+      except UiError as error:
+        rejected = true
+        check error.msg.contains("cleanup owner slot must be empty")
+      check rejected
       check owner == rt
       check renders == 0
+      check rt.snapshot.root.node.text == "old"
     finally: rt.closeRuntime()
 
   test "ordinary successful status return closes accepted Runtime exactly once":
@@ -406,9 +444,12 @@ suite "public native cleanup ownership":
   test "installation scope rejection does not hide original error or lose cleanup owner":
     publicRefuse = false
     var disposed = 0
+    let cause = newException(IOError, "installation cause")
+    let primary = newException(ValueError, "native installation scope")
+    primary.parent = cause
     var app = cleanupApp(proc() = inc disposed)
     app.executionScope = proc(body: proc() {.closure.}) =
-      if publicRefuse: fail("native installation scope")
+      if publicRefuse: raise primary
       body()
       publicRefuse = true
     var failure: ref Win32RunError
@@ -417,8 +458,11 @@ suite "public native cleanup ownership":
       check false
     except Win32RunError as error:
       failure = error
-      check error.msg == "native installation scope"
-      check error.parent != nil
+      check error.msg.startsWith("native installation scope")
+      check error.msg.contains("body invoked 0")
+      check error.parent == primary
+      if error.parent != nil: check error.parent of ValueError
+      check primary.parent == cause
       check error.exitStatus.isNone
       check error.cleanupHost == nil
       check error.cleanupRuntime != nil

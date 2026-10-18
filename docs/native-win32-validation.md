@@ -1,5 +1,9 @@
 # Windows 原生表单开发与验收
 
+当前代码/CI 状态见[开发进度](progress.md)，当前七套 runner 的身份、日志和平台验收步骤见[Windows 当前版本验收](windows-acceptance.md)。下文日期化的五套/77 项等数字保留为历史开发证据，不表示当前源码已在 Windows 全量重验。2026-10-18 新持久环境首轮的 12 通过/4 失败已保留；修正四项测试夹具后，七套非提权交互开发自测及独立复验均为 96 通过/0 失败，详见[环境记录](windows-environment.md)。这不批准完整 A2 平台支持或关闭 H 门。
+
+同日后续[真实窗口补验](windows-window-validation.md)：GPUI ABI1/2 本批任务流程、native_forms 键盘与基础 UIA 通过，期间发现原生模型标签缺字、resize才恢复的视觉失败；现已补局部客户区失效与屏幕回归，八套97/0开发自测及独立复验通过，重建应用的原键盘路径自然态完整。原失败保留。真实 IME、物理混合双屏和完整辅助技术 H 门仍未关闭；下方历史 NotRun 表述保留其日期范围。
+
 ## 当前范围
 
 A2 提供 Windows x64 原生表单后端：column、row、text、button、input、checkbox、toggle、progress、tag、separator、spinner。toggle 使用系统 checkbox 语义。默认后端仍为 GPUI；项目可在 leaf.json 设置 `"backend": "native"`，命令行 `--backend` 优先。
@@ -41,7 +45,9 @@ nim c -r --threads:on --path:src scripts/test_win32.nim
 if ($LASTEXITCODE -ne 0) { throw "Windows native tests failed" }
 ```
 
-runner 自行生成并链接每个测试 EXE 的 manifest；无需预先生成 `.o`。它实际执行 tests/windows 中的五个套件，覆盖宿主 ABI/线程/关闭、真实 stock HWND、prepare/discard/restore 与失败资源重试、系统字体测量/缓存、事件来源隔离、受控输入及组合消息、完整 native/headless 构建和应用启动/关闭、PE manifest、复杂输出路径及 GPUI 隔离。非 Windows 执行该 runner 输出 NotRun、退出码 2，不能作为 Windows 通过证据。
+runner 自行生成并链接每个测试 EXE 的 manifest；无需预先生成 `.o`。它动态扫描 tests/windows/test_*.nim，2026-10-18 c207e48基线共有七个套件，包含新增的组件宿主与任务集成；覆盖宿主 ABI/线程/关闭、真实 stock HWND、prepare/discard/restore 与失败资源重试、系统字体测量/缓存、事件来源隔离、受控输入及组合消息、完整 native/headless 构建和应用启动/关闭、PE manifest、复杂输出路径及 GPUI 隔离。非 Windows 执行该 runner 输出 NotRun、退出码 2，不能作为 Windows 通过证据。
+
+本批新增 `test_native_redraw.nim`，当前修复输入为八套97项，开发与独立验收均97/0/0；它需解锁、控件未遮挡的交互桌面，真实屏幕自然态像素不能由 caption/模型或强制重绘后的对照代替。具体输入与完整日志见[真实窗口补验](windows-window-validation.md)。上述七套/历史数字仍按各自基线保留。
 
 平台无关回归：
 

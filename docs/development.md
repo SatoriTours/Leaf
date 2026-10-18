@@ -1,5 +1,7 @@
 # 开发
 
+当前实现、固定提交的 CI 结果和待验范围见[开发进度](progress.md)；Windows 实跑按[当前版本验收步骤](windows-acceptance.md)记录，不以 Linux 或 SDK 构建代替。
+
 安装 Nim 2.2.6+ 和 Rust 1.92+，按照 README 安装平台图形依赖。GPUI Kit 固定为 0.7.0，提交 `Cargo.lock`。
 
 ```sh
@@ -37,6 +39,22 @@ nim c -r --out:target/nim/test_runner scripts/test.nim --database-only
 nim c -r --out:target/nim/native_test scripts/native_test.nim
 nim c -d:release -r --out:target/nim/benchmark benchmarks/runtime.nim
 ```
+
+## 本地工具链与动态依赖排查
+
+`NIM` 可指定已有 Nim 编译器的绝对路径；这不会创建名为 `nim` 的 shell 命令。直接执行文档中的 `nim ...` 前，仍需将该编译器目录加入当前终端 PATH，或改用其绝对路径。不要因为 PATH 缺少命令就重新安装一份工具链。
+
+Linux 动态桥接库加载失败时，先确认文件存在，再检查其传递依赖：
+
+```sh
+ldd target/debug/libleaf_gpui.so
+```
+
+`not found` 表示动态依赖缺失；不要直接将“native library could not be opened”归因于框架 ABI 或重建源码。若本机已有可信的依赖目录，可仅在本次测试的子 shell 中分别设置 `LIBRARY_PATH`（GCC 链接查找）与 `LD_LIBRARY_PATH`（运行时动态加载），二者不能互相替代。不要将临时 `/tmp` 路径写入 SDK、项目配置或系统 shell profile。
+
+这只补足本机系统库搜索，不提供图形会话。`--check`/普通 headless 成功也不代表真实窗口可用；窗口仍需实际 X11/Wayland 环境和图形驱动。定向抽检不替代全量回归，系统依赖失败也不应当作产品行为的 RED。
+
+## 桌面与 Windows 验证
 
 真实桌面验收当前使用 Linux X11、Xvfb 和 xdotool。`LEAF_TEST_XVFB` / `LEAF_TEST_XDOTOOL` 可指定测试工具。Xvfb 中的软件图形结果不能代表硬件 GPU 性能。
 

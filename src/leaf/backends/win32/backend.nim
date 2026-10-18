@@ -334,6 +334,10 @@ proc properties(win: Win32Backend, control: NativeControl, entity: MountedEntity
       let wide = checkedWide(entity.label)
       if win.calls.setText(control.window, unsafeAddr wide[0]) == 0: nativeError("SetWindowTextW")
       inc win.stats.setTexts
+      # Stock label controls do not always invalidate their own client area for
+      # WM_SETTEXT. Without this the visible text is only repainted where the
+      # window region happens to grow, leaving stale glyphs until a resize.
+      if win.calls.invalidate(control.window, nil, 1) == 0: nativeError("InvalidateRect")
   discard win.calls.enable(control.window, BOOL(ord(entity.props.control.enabled.get(true))))
   case entity.kind
   of NodeKind.checkbox, NodeKind.toggle:
