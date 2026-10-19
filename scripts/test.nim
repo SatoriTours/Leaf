@@ -25,7 +25,7 @@ proc main(): int =
           "test_db_cli.nim", "test_cli_options.nim", "test_project_context.nim",
           "test_sqlite.nim", "test_split_process.nim"]): continue
       if not modelOnly or name.startsWith("test_model_") or name in [
-          "test_core.nim", "test_lists.nim", "test_sqlite.nim", "test_scaffold.nim", "test_scaffold_model.nim"]:
+          "test_core.nim", "test_component_lists.nim", "test_sqlite.nim", "test_scaffold.nim", "test_scaffold_model.nim"]:
         tests.add(path)
   tests.sort()
   if tests.len == 0:

@@ -1,5 +1,6 @@
 import std/[base64, httpclient, json, os, strutils, tempfiles, unittest]
 import ../../scripts/collect_sdk_notices
+import ../../src/leaf/migrations/fingerprint
 
 proc dependency(directory: string, name = "demo", version = "1.0.0",
                 license = "MIT"): JsonNode =
@@ -182,3 +183,37 @@ suite "upstream notice retrieval":
       expect ValueError:
         discard fetchLicense("https://github.com/owner/repo", "bad", get)
     check calls == 2
+
+suite "published exact-version license baseline":
+  test "seahash 4.1.0 uses its published text/source without an upstream call":
+    let baseline = parseFile(currentSourcePath().parentDir.parentDir.parentDir /
+      "src/leaf/vendor/GPUI-NOTICES.json")
+    let root = createTempDir("leaf-notices-seahash-", "")
+    defer: removeDir(root)
+    writeFile(root / "Cargo.toml", "[package]")
+    let item = collect(metadata(dependency(root, "seahash", "4.1.0")),
+      baseline, unexpected)["packages"][0]
+    let text = item["texts"]["LICENSE"].getStr()
+    check sha256Text(text) ==
+      "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    check item["license_source"].getStr() ==
+      "https://gitlab.redox-os.org/redox-os/seahash/-/raw/master/LICENSE"
+    check text.startsWith("Permission is hereby granted, free of charge, to any\n")
+    check text.endsWith("DEALINGS IN THE SOFTWARE.\n")
+
+  test "a different seahash version never reuses the cached baseline":
+    let baseline = parseFile(currentSourcePath().parentDir.parentDir.parentDir /
+      "src/leaf/vendor/GPUI-NOTICES.json")
+    let root = createTempDir("leaf-notices-seahash-version-", "")
+    defer: removeDir(root)
+    writeFile(root / "Cargo.toml", "[package]")
+    let upstream502: DownloadProc = proc(package: JsonNode): JsonNode =
+      let error = newException(LicenseHttpError, "HTTP 502")
+      error.status = 502
+      raise error
+    try:
+      discard collect(metadata(dependency(root, "seahash", "4.1.1")),
+        baseline, upstream502)
+      check false
+    except ValueError as error:
+      check "license retrieval failed for seahash 4.1.1" in error.msg

@@ -147,7 +147,9 @@ jobs:
           nim c -r --out:target/nim/test_sdk tests/nim/test_sdk.nim
           nim c -r --out:target/nim/test_native_library tests/nim/test_native_library.nim
           nim c -r --out:target/nim/test_sqlite tests/nim/test_sqlite.nim
-          nim c -r --out:target/nim/test_routing tests/nim/test_routing.nim
+          nim c -r --out:target/nim/test_component_routing tests/nim/test_component_routing.nim
+          nim c -r --out:target/nim/test_component_routing_state tests/nim/test_component_routing_state.nim
+          nim c -r --out:target/nim/test_component_routing_outlet tests/nim/test_component_routing_outlet.nim
           nim c -r --out:target/nim/test_scaffold tests/nim/test_scaffold.nim
       - name: 组装 SDK
         run: |

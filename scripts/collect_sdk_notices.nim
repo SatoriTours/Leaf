@@ -170,7 +170,13 @@ proc collect*(metadata, baseline: JsonNode,
     item["source_archive"] = %("https://static.crates.io/crates/" & name & "/" & name & "-" & version & ".crate")
     item["texts"] = newJObject()
     if old.hasKey((name, version)) and old[(name, version)].hasKey("texts"):
-      item["texts"] = old[(name, version)]["texts"].copy()
+      let cached = old[(name, version)]
+      item["texts"] = cached["texts"].copy()
+      # Exact name+version baseline entries keep their published provenance.
+      if cached.hasKey("license_source"):
+        item["license_source"] = cached["license_source"].copy()
+      if cached.hasKey("selected_license"):
+        item["selected_license"] = cached["selected_license"].copy()
     let directory = package["manifest_path"].getStr().parentDir
     var paths: seq[string]
     for path in walkDirRec(directory, yieldFilter = {pcFile, pcLinkToFile}):
