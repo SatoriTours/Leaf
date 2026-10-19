@@ -1,7 +1,7 @@
 ## Typed, synchronous ABI 2 owner. All returned buffers are copied by Rust
 ## before the next request; no exception crosses the C calling convention.
 import std/[options, unicode, os, math, tables, json]
-import ./[core, backend, host_session, gpui_api, gpui_ffi_v2, watch_ipc,managed_runtime,task_contracts,gpui_bridge]
+import ./[core, backend, host_session, gpui_api, gpui_ffi_v2, watch_ipc,managed_runtime,task_contracts,gpui_errors]
 type
   GpuiSession* = ref object
     runtime*:Runtime

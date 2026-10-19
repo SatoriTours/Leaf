@@ -6,15 +6,24 @@ type
     month: bool
     query: string
     refreshCount: int
+    model*: State[Dashboard]
 const
   Projects = [(1, "品牌官网改版", "林晓", 76, "进行中"),
     (2, "移动端组件规范", "陈宁", 100, "已完成"),
     (3, "用户反馈中心", "周然", 42, "进行中"),
     (4, "数据分析面板", "林晓", 18, "待启动")]
+proc snapshotDashboard*(state: Dashboard): Dashboard =
+  Dashboard(month: state.month, query: state.query, refreshCount: state.refreshCount)
+
+proc edit*(state: Dashboard, change: proc(v: var Dashboard)) =
+  discard state.model.update(proc(current: Dashboard): Dashboard =
+    result = snapshotDashboard(current)
+    change(result))
+
 proc newDashboard*(): Dashboard =
   Dashboard()
 
-proc render*(state: Dashboard; ctx: BuildContext): Node =
+proc render*(state: Dashboard): Node =
   var metrics: seq[Node]
   let values = if state.month:
     [486, 86, 72, 97]
@@ -64,7 +73,7 @@ proc render*(state: Dashboard; ctx: BuildContext): Node =
           children: bars
         label("横轴：统计周期　纵轴：完成任务数")
 
-  let chart = ctx.cached("dashboard/chart", $state.month, renderChart)
+  let chart = renderChart()
   var projects: seq[Node] = views:
     line:
       title("近期项目")
@@ -72,7 +81,8 @@ proc render*(state: Dashboard; ctx: BuildContext): Node =
         key: "project_search"
         placeholder: "搜索项目、负责人或状态"
         styles: {"width": "280"}
-        onChange(e): state.query = e.value
+        onChange(e):
+          state.edit(proc(v: var Dashboard) = v.query = e.value)
     separator()
   var matches = 0
   for project in Projects:
@@ -106,15 +116,15 @@ proc render*(state: Dashboard; ctx: BuildContext): Node =
         button("最近 7 天"):
           key: "period_week"
           variant: (if state.month: "outline" else: "primary")
-          onClick(e): state.month = false
+          onClick(e): state.edit(proc(v: var Dashboard) = v.month = false)
         button("最近 30 天"):
           key: "period_month"
           variant: (if state.month: "primary" else: "outline")
-          onClick(e): state.month = true
+          onClick(e): state.edit(proc(v: var Dashboard) = v.month = true)
         label("示例数据")
         button("刷新数据"):
           key: "refresh"
-          onClick(e): inc state.refreshCount
+          onClick(e): state.edit(proc(v: var Dashboard) = inc v.refreshCount)
       line:
         children: metrics
       line:

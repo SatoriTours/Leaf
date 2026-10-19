@@ -9,7 +9,7 @@ proc renderHome(state: HomeState): Node =
         input state.draft:
           key: "task_draft"
           placeholder: "Add a task"
-          onChange(e): state.draft = e.value
+          onChange(e): state.setDraft(e.value)
           onSubmit(e): state.addTask()
         button "Add":
           key: "task_add"

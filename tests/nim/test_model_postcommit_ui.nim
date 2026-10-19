@@ -1,6 +1,8 @@
 import std/[unittest, strutils]
+import leaf
 import leaf/model
 import leaf/sqlite
+import leaf/component_state
 
 type Task = ref object of Record
   title: string
@@ -18,10 +20,18 @@ suite "committed writes and notification errors in pages":
     defer: db.close()
     db.executeScript("CREATE TABLE tasks(id INTEGER PRIMARY KEY,title TEXT,done INTEGER)")
     withDatabase(db):
-      let state = HomeState(draft: "Buy milk")
+      let store = newStateStore(1)
+      let model = store.allocateState(1, HomeState(draft: "Buy milk"),
+        snapshot = snapshotHome)
+      let state = model.read()
+      state.model = model
       state.addTask()
+      store.accept(store.beginAttempt())
       check Task.count == 1'i64
-      check state.draft == ""
-      check "committed" in state.error
-      state.addTask()
+      check model.read().draft == ""
+      check "committed" in model.read().error
+      let retry = model.read()
+      retry.model = model
+      retry.addTask()
+      store.accept(store.beginAttempt())
       check Task.count == 1'i64

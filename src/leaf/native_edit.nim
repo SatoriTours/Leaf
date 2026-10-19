@@ -18,6 +18,13 @@ type
     ## UTF-16 code unit selection range.
     anchor*, caret*: int
 
+  PreparedModelAccept* = object
+    ## Owned editor-model delta prepared before an accept window. `accept` only
+    ## moves these values into the live editor state; no dynamic ControlValue
+    ## text is copied or allocated in that window.
+    accepted*: ControlValue
+    conflict*: Option[ControlValue]
+
   EditorState* = object
     accepted*, native*: ControlValue
     phase*: CompositionPhase
@@ -91,26 +98,44 @@ proc observeEditor*(s: var EditorState, value: ControlValue,
   s.selection = selection
   if sequence > s.latestObserved: s.latestObserved = sequence
 
-proc acceptModel*(s: var EditorState, value: ControlValue, revision: uint64,
-                  resetToken: Option[uint64] = none(uint64)) =
-  ## Record only a successfully accepted model value. A failed candidate never
-  ## calls this, so the previous conflict and reset token are preserved.
-  s.accepted = value
-  s.acceptedRevision = revision
+proc prepareModelAccept*(s: EditorState, value: ControlValue): PreparedModelAccept =
+  ## Prepare-time ownership: copy the dynamic accepted/conflict values here so
+  ## an accept window can move them without allocating.
+  result.accepted = value
   # A successful accept outside composition makes the latest accepted value
   # authoritative: any older composition conflict must not override it.
   if s.phase == compositionNone:
-    s.conflict = none(ControlValue)
+    result.conflict = none(ControlValue)
   elif value != s.native:
-    s.conflict = some(value)
+    result.conflict = some(value)
   else:
-    s.conflict = none(ControlValue)
+    result.conflict = none(ControlValue)
+
+proc acceptPreparedModel*(s: var EditorState, prepared: var PreparedModelAccept,
+                          revision: uint64,
+                          resetToken: Option[uint64] = none(uint64)) {.raises: [].} =
+  ## Accept-window path: move prepared accepted/conflict values and update only
+  ## scalar metadata. Never copies dynamic ControlValue text.
+  s.accepted = move(prepared.accepted)
+  s.acceptedRevision = revision
+  s.conflict = move(prepared.conflict)
   # The outstanding reset request is monotonic too: a lower, same, zero or
   # removed token must never lower a token that was already accepted but not
   # yet executed.
   if resetToken.isSome and resetToken.get > s.consumedResetToken and
       (s.pendingReset.isNone or resetToken.get > s.pendingReset.get):
     s.pendingReset = resetToken
+
+proc acceptModel*(s: var EditorState, value: ControlValue, revision: uint64,
+                  resetToken: Option[uint64]) =
+  ## Compatibility helper for callers outside the publish/accept boundary.
+  ## The Win32 accept window uses prepareModelAccept/acceptPreparedModel.
+  var prepared = s.prepareModelAccept(value)
+  s.acceptPreparedModel(prepared, revision, resetToken)
+
+proc acceptModel*(s: var EditorState, value: ControlValue, revision: uint64) =
+  var prepared = s.prepareModelAccept(value)
+  s.acceptPreparedModel(prepared, revision)
 
 proc settleEditor*(s: var EditorState, sequence: uint64): seq[EditEffect] =
   ## Handle a normal acknowledgement. Old or future sequences produce no

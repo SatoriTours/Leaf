@@ -9,7 +9,7 @@ suite "explicit backend and headless toolchain selection":
     defer:
       setCurrentDir(previous)
       removeDir(root)
-    writeFile(root / "main.nim", "import leaf\nproc render(c: BuildContext): Node = text(\"CLI native headless\")\nquit run(Application(title: \"native\", width: 320, height: 200, render: render))\n")
+    writeFile(root / "main.nim", "import leaf\nlet Root = defineComponent[int, int](\"NativeCliRoot\",\n  proc(ctx: MountContext, p: int): int = p,\n  proc(ctx: ComponentContext, p, m: int): UiDescription = host(text(\"CLI native headless\")))\nquit run(componentApplication(component(Root, 0), \"native\", 320, 200))\n")
     writeFile(root / "leaf.json", $(%*{"name":"NativeCli", "identifier":"org.leaf.nativecli",
       "version":"0.1.0", "entry":"main.nim", "include":["main.nim"], "backend":"native"}))
     setCurrentDir(root)
@@ -57,7 +57,7 @@ suite "explicit backend and headless toolchain selection":
   test "native project headless build runs without GPUI or Cargo":
     let root = createTempDir("leaf-native-headless-", "")
     defer: removeDir(root)
-    writeFile(root / "main.nim", "import leaf\nproc render(c: BuildContext): Node = text(\"native headless\")\nquit run(Application(title: \"native\", width: 320, height: 200, render: render))\n")
+    writeFile(root / "main.nim", "import leaf\nlet Root = defineComponent[int, int](\"NativeHeadlessRoot\",\n  proc(ctx: MountContext, p: int): int = p,\n  proc(ctx: ComponentContext, p, m: int): UiDescription = host(text(\"native headless\")))\nquit run(componentApplication(component(Root, 0), \"native\", 320, 200))\n")
     let project = Project(root: root, entry: root / "main.nim", backend: backendNative)
     let binary = build(project, selection=some(resolveBuild(backendNative, headlessOnly=true)))
     let result = execCmdEx(quoteShell(binary) & " --check")

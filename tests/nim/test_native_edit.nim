@@ -228,3 +228,55 @@ suite "reset binding observation retirement":
     check state.latestObserved > state.lastSettled
     state.completeReset(1)
     check state.lastSettled == state.latestObserved
+
+proc allocCount(): int =
+  when defined(nimAllocStats):
+    let stats = getAllocStats()
+    for name, value in fieldPairs(stats):
+      when name == "allocCount": result = value
+  else: 0
+
+suite "prepared model acceptance":
+  test "prepared accept moves a dynamic accepted value with no allocation":
+    var state = newEditorState(textValue("initial-initial"))
+    var prepared = state.prepareModelAccept(textValue("dynamic-" & $7 & "-value"))
+    let before = allocCount()
+    state.acceptPreparedModel(prepared, 2)
+    let after = allocCount()
+    check after - before == 0
+    check state.accepted.text == "dynamic-7-value"
+    check state.acceptedRevision == 2
+    check state.conflict.isNone
+
+  test "composition conflict value is preserved without accept allocation":
+    var state = newEditorState(textValue("native text"))
+    state.observeEditor(textValue("native text"), compositionStart,
+      Selection16(anchor: 7, caret: 7), 1)
+    var prepared = state.prepareModelAccept(textValue("accepted-" & $9 & "-during-composition"))
+    let before = allocCount()
+    state.acceptPreparedModel(prepared, 3)
+    let after = allocCount()
+    check after - before == 0
+    check state.accepted.text == "accepted-9-during-composition"
+    check state.conflict.isSome
+    check state.conflict.get.text == "accepted-9-during-composition"
+    check state.selection.caret == 7
+
+  test "same value during composition leaves no conflict":
+    var state = newEditorState(textValue("same-text"))
+    state.observeEditor(textValue("same-text"), compositionUpdate, Selection16(), 1)
+    var prepared = state.prepareModelAccept(textValue("same-text"))
+    let before = allocCount()
+    state.acceptPreparedModel(prepared, 4)
+    let after = allocCount()
+    check after - before == 0
+    check state.conflict.isNone
+
+  test "reset token monotonicity is preserved by prepared accept":
+    var state = newEditorState(textValue("reset"))
+    var first = state.prepareModelAccept(textValue("reset-1"))
+    state.acceptPreparedModel(first, 5, some(7'u64))
+    check state.pendingReset == some(7'u64)
+    var lower = state.prepareModelAccept(textValue("reset-2"))
+    state.acceptPreparedModel(lower, 6, some(3'u64))
+    check state.pendingReset == some(7'u64)

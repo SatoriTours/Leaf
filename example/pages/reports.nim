@@ -25,6 +25,23 @@ type
     revenue, refunds: int
     daily: array[28, int]
     regional: array[4, int]
+    model*: State[Reports]
+
+
+proc snapshotReports*(state: Reports): Reports =
+  result = Reports(rowCount: state.rowCount, revision: state.revision,
+    offset: state.offset, query: state.query, filter: state.filter,
+    descending: state.descending, renderAll: state.renderAll,
+    selectedValid: state.selectedValid, signature: state.signature,
+    selectionVersion: state.selectionVersion, sourceVersion: state.sourceVersion,
+    revenue: state.revenue, refunds: state.refunds, sourceNode: state.sourceNode)
+  for record in state.records: result.records.add(record)
+  for record in state.selected: result.selected.add(record)
+
+proc edit*(state: Reports, change: proc(v: var Reports)) =
+  discard state.model.update(proc(current: Reports): Reports =
+    result = snapshotReports(current)
+    change(result))
 const
   Regions = ["华东", "华北", "华南", "西南"]
 const
@@ -35,7 +52,7 @@ const
   Variants = ["success", "warning", "danger"]
 const
   PageSize = 50
-proc generate(state: Reports) =
+proc generateInto(state: var Reports) =
   state.records.setLen(0)
   for id in 1 .. state.rowCount:
     state.records.add(Record(id: id, code: "ORD-" & align($id, 5, '0'),
@@ -50,7 +67,7 @@ proc newReports*(rowCount = 500; renderAll = false): Reports =
     fail("unsupported report size")
   result = Reports(rowCount: rowCount, renderAll: renderAll, descending: true,
                    sourceVersion: -1)
-  result.generate()
+  result.generateInto()
 
 proc select(state: Reports) =
   let signature: Selection = (state.revision, state.rowCount, state.query,
@@ -92,9 +109,9 @@ proc select(state: Reports) =
   state.selectedValid = true
   inc state.selectionVersion
 
-proc refresh(state: Reports) =
+proc refreshInto(state: var Reports) =
   inc state.revision
-  state.generate()
+  state.generateInto()
   state.select()
   let lastOffset = if state.selected.len == 0:
     0
@@ -102,24 +119,24 @@ proc refresh(state: Reports) =
     (state.selected.len - 1) div PageSize * PageSize
   state.offset = min(state.offset, lastOffset)
 
+proc refresh(state: Reports) =
+  state.edit(proc(v: var Reports) = refreshInto(v))
+
 proc sizeButton(state: Reports; count: int): Node =
   view:
     button($count & " 行"):
       key: "report_size_" & $count
       variant: (if state.rowCount == count: "primary" else: "outline")
-      onClick(e):
-        state.rowCount = count
-        state.offset = 0
-        state.generate()
+      onClick(e): state.edit(proc(v: var Reports) =
+        (v.rowCount = count; v.offset = 0; generateInto(v)))
 
 proc filterButton(state: Reports; filter: Filter): Node =
   view:
     button(["全部", "已支付", "待支付", "已退款"][ord(filter)]):
       key: "report_" & ["all", "paid", "pending", "refunded"][ord(filter)]
       variant: (if state.filter == filter: "primary" else: "ghost")
-      onClick(e):
-        state.filter = filter
-        state.offset = 0
+      onClick(e): state.edit(proc(v: var Reports) =
+        (v.filter = filter; v.offset = 0))
 
 proc recordView(record: Record): Node =
   view:
@@ -138,7 +155,7 @@ proc recordView(record: Record): Node =
           text value:
             styles: cellStyle
 
-proc render*(state: Reports; ctx: BuildContext): Node =
+proc render*(state: Reports): Node =
   state.select()
   var controls, metrics, filters, headers: seq[Node]
   for count in [100, 500, 1000]:
@@ -207,15 +224,15 @@ proc render*(state: Reports; ctx: BuildContext): Node =
           styles: {"width": "262"}
           children: regions
 
-  let charts = ctx.cached("reports/charts", $state.selectionVersion, renderCharts)
+  let charts = renderCharts()
   for filter in Filter:
     filters.add(state.filterButton(filter))
   let fullSwitch = view:
     switch("完整数据 / 虚拟列表", state.renderAll):
       key: "report_full"
       onChange(e):
-        state.renderAll = e.checked
-        state.offset = 0
+        state.edit(proc(v: var Reports) =
+          (v.renderAll = e.checked; v.offset = 0))
   filters.add(fullSwitch)
   for i, label in ["订单", "客户", "地区", "金额", "状态", "日期"]:
     let header = view:
@@ -283,12 +300,11 @@ proc render*(state: Reports; ctx: BuildContext): Node =
             key: "report_search"
             placeholder: "订单号 / 客户 / 地区 / 状态"
             styles: grow()
-            onChange(e):
-              state.query = e.value
-              state.offset = 0
+            onChange(e): state.edit(proc(v: var Reports) =
+              (v.query = e.value; v.offset = 0))
           button((if state.descending: "金额 ↓" else: "金额 ↑")):
             key: "report_sort"
-            onClick(e): state.descending = not state.descending
+            onClick(e): state.edit(proc(v: var Reports) = v.descending = not v.descending)
         line:
           gap: 10
           children: filters
@@ -303,11 +319,11 @@ proc render*(state: Reports; ctx: BuildContext): Node =
           button("上一页"):
             key: "report_previous"
             disabled: state.renderAll or state.offset == 0
-            onClick(e): state.offset = max(0, state.offset - PageSize)
+            onClick(e): state.edit(proc(v: var Reports) = v.offset = max(0, v.offset - PageSize))
           button("下一页"):
             key: "report_next"
             disabled: state.renderAll or finish >= state.selected.len
-            onClick(e): state.offset += PageSize
+            onClick(e): state.edit(proc(v: var Reports) = v.offset += PageSize)
       line:
         label("当前数据范围")
         text($(finish - first)):

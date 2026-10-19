@@ -1,4 +1,4 @@
-## Dependencies are shared by the page's logic and Views.
+## Component page entry: dependencies are shared by the page's logic and Views.
 import std/strutils
 import leaf
 import leaf/model
@@ -11,13 +11,20 @@ include views/search
 include views/settings
 include views/index
 
-proc definition*(): PageDefinition =
-  PageDefinition(name: "home", views: @["index", "search", "settings"],
-    create: proc(): PageGroup =
-      let state = HomeState()
-      PageGroup(render: proc(ctx: BuildContext, panel: string): Node =
-        case panel
-        of "index": renderHome(state)
-        of "search": renderSearch(state)
-        of "settings": renderSettings(state)
-        else: raise newException(UiError, "Unknown home View: " & panel)))
+proc definition*(): ComponentPageDefinition =
+  let page = defineComponent[int, State[HomeState]]("ScaffoldModelHomePage",
+    proc(ctx: MountContext, p: int): State[HomeState] =
+      ctx.state(HomeState(), snapshot = snapshotHome),
+    proc(ctx: ComponentContext, p: int, model: State[HomeState]): UiDescription =
+      let state = ctx.value(model)
+      state.model = model
+      let node =
+        case p
+        of 0: renderHome(state)
+        of 1: renderSearch(state)
+        of 2: renderSettings(state)
+        else: raise newException(UiError, "Unknown home View")
+      host(node))
+  ComponentPageDefinition(name: "home", views: @["index", "search", "settings"],
+    build: proc(view: string): UiDescription =
+      component(page, (if view == "search": 1 elif view == "settings": 2 else: 0)))

@@ -44,8 +44,10 @@ when defined(windows):
     let mode = paramStr(1)
     if mode == "headless":
       let before = moduleHandle(newWideCString("user32.dll"))
-      let app = Application(title: "Headless", width: 640, height: 480,
-        render: proc(ctx: BuildContext): Node = text("中文"))
+      let Root = defineComponent[int, int]("DpiHeadlessRoot",
+        proc(ctx: MountContext, p: int): int = p,
+        proc(ctx: ComponentContext, p, m: int): UiDescription = host(text("中文")))
+      let app = componentApplication(component(Root, 0), "Headless", 640, 480)
       doAssert run(app, @["--check"]) == 0
       doAssert moduleHandle(newWideCString("user32.dll")) == before
       echo "headless import/run did not load user32"
@@ -76,8 +78,10 @@ when defined(windows):
         doAssert setter(cast[pointer](value)) != 0
       let before = query()
       if mode == "headless":
-        let app = Application(title: "Check context", width: 640, height: 480,
-          render: proc(ctx: BuildContext): Node = text("OK"))
+        let Root = defineComponent[int, int]("DpiContextRoot",
+          proc(ctx: MountContext, p: int): int = p,
+          proc(ctx: ComponentContext, p, m: int): UiDescription = host(text("OK")))
+        let app = componentApplication(component(Root, 0), "Check context", 640, 480)
         doAssert run(app, @["--check"]) == 0
         doAssert equal(before, query()) != 0
       else:

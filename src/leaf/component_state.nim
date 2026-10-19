@@ -1,7 +1,7 @@
 ## Typed State cells with sealed, synchronous update queues. Only accepted
 ## values escape via read; candidate reads use the caller's snapshot policy.
 import std/[tables, sets, macros]
-import ./core
+import ./[core, commit_map]
 
 type
   StateWriteResult* {.pure.} = enum queued, disposed
@@ -13,8 +13,8 @@ type
     runtimeId, nextId, generation:uint64
     threadId:int
     phase:StatePhase
-    cells:Table[uint64,CellBase]
-    owners:Table[uint64,seq[uint64]]
+    cells:CommitMap[uint64,CellBase]
+    owners:CommitMap[uint64,seq[uint64]]
     queued:seq[uint64]
     queuedSet:HashSet[uint64]
     active:StateAttempt
@@ -40,9 +40,21 @@ type
     owner:uint64
     changed:bool
     publish:proc(base:CandidateBase) {.closure,raises:[].}
+    finish:proc(base:CandidateBase) {.closure,raises:[].}
   StateCandidate[T] = ref object of CandidateBase
     cell:StateCell[T]
     value:T
+    retired:T
+  PreparedOwnerDisposal* = ref object
+    ## Prepared owner teardown: cells/registration leave the accepted maps in
+    ## publication, but their values and State destructors wait for finish.
+    store:StateStore
+    owner:uint64
+    ids:seq[uint64]
+    cells:seq[CellBase]
+    cellPatch:PreparedMapPatch[uint64,CellBase]
+    ownerPatch:PreparedMapPatch[uint64,seq[uint64]]
+    published:bool
 
 proc uiThread(store:StateStore)=
   if store==nil:fail("missing State runtime")
@@ -50,7 +62,9 @@ proc uiThread(store:StateStore)=
     if store.threadId!=getThreadId():fail("State access requires its UI thread")
 proc newStateStore*(runtimeId:uint64):StateStore=
   if runtimeId==0:fail("State runtime identity must be nonzero")
-  result=StateStore(runtimeId:runtimeId,nextId:1)
+  result=StateStore(runtimeId:runtimeId,nextId:1,
+    cells:initCommitMap[uint64,CellBase](runtimeId),
+    owners:initCommitMap[uint64,seq[uint64]](runtimeId))
   when compileOption("threads"):result.threadId=getThreadId()
 proc setPhase*(store:StateStore,phase:StatePhase)=
   store.uiThread()
@@ -127,11 +141,21 @@ proc allocateState*[T](store:StateStore,owner:uint64,initial:T,
     for update in updates:candidate.value=update(candidate.value)
     candidate.changed=cell.equal==nil or not cell.equal(cell.copied(cell.accepted),cell.copied(candidate.value))
     candidate.publish=proc(base:CandidateBase) {.raises:[].}=
+      # Publish only swaps values: the replaced accepted value waits in the
+      # candidate until the whole Runtime commit is accepted.
       let candidate=StateCandidate[T](base)
-      if not candidate.cell.disposed:candidate.cell.accepted=move(candidate.value)
+      if not candidate.cell.disposed:
+        candidate.retired=move(candidate.cell.accepted)
+        candidate.cell.accepted=move(candidate.value)
+    candidate.finish=proc(base:CandidateBase) {.raises:[].}=
+      let candidate=StateCandidate[T](base)
+      candidate.retired=default(T)
+      candidate.value=default(T)
     candidate
-  store.cells[id]=cell
-  store.owners.mgetOrPut(owner,@[]).add(id)
+  store.cells.putOutsideCommit(id,cell)
+  var owned=store.owners.getOrDefault(owner)
+  owned.add(id)
+  store.owners.putOutsideCommit(owner,move(owned))
   State[T](store:store,owner:owner,id:id,generation:cell.generation)
 proc cellFor[T](state:State[T]):StateCell[T]=
   state.store.uiThread()
@@ -242,10 +266,95 @@ proc accept*(store:StateStore,attempt:StateAttempt)=
 proc reject*(store:StateStore,attempt:StateAttempt)=
   store.validateAttempt(attempt)
   store.rejectAttempt(attempt)
-proc disposeOwner*(store:StateStore,owner:uint64) {.raises:[].}=
-  for id in store.owners.getOrDefault(owner):
+proc prepareDisposeOwner*(store:StateStore,owner:uint64):PreparedOwnerDisposal=
+  ## Prepare-only: collects the owner's cells and sizes both accepted maps.
+  if owner==0:fail("State owner must be nonzero")
+  let ids=store.owners.getOrDefault(owner)
+  var cells:seq[CellBase]
+  for id in ids:
     let cell=store.cells.getOrDefault(id)
-    if cell!=nil:cell.disposed=true;cell.clear(cell)
-    store.cells.del(id)
-    store.queuedSet.excl(id)
-  store.owners.del(owner)
+    if cell!=nil:cells.add(cell)
+  let cellLimit=max(MaxNodes*4,store.cells.len)
+  let ownerLimit=max(MaxNodes*2,store.owners.len)
+  result=PreparedOwnerDisposal(store:store,owner:owner,ids:ids,cells:cells,
+    cellPatch:store.cells.preparePatch(ids,newSeq[(uint64,CellBase)](),cellLimit),
+    ownerPatch:store.owners.preparePatch(@[owner],newSeq[(uint64,seq[uint64])](),ownerLimit))
+
+proc prepareDisposeOwners*(store:StateStore,owners:seq[uint64]):PreparedOwnerDisposal=
+  ## One prepared teardown for every owner leaving in this commit. A single
+  ## patch per accepted map is required because each publication advances the
+  ## map generation; separate plans would invalidate each other.
+  var ids:seq[uint64]
+  var cells:seq[CellBase]
+  var ownerRemovals:seq[uint64]
+  for owner in owners:
+    if owner==0:continue
+    ownerRemovals.add(owner)
+    for id in store.owners.getOrDefault(owner):
+      ids.add(id)
+      let cell=store.cells.getOrDefault(id)
+      if cell!=nil:cells.add(cell)
+  let cellLimit=max(MaxNodes*4,store.cells.len)
+  let ownerLimit=max(MaxNodes*2,store.owners.len)
+  result=PreparedOwnerDisposal(store:store,owner:(if owners.len>0:owners[0] else:0),
+    ids:ids,cells:cells,
+    cellPatch:store.cells.preparePatch(ids,newSeq[(uint64,CellBase)](),cellLimit),
+    ownerPatch:store.owners.preparePatch(ownerRemovals,newSeq[(uint64,seq[uint64])](),ownerLimit))
+
+proc publishDisposeOwner*(plan:PreparedOwnerDisposal) {.raises:[].}=
+  ## Publication phase: mark disposed and move accepted cells/owners out. No
+  ## State value destructor or owner-provided update closure runs here.
+  if plan==nil or plan.published:return
+  for cell in plan.cells:cell.disposed=true
+  for id in plan.ids:plan.store.queuedSet.excl(id)
+  plan.store.cells.publishValidated(plan.cellPatch)
+  plan.store.owners.publishValidated(plan.ownerPatch)
+  plan.published=true
+
+proc finishDisposeOwner*(plan:PreparedOwnerDisposal) {.raises:[].}=
+  ## Whole commit accepted: release retired cells (including accepted values).
+  if plan==nil:return
+  for cell in plan.cells:cell.clear(cell)
+  finishPublished(plan.cellPatch)
+  finishPublished(plan.ownerPatch)
+  plan.cells.setLen(0)
+  plan.ids.setLen(0)
+
+proc validateDisposeOwner*(plan:PreparedOwnerDisposal)=
+  ## Apply-time validation for a prepared owner teardown.
+  if plan==nil or plan.published:return
+  if plan.cellPatch!=nil:plan.store.cells.validatePrepared(plan.cellPatch)
+  if plan.ownerPatch!=nil:plan.store.owners.validatePrepared(plan.ownerPatch)
+
+proc discardDisposeOwner*(plan:PreparedOwnerDisposal) {.raises:[].}=
+  if plan==nil or plan.published:return
+  discardPrepared(plan.cellPatch)
+  discardPrepared(plan.ownerPatch)
+
+proc disposeOwner*(store:StateStore,owner:uint64) {.raises:[].}=
+  ## Teardown/rollback entry point. The prepared path is used when sizing
+  ## succeeds; the direct fallback only exists because this seam predates
+  ## patch preparation and must stay non-raising for rollback callers.
+  var plan:PreparedOwnerDisposal
+  try:
+    plan=store.prepareDisposeOwner(owner)
+  except UiError:
+    plan=nil
+  if plan!=nil:
+    publishDisposeOwner(plan)
+    finishDisposeOwner(plan)
+  else:
+    for id in store.owners.getOrDefault(owner):
+      let cell=store.cells.getOrDefault(id)
+      if cell!=nil:
+        cell.disposed=true
+        cell.clear(cell)
+      store.cells.removeOutsideCommit(id)
+      store.queuedSet.excl(id)
+    store.owners.removeOutsideCommit(owner)
+
+proc finishAttempt*(store:StateStore,attempt:StateAttempt) {.raises:[].}=
+  ## Accepted commit boundary: release the values replaced by publication.
+  if attempt==nil:return
+  for candidate in attempt.edits.values:candidate.finish(candidate)
+  attempt.edits.clear()

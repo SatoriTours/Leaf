@@ -1,7 +1,7 @@
 ## UI-only lifecycle registrations and accepted deferred events. This layer
 ## knows Runtime/State contracts, never component descriptions or managed trees.
 import std/[tables, sets, algorithm, monotimes, options]
-import ./[core, component_state, task_contracts, task_worker]
+import ./[core, component_state, task_contracts, task_worker, commit_map]
 
 const
   LifecycleRecordBytesInternal* = 128
@@ -61,13 +61,14 @@ type
     service: TaskService
     frame: TaskIntentFrame
     updates: seq[OwnerUpdate]
+    ownerPatch: PreparedMapPatch[uint64, OwnerRegistration]
     batch, exitBatch: EventBatch
     pendingRecords: int
     published, rejected: bool
   TaskService* = ref object of TaskDomain
     runtime: Runtime
     states: StateStore
-    owners: Table[uint64, OwnerRegistration]
+    owners: CommitMap[uint64, OwnerRegistration]
     first, last, firstExit, lastExit: EventBatch
     pendingRecords: int
     nextGeneration: uint64
@@ -92,8 +93,8 @@ proc requireUi(service: TaskService) =
 
 proc newTaskService*(runtime: Runtime, states: StateStore): TaskService =
   if runtime == nil or states == nil: fail("task service requires Runtime and StateStore")
-  result = TaskService(runtime: runtime, states: states,
-    supported: true, owners: initTable[uint64, OwnerRegistration](MaxNodes*2))
+  result = TaskService(runtime: runtime, states: states, supported: true,
+    owners: initCommitMap[uint64, OwnerRegistration](runtime.runtimeIdentity))
   when compileOption("threads"): result.threadId = getThreadId()
 
 proc newOwnerRegistration*(service: TaskService, owner: uint64): OwnerRegistration =
@@ -438,6 +439,17 @@ proc prepareTasks*(service: TaskService, revision: uint64,
       if transition.kind in {LifecyclePhase.deactivate,LifecyclePhase.dispose}:exits.add(event)
       else:events.add(event)
   service.prepareIntents(frame, result.updates)
+  # Prepare the accepted owner-registration delta here. Publication only moves
+  # registrations; sizing and any capacity growth finish before acceptance.
+  var ownerRemovals: seq[uint64]
+  var ownerUpserts: seq[(uint64, OwnerRegistration)]
+  for update in result.updates:
+    if update.kind == LifecyclePhase.dispose:
+      ownerRemovals.add(update.registration.stamp.owner)
+    else:
+      ownerUpserts.add((update.registration.stamp.owner, update.registration))
+  result.ownerPatch = service.owners.preparePatch(ownerRemovals, ownerUpserts,
+    max(MaxNodes*2, service.owners.len))
   # Each array has one queue owner. A blocked enter cannot retain already
   # consumed exit storage, including exits prepared in the same candidate.
   if events.len > 0: result.batch = EventBatch(events: move(events))
@@ -450,8 +462,7 @@ proc publishTasks*(service: TaskService, attempt: TaskAttempt) {.raises: [].} =
     registration.epoch = update.epoch
     registration.active = update.active
     registration.accepted = update.kind != LifecyclePhase.dispose
-    if registration.accepted: service.owners[registration.stamp.owner] = registration
-    else: service.owners.del(registration.stamp.owner)
+  service.owners.publishValidated(attempt.ownerPatch)
   if attempt.batch != nil:
     if service.last == nil: service.first = attempt.batch
     else: service.last.next = attempt.batch
@@ -484,9 +495,21 @@ proc publishTasks*(service: TaskService, attempt: TaskAttempt) {.raises: [].} =
 proc rejectTasks*(service: TaskService, attempt: TaskAttempt) {.raises: [].} =
   if attempt == nil or attempt.service != service or attempt.published: return
   attempt.rejected = true
+  discardPrepared(attempt.ownerPatch)
   attempt.batch = nil
   attempt.exitBatch = nil
   attempt.updates.setLen(0)
+
+proc validateTaskPatch*(service: TaskService, attempt: TaskAttempt) =
+  ## Apply-time validation for a prepared owner-registration patch.
+  if attempt == nil: return
+  if attempt.published or attempt.rejected: fail("task attempt is not pending")
+  if attempt.ownerPatch != nil: service.owners.validatePrepared(attempt.ownerPatch)
+
+proc finishTasks*(service: TaskService, attempt: TaskAttempt) {.raises: [].} =
+  ## Accepted commit boundary: release retired owner registrations.
+  if attempt == nil or attempt.service != service: return
+  finishPublished(attempt.ownerPatch)
 
 proc nextEvent(service: TaskService, exitsOnly: bool): tuple[batch:EventBatch,index:int] =
   if exitsOnly:

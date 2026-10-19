@@ -1,7 +1,7 @@
-## Nim application runtime hosted by GPUI and GPUI Kit through the C ABI.
+## Nim application runtime hosted by GPUI through the typed ABI 2 protocol.
 import std/[json,options]
-import ./[core,gpui_api,gpui_bridge,gpui_session,diagnostics,windows_dpi]
-export gpui_bridge.GpuiRunError
+import ./[core,gpui_api,gpui_errors,gpui_session,diagnostics,windows_dpi]
+export gpui_errors.GpuiRunError
 
 proc transferFailure(error:ref RuntimeCleanupError,cleanupOwner:ptr Runtime)=
   if cleanupOwner!=nil and error.cleanupRuntime!=nil:cleanupOwner[]=error.cleanupRuntime
@@ -21,35 +21,20 @@ proc runDesktop*(app:Application,diagnostics:Diagnostics=nil,cleanupOwner:ptr Ru
   if dpi.status in ["failed","host_context"]:
     stderr.writeLine("leaf: DPI " & dpi.status & " awareness=" & dpi.awareness & " error=" & $dpi.errorCode)
   let api=loadGpui()
-  if api.v2.isSome:
-    var runtime: Runtime
-    try: runtime = newRuntime(app, diagnostics=diagnostics)
-    except RuntimeCleanupError as failure:
-      failure.transferFailure(cleanupOwner)
-      raise
-    var session:GpuiSession
-    try:
-      session=openGpuiSession(runtime,api)
-      result=session.run()
-    except GpuiRunError as failure:
-      failure.transferFailure(cleanupOwner)
-      raise
-    except Exception as primary:
-      let failure=runtime.closeGpuiFailureInternal(primary)
-      failure.transferFailure(cleanupOwner)
-      raise failure
-    return finishRun(runtime,result,cleanupOwner,session.cleanupAttempted,session.cleanupError)
-  var host:DesktopBridge
-  try:host=newDesktopBridge(app,diagnostics,taskPumpSupported=api.supportsTaskPump())
+  var runtime: Runtime
+  try: runtime = newRuntime(app, diagnostics=diagnostics)
   except RuntimeCleanupError as failure:
     failure.transferFailure(cleanupOwner)
     raise
+  var session:GpuiSession
   try:
-    let snapshot = $host.runtime.snapshot.toJson()
-    # Synchronous run keeps Nim and its response buffer live through all calls.
-    result=int(api.run(cast[ptr uint8](snapshot.cstring),csize_t(snapshot.len),desktopCallback,cast[pointer](host)))
+    session=openGpuiSession(runtime,api)
+    result=session.run()
+  except GpuiRunError as failure:
+    failure.transferFailure(cleanupOwner)
+    raise
   except Exception as primary:
-    let failure=host.runtime.closeGpuiFailureInternal(primary)
+    let failure=runtime.closeGpuiFailureInternal(primary)
     failure.transferFailure(cleanupOwner)
     raise failure
-  return finishRun(host.runtime,result,cleanupOwner)
+  return finishRun(runtime,result,cleanupOwner,session.cleanupAttempted,session.cleanupError)

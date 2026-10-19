@@ -1,7 +1,7 @@
 ## Backend-neutral host identity and candidate overlays. Snapshot planning is a
 ## compatibility path; delta planning never materializes the accepted tree.
 import std/[tables, sets, options]
-import ./[core, backend, host_protocol]
+import ./[core, backend, host_protocol, commit_map]
 export host_protocol
 
 type
@@ -23,6 +23,9 @@ type
   StoredHost = ref object
     record: HostRecord
     children: seq[NodeHandle]
+  HostCandidateStatus = enum
+    hostCandidateStaging, hostCandidateSealed, hostCandidatePublished,
+    hostCandidateDiscarded
   HostCandidate* = ref object
     wire: HostBatch
     edits: Table[NodeHandle, StoredHost]
@@ -32,25 +35,41 @@ type
     root: NodeHandle
     count, bytes: int
     measurements: UpdateStats
+    recordPatch: PreparedMapPatch[NodeHandle, StoredHost]
+    idPatch: PreparedMapPatch[string, NodeHandle]
+    boundaryPatch: PreparedMapPatch[uint64, HostBoundary]
+    status: HostCandidateStatus
   HostReconciler* = ref object
     sessionId, owner, generation, nextHandle, acceptedRevision: uint64
-    records: Table[NodeHandle, StoredHost]
-    ids: Table[string, NodeHandle]
-    boundaries: Table[uint64, HostBoundary]
+    records: CommitMap[NodeHandle, StoredHost]
+    ids: CommitMap[string, NodeHandle]
+    boundaries: CommitMap[uint64, HostBoundary]
     root: NodeHandle
     bytes: int
     window: Option[HostWindow]
+
+when defined(leafProtocolProbes):
+  var hostPublishAllocations*:int
+
+proc probeAllocCount():int=
+  when defined(nimAllocStats):
+    let stats=getAllocStats()
+    for name,value in fieldPairs(stats):
+      when name=="allocCount":result=value
+  else:0
+
+proc sealDelta(r: HostReconciler,c: HostCandidate)
 
 var nextOwner: uint64
 proc newHostReconciler*(sessionId: uint64): HostReconciler =
   if sessionId == 0: fail("host session id must be nonzero")
   inc nextOwner
-  # The accepted maps reserve the validated maximum once. Publishing any
-  # bounded candidate requires neither copying a map nor growing its buckets.
+  # Accepted maps start empty. Prepare sizes only the candidate's delta and
+  # grows them at the documented threshold; publication only moves values.
   HostReconciler(sessionId:sessionId,owner:nextOwner,nextHandle:1,
-    records:initTable[NodeHandle,StoredHost](MaxNodes*2),
-    ids:initTable[string,NodeHandle](MaxNodes*2),
-    boundaries:initTable[uint64,HostBoundary](MaxNodes*2))
+    records:initCommitMap[NodeHandle,StoredHost](nextOwner),
+    ids:initCommitMap[string,NodeHandle](nextOwner),
+    boundaries:initCommitMap[uint64,HostBoundary](nextOwner))
 proc revision*(r: HostReconciler): uint64 = r.acceptedRevision
 proc batch*(c: HostCandidate): HostBatch = c.wire
 proc stats*(c: HostCandidate): UpdateStats = c.measurements
@@ -71,6 +90,7 @@ proc bytes(record: HostRecord): int =
   sizeof(HostRecord)+record.nodeId.len+record.props.text.len+record.props.placeholder.len
 proc validate*(r: HostReconciler,c: HostCandidate) =
   if c == nil or c.owner != r.owner: fail("foreign host candidate")
+  if c.status != hostCandidateSealed: fail("host candidate is not sealed")
   if c.generation != r.generation or c.wire.baseRevision != r.acceptedRevision:
     fail("stale host candidate")
 proc planDelta*(r: HostReconciler, changes: HostChanges, nextRevision: uint64): HostCandidate =
@@ -217,27 +237,75 @@ proc planDelta*(r: HostReconciler, changes: HostChanges, nextRevision: uint64): 
     c.wire.ops.add(HostOp(kind:HostOpKind.window,window:changes.window.get))
   for id in changes.removals: c.wire.ops.add(HostOp(kind:HostOpKind.remove,handle:id))
   c.measurements.ops=uint64(c.wire.ops.len)
-proc publish*(r: HostReconciler,c: HostCandidate) {.raises: [].} =
-  # Called only after validate and under the Runtime's reentry guard. Every map
-  # was reserved for twice the maximum live node count at construction.
+  r.sealDelta(c)
+proc sealDelta(r: HostReconciler,c: HostCandidate) =
+  ## Prepare the accepted-map delta. Every allocation, including the possible
+  ## O(N) capacity rebuild, happens here; publication only moves values.
+  var recordRemovals: seq[NodeHandle]
+  var recordUpserts: seq[(NodeHandle,StoredHost)]
+  var idRemovals: seq[string]
+  var idUpserts: seq[(string,NodeHandle)]
   for id,stored in c.edits:
     let old=r.records.getOrDefault(id)
-    if old != nil: r.ids.del(old.record.nodeId)
-  for id,stored in c.edits:
-    if stored == nil: r.records.del(id)
-    else: r.records[id]=stored;r.ids[stored.record.nodeId]=id
+    if stored==nil:
+      recordRemovals.add(id)
+      if old!=nil: idRemovals.add(old.record.nodeId)
+    else:
+      recordUpserts.add((id,stored))
+      if old==nil:
+        idUpserts.add((stored.record.nodeId,id))
+      elif old.record.nodeId!=stored.record.nodeId:
+        idRemovals.add(old.record.nodeId)
+        idUpserts.add((stored.record.nodeId,id))
+  var boundaryRemovals: seq[uint64]
+  var boundaryUpserts: seq[(uint64,HostBoundary)]
   for boundary in c.boundaries:
-    if boundary.root==NoHandle:r.boundaries.del(boundary.id)
-    else:r.boundaries[boundary.id]=boundary
+    if boundary.root==NoHandle:boundaryRemovals.add(boundary.id)
+    else:boundaryUpserts.add((boundary.id,boundary))
+  c.recordPatch=r.records.preparePatch(recordRemovals,recordUpserts,MaxNodes)
+  c.idPatch=r.ids.preparePatch(idRemovals,idUpserts,MaxNodes)
+  c.boundaryPatch=r.boundaries.preparePatch(boundaryRemovals,boundaryUpserts,MaxNodes)
+  c.status=hostCandidateSealed
+proc publish*(r: HostReconciler,c: HostCandidate) {.raises: [].} =
+  # Called only after validate and under the Runtime's reentry guard. Moves
+  # prepared values into pre-sized accepted storage; replaced values are
+  # retired until `finishPublish`, so publication runs no user destructor.
+  if c==nil or c.status!=hostCandidateSealed:return
+  when defined(leafProtocolProbes) and defined(nimAllocStats):
+    let before=probeAllocCount()
+  r.records.publishValidated(c.recordPatch)
+  r.ids.publishValidated(c.idPatch)
+  r.boundaries.publishValidated(c.boundaryPatch)
   for op in c.wire.ops:
     if op.kind==HostOpKind.window:r.window=some(op.window)
   r.root=c.root;r.bytes=c.bytes;r.acceptedRevision=c.wire.nextRevision
   inc r.generation
+  c.status=hostCandidatePublished
+  when defined(leafProtocolProbes) and defined(nimAllocStats):
+    hostPublishAllocations=probeAllocCount()-before
+proc finishPublish*(r: HostReconciler,c: HostCandidate) {.raises: [].} =
+  ## The whole Runtime commit is accepted; release retired accepted values.
+  if c==nil:return
+  finishPublished(c.recordPatch)
+  finishPublished(c.idPatch)
+  finishPublished(c.boundaryPatch)
+proc discardCandidate*(r: HostReconciler,c: HostCandidate) {.raises: [].} =
+  ## Rejected candidate: accepted maps were never touched and the generation
+  ## does not advance. Candidate-owned values are released.
+  if c==nil or c.status!=hostCandidateSealed:return
+  discardPrepared(c.recordPatch)
+  discardPrepared(c.idPatch)
+  discardPrepared(c.boundaryPatch)
+  c.status=hostCandidateDiscarded
 proc accept*(r: HostReconciler,c: HostCandidate) =
   r.validate(c)
   r.publish(c)
 proc `discard`*(r: HostReconciler,c: HostCandidate) =
   r.validate(c)
+  discardPrepared(c.recordPatch)
+  discardPrepared(c.idPatch)
+  discardPrepared(c.boundaryPatch)
+  c.status=hostCandidateDiscarded
   inc r.generation
 proc planSnapshot*(r:HostReconciler,snapshot:Snapshot,nextRevision:uint64,
                    policy:HostStylePolicy):HostCandidate =

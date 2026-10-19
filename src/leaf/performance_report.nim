@@ -207,7 +207,7 @@ proc verifyComponentReport*(report:JsonNode):seq[string]=
       let value=required(meta,key)
       if value.kind!=JString or value.getStr.len==0:reject("missing component metadata: " & key)
     let mode=meta["mode"].getStr
-    if mode notin ["legacy-json","legacy-typed","managed-typed"]:reject("unknown component mode")
+    if mode!="managed-typed":reject("only managed-typed component reports are accepted")
     if integer(meta,"abi") notin [1,2]:reject("invalid component ABI")
     if required(meta,"cache").kind!=JBool:reject("invalid cache metadata")
     if meta["scope"].getStr!="runtime-and-encoding" or meta["allocation_unit"].getStr!="count":reject("invalid microbenchmark scope or allocation unit")

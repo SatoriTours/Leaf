@@ -279,17 +279,16 @@ suite "close Runtime identity and legacy events":
     finally:
       other.closeRuntime();runtime.closeRuntime()
 
-  test "legacy ordinary event can close and skips its queued rerender":
+  test "component event can close and skips its queued rerender":
     var rt:Runtime
-    var renders=0
-    let app=Application(title:"legacy close",width:200,height:200,
-      render:proc(ctx:BuildContext):Node=
-        inc renders
-        button("close",key="legacy-close",onClick=proc(event:Event)=rt.closeRuntime()))
-    rt=newRuntime(app)
-    discard rt.dispatch("legacy-close",Event(kind:click))
-    check renders==1
-    expect UiError:discard rt.dispatch("legacy-close",Event(kind:click))
+    let Owner = defineComponent[int, int]("CloseInEventOwner",
+      proc(ctx: MountContext, p: int): int = p,
+      proc(ctx: ComponentContext, p, m: int): UiDescription =
+        host(button("close", key="legacy-close",
+          onClick=proc(event: Event) = rt.closeRuntime())))
+    rt=newRuntime(componentApplication(component(Owner, 0), "close", 200, 200))
+    discard rt.dispatch("legacy-close", Event(kind: click))
+    expect UiError: discard rt.dispatch("legacy-close", Event(kind: click))
     rt.closeRuntime()
 
 suite "cleanup claim exact boundary":

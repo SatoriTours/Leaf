@@ -126,7 +126,7 @@ suite "real Cargo-free Win32 application builds":
     defer:
       if previousLibrary.len == 0: delEnv("LEAF_LIBRARY")
       else: putEnv("LEAF_LIBRARY", previousLibrary)
-    writeFile(root / "main.nim", "import leaf\nproc render(c: BuildContext): Node = column(@[text(\"中文 😀\"), input(\"hello\")])\nquit run(Application(title: \"native\", width: 320, height: 200, render: render))\n")
+    writeFile(root / "main.nim", "import leaf\nlet Root = defineComponent[int, int](\"WinToolchainRoot\",\n  proc(ctx: MountContext, p: int): int = p,\n  proc(ctx: ComponentContext, p, m: int): UiDescription = host(column(@[text(\"中文 😀\"), input(\"hello\")])))\nquit run(componentApplication(component(Root, 0), \"native\", 320, 200))\n")
     let project = Project(root: root, entry: root / "main.nim", backend: backendNative)
     let binary = build(project)
     check fileExists(binary)

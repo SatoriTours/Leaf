@@ -4,12 +4,12 @@
 import leaf
 ```
 
-`Application(title, width, height, render)` 定义应用；`render` 接收 `BuildContext`，返回 `Node`。`run(app)` 默认打开 GPUI 窗口，命令行 `--headless` / `--check` 使用相同 Nim 业务逻辑。
+唯一应用入口是 `componentApplication(root: UiDescription, title, width, height, executionScope)`；`newRuntime` 拒绝只有旧 `render` 的应用。`run(app)` 默认打开 GPUI（ABI 2）窗口，命令行 `--headless` / `--check` 使用同一托管运行时。
 
 推荐用 `view:` 描述界面，括号只用于短表达式，组件层级由缩进表示：
 
 ```nim
-proc render(ctx: BuildContext): Node =
+proc renderTodo(state: TodoState): Node =
   view:
     column:
       styles: {"padding": "24", "gap": "12"}
@@ -27,16 +27,16 @@ proc render(ctx: BuildContext): Node =
           addTask(draft)
           draft = ""
 
-let app = Application(title: "Todo", width: 720, height: 560, render: render)
+componentApplication(component(TodoRoot, 0), "Todo", 720, 560)
 ```
 
-`view:` 返回一个 `Node`，必须恰好有一个根组件。组件块的属性使用 `name: value`，事件块使用 `onClick(e):`、`onChange(e):` 或 `onSubmit(e):`；`e` 是可自行命名的 `Event` 参数。已有回调可写成 `onClick: callback`。
+`view:` 仍是组件内部可用的纯 `Node` 描述 DSL，必须恰好有一个根组件。组件块的属性使用 `name: value`，事件块使用 `onClick(e):`、`onChange(e):` 或 `onSubmit(e):`；`e` 是可自行命名的 `Event` 参数。已有回调可写成 `onClick: callback`。应用根不再是 `Application(render:)`。
 
 `styles:` 可以接收样式表字面量（自动调用 `style`）或已有 `Styles`，例如 `styles: grow()`。样式放在组件块开头，子组件逐行排列，不需要 `@[...]` 或逗号。属性只放在组件块的直接层级，条件样式可通过表达式指定。
 
 布局内支持普通 Nim 的 `let`、`var`、`if`、`when`、`case`、`for`、`while` 和 `block`；节点与节点序列表达式会加入子组件，返回 `void` 的调用可用于普通计算。已有 `Node` 和自定义组件可直接放入布局。自定义容器只需接收 `children: seq[Node]` 参数，例如 `card:` 内可嵌套组件。动态子节点也可写成 `children: nodes`，但不能同时嵌套子组件。
 
-`view:` 在编译期展开为以下普通构造器，保留 Nim 类型检查与原有运行时行为。单独定义 `render` 后传给 `Application`，避免将匿名函数放在跨多行的构造器括号内。
+`view:` 在编译期展开为普通 `Node` 构造器，保留 Nim 类型检查。它应运行在组件 render 内，并由 `host`/`hostShell`/`componentView` 接入托管描述。
 
 需要构建 `seq[Node]` 时使用 `views:`，其中可排列多个根组件，用法与布局内部相同。例如：
 
@@ -70,19 +70,17 @@ let actions = views:
 
 ## 页面组与桌面路由
 
-`import leaf` 同时导出 `PageGroup`、`PageDefinition`、`Route` 和 `Router`。页面组的 render 接收 `BuildContext` 与 View 名称；`PageDefinition` 声明允许的 View 及创建工厂。`newRouter(routes, pages, initial)` 校验配置，按首次渲染惰性创建页面组，切换路由复用状态。
-
-`navigate(router, nameOrPath)` 切换静态路由；`currentRoute(router)` 返回当前 Route，`routes(router)` 返回有序配置，`renderPage(router, ctx)` 构建当前 View。导航放在事件回调中，利用 Leaf 的事件后刷新。完整应用和资源模板使用相同接口，见[应用架构与脚手架](scaffolding.md)。
+`import leaf` 只导出纯配置 `Route` 与事务化 `ComponentRouter`/`ComponentPageDefinition`。`newComponentRouter(ctx, routes, pages, initial)` 在组件初始化时校验配置并把当前地址建立为 `State[int]`；`navigate(router, nameOrPath)` 排队地址变更，`renderPage(ctx, router)` 返回页面出口。旧 `PageGroup`/`PageDefinition`/`Router` 非事务运行模型已移除，日期化历史文档中的示例只作存档。完整应用和资源模板使用相同接口，见[应用架构与脚手架](scaffolding.md)。
 
 ## SQLite 存储
 
 `import leaf/sqlite` 提供 `openDatabase(path)`、`close()`、`execute(sql, values)`、`query(sql, values)`、`lastInsertId` 和 `migrate(migrations)`。`dbValue` 绑定字符串、整数、浮点数与布尔值，查询值通过 `asString`、`asInt`、`asFloat`、`asBool` 读取；`SqlValue(kind: sqlNull)` 表示 NULL。`execute` 返回受影响行数。`execute`/`query` 只接受单条 SQL，并检查参数数量；可信迁移脚本使用 `executeScript`。
 
-`Migration(version, name, sql)` 定义一个版本，`migrate` 接收完整迁移历史并按版本应用尚未执行的 SQL，每个版本事务提交。连接在所属线程使用；显式关闭后的操作会抛出 `DatabaseError`。完整应用模板在启动时配置连接与迁移，并将连接传给所有页面组与服务。
+`Migration(version, name, sql)` 定义一个版本，`migrate` 接收完整迁移历史并按版本应用尚未执行的 SQL，每个版本事务提交。连接在所属线程使用；显式关闭后的操作会抛出 `DatabaseError`。完整应用模板在启动时配置连接与迁移，并将连接传给组件页面与服务。
 
 ## 组件与 State
 
-显式 `import leaf/components`，通过 `defineComponent[Props,Model]` 定义 `MountContext` 初始化和 `ComponentContext` render，再用 `componentApplication(component(...),title)` 创建应用。完整可运行示例见 `examples/component_counter.nim`；原来的 `Application(render:...)` 保持兼容。
+`leaf` 默认导出唯一组件 API：通过 `defineComponent[Props,Model]` 定义 `MountContext` 初始化和 `ComponentContext` render，再用 `componentApplication(component(...),title)` 创建应用。完整可运行示例见 `examples/component_counter.nim`。旧的 `Application(render:...)`/`BuildContext` 运行路径已移除。
 
 `ctx.state(initial)` 在挂载时建立 State；render 用 `ctx.value(state)` 读取当前候选。`state.set(value)` / `state.update(proc(old):T=...)` 排队，事件结束、`runtime.uiTask` 或 `runtime.batch` 最外层结束统一提交；手动 `runtime.flush()` 也可结算。队列在尝试开始时封存，失败不会自动重放 updater。初始化、render、updater 和提交期间禁止写 State；在一个 Runtime 的 UI 任务中也不能写另一个 Runtime 的 State 或嵌套进入它。普通 Nim 变量的修改仍是普通副作用，不随提交拒绝回滚。引用或可变容器类型必须提供独立 snapshot 函数，避免候选修改接受值。
 
@@ -90,7 +88,7 @@ let actions = views:
 
 `componentView` 与原 `view` 共用控制流语法，可以混合宿主节点与组件。`componentList` 提供组件行，可用 `styles` 设置列表尺寸；变量行高在一次绘制结束后合并视口请求，不随每行重复跨 FFI。滚出视口后 State 暂存于有限暖缓存，淘汰或源 generation 更换后旧 State 写入返回 disposed。需要长期保存的行数据应放在上层模型。
 
-`runtime.snapshot` 和整树 validator 是显式完整导出；高频局部查询使用 `runtime.find(key)`，观察局部工作量使用 `runtime.updateStats()`。ABI2 默认自动选择；`LEAF_GPUI_ABI=1|2|auto` 可诊断协议选择，只有缺少 ABI2 查询符号才自动退回 ABI1，不会忽略不兼容查询结果。`LEAF_GPUI_CACHE=0` 可关闭组件缓存进行行为对照。
+`runtime.snapshot` 和整树 validator 是显式完整导出；高频局部查询使用 `runtime.find(key)`，观察局部工作量使用 `runtime.updateStats()`。GPUI 只加载 ABI 2 `query_v2`；仅 ABI1 的库会被明确拒绝，`LEAF_GPUI_ABI=1` 报已移除，unset/auto/2 均指向同一 ABI2 路径。`LEAF_GPUI_CACHE=0` 可关闭组件缓存进行行为对照。
 
 托管节点的完整诊断 ID 是内部格式，包含组件类型身份；业务查找应使用稳定 `key`。普通组件类型替换或卸载再挂载会建立新输入 Entity；列表源 generation 变化时，仅同一列表、逻辑 key 和宿主祖先类型一致的输入可迁移编辑状态。
 
@@ -112,7 +110,7 @@ let actions = views:
 
 `pumpTasks(runtime)` 每轮最多认领 64 条完成/回调，4ms 是开始下一条的调度预算，不抢占当前 handler。`TaskPumpReport.delivered` 包括有效 work 错误的完成 claim；`callbacks` 是实际 handler 数；`failed` 是交付/作用域异常数，不是 work 错误数。未提供 onError 仍消费完成并记录有界错误。完成回调失败或其 UI 更新拒绝不会重放同一消息。`taskPumpPending` 只查 metadata，不消费、render、导出 Snapshot 或变更 revision。
 
-GPUI 和 Win32 在 ordinary UI 安全点自动泵；headless 工具/SDK fixture 自行在有界循环显式 `pumpTasks`，CLI 普通 `--headless` 不等待后台任务。空 tick 不 render、不导出 Snapshot、不发送 UI 树、不增加 revision。ABI1 实际更新仍可能传完整活动树，不能套用 typed 增量路径的成本结论。
+GPUI 和 Win32 在 ordinary UI 安全点自动泵；headless 工具/SDK fixture 自行在有界循环显式 `pumpTasks`，CLI 普通 `--headless` 不等待后台任务。空 tick 不 render、不导出 Snapshot、不发送 UI 树、不增加 revision。ABI 2 typed 增量路径是唯一桌面更新通道；完整树只用于显式诊断/初次同步。
 
 普通退出必须 `closeRuntime`。业务回调内关闭先使 State 无效/关投递门，未 claim 的 dispose 与 pool 回收留到 ordinary 边界。scope 拒绝后可显式再次关闭，不能把 closed 当全部清理完成。`runDesktop(...,cleanupOwner=addr owner)` 和 `GpuiRunError(cleanupRuntime,exitStatus)` 可移交待重试 Runtime；out slot 必须预先为 nil，无 out 时整数状态（含 0）保存在异常的 `some(status)`，原异常无整数时为 none，msg/parent 保留。重试成功后释放 owner/异常引用。
 

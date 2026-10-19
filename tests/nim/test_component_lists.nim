@@ -79,20 +79,6 @@ suite "list source transactions":
     check initializedRows==75
     check state.read()==90
     check rt.find("items").children.len==50
-import std/json
-import leaf/gpui_bridge
-suite "managed ABI 1 list compatibility":
-  test "legacy list request exports matching accepted row metadata":
-    failAt= -1
-    let bridge=newDesktopBridge(componentApplication(listRoot(),"legacy list"))
-    let id=bridge.runtime.find("items").id
-    let reply=bridge.request(%*{"op":"list","id":id,"first":5000,"finish":5050,"protected":[]})
-    check not reply.hasKey("error")
-    check bridge.runtime.find("items").children.len==50
-    let tree=bridge.runtime.snapshot.toJson()
-    check tree["root"]["children"][0]["list_index"].getInt==5000
-    check tree["root"]["children"][0]["item_key"].getStr=="5000"
-
 suite "managed row lifecycle":
   test "warm rows deactivate reactivate and evicted State is disposed before cleanup":
     var events: seq[string]

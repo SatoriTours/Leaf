@@ -1,13 +1,13 @@
+import ../fixture_app
 import std/[unittest, typedthreads, strutils]
 import leaf/[core, widgets, ui_thread]
 
 proc app(scope: ExecutionScope = nil,
-         render: RenderProc = nil): Application =
+         render: proc(): Node = nil): Application =
   var actual = render
   if actual == nil:
-    actual = proc(ctx: BuildContext): Node = text("x", key = "x")
-  Application(title: "ui thread", width: 320, height: 200,
-    render: actual, executionScope: scope)
+    actual = proc(): Node = text("x", key = "x")
+  fixtureApplication(actual, "ui thread", 320, 200, scope)
 
 proc transferringScope(current: ptr uint64, worker: uint64,
                        transfer: ptr bool): ExecutionScope =
@@ -31,7 +31,7 @@ suite "UI thread guard":
     var renders = 0
     let guarded = guardUiApplication(
       app(proc(body: proc() {.closure.}) = body(),
-        proc(ctx: BuildContext): Node = (inc renders; text("x", key = "x"))),
+        proc(): Node = (inc renders; text("x", key = "x"))),
       threadId)
     check renders == 0
     current = 200'u64
@@ -104,7 +104,7 @@ suite "UI thread guard":
     var renders = 0
     let guarded = guardUiApplication(
       app(transferringScope(addr current, 2'u64, addr transfer),
-        proc(ctx: BuildContext): Node = (inc renders; text("x", key = "x"))),
+        proc(): Node = (inc renders; text("x", key = "x"))),
       threadId)
     transfer = true
     expect UiError:
@@ -118,14 +118,14 @@ suite "UI thread guard":
     var clicks = 0
     let guarded = guardUiApplication(
       app(transferringScope(addr current, 2'u64, addr transfer),
-        proc(ctx: BuildContext): Node =
+        proc(): Node =
           column(@[button("go", key = "go", onClick = proc(e: Event) = inc clicks)],
             key = "root")),
       threadId)
     let runtime = newRuntime(guarded)
     transfer = true
     expect UiError:
-      discard runtime.dispatch("go", Event(kind: click))
+      discard runtime.dispatchRefresh("go", Event(kind: click))
     check clicks == 0
 
   test "wrong-thread materialize does not run the row builder":
@@ -136,7 +136,7 @@ suite "UI thread guard":
     let items = @["a", "b"]
     let guarded = guardUiApplication(
       app(transferringScope(addr current, 2'u64, addr transfer),
-        proc(ctx: BuildContext): Node =
+        proc(): Node =
           column(@[virtualList("list", items, proc(index: int): Node =
             (inc builds; text(items[index], key = "row")))], key = "root")),
       threadId)
@@ -154,7 +154,7 @@ suite "UI thread guard":
     var renders = 0
     let original = proc(body: proc() {.closure.}) = lateBody = body
     let guarded = guardUiApplication(app(original,
-      proc(ctx: BuildContext): Node = (inc renders; text("x", key = "x"))),
+      proc(): Node = (inc renders; text("x", key = "x"))),
       threadId)
     var initialRejected = false
     try:

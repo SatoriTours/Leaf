@@ -1,7 +1,6 @@
 import std/os
 import leaf
 import leaf/components
-import ./gpui_native_app as legacy
 type Model=object
   count,submissions,reset:State[int]
   value:State[string]
@@ -28,7 +27,7 @@ let Main=defineComponent[int,Model]("NativeMain",
         styles:{"padding":"24","gap":"12","width":"full","height":"full"}
         input(value,key="entry",onChange=proc(e:Event)=m.value.set(e.value),
           onSubmit=proc(e:Event)=m.submissions.update(proc(n:int):int=n+1),
-          styles=style({"height":"36","width":"full"}),resetToken=(if getEnv("LEAF_GPUI_ABI")=="1":0'u64 else:uint64(ctx.value(m.reset))))
+          styles=style({"height":"36","width":"full"}),resetToken=uint64(ctx.value(m.reset)))
         component(Add,m.count,key="button-boundary")
         text($count & ":" & value & ":" & $submissions,key="status")
         button("reset",key="reset",onClick=proc(e:Event)=
@@ -36,5 +35,4 @@ let Main=defineComponent[int,Model]("NativeMain",
         button("reject",key="reject",onClick=proc(e:Event)=
           rejectBuild=true;m.value.set("rejected")))
 when isMainModule:
-  if getEnv("LEAF_TEST_MODE")=="legacy":quit(run(legacy.app))
   quit(run(componentApplication(component(Main,0),"Leaf GPUI native smoke")))

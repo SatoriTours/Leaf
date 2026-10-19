@@ -1,3 +1,4 @@
+import ../fixture_app
 import std/[unittest, tables, options, math, unicode]
 import leaf/[core, widgets, styles, backend, backend_session, native_layout]
 import leaf/backends/headless
@@ -217,13 +218,12 @@ suite "Bounded DIP linear layout":
     check boxes[3].rect.width == 5
 
   test "layout order follows the authoritative sibling index":
-    proc render(ctx: BuildContext): Node =
+    proc render(): Node =
       column(@[
         button("a", key = "a", styles = style({"width": "40", "height": "20"})),
         button("b", key = "b", styles = style({"width": "40", "height": "20"})),
         button("c", key = "c", styles = style({"width": "40", "height": "20"}))], key = "root")
-    let runtime = newRuntime(Application(title: "layout", width: 300, height: 200,
-      render: render))
+    let runtime = newRuntime(fixtureApplication(render, "layout", 300, 200))
     let recording = newRecordingBackend(fullCapabilities())
     let session = attachBackend(runtime, recording.backend, makeHost())
     let rootHandle = session.handleFor(runtime.find("root").id)

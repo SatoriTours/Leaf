@@ -9,16 +9,28 @@ type
     message: string
     invalid, syncing: bool
     syncCount: int
+    model*: State[Settings]
+
+
+proc snapshotSettings*(state: Settings): Settings =
+  Settings(current: state.current, saved: state.saved, message: state.message,
+    invalid: state.invalid, syncing: state.syncing, syncCount: state.syncCount)
+
+proc edit*(state: Settings, change: proc(v: var Settings)) =
+  discard state.model.update(proc(current: Settings): Settings =
+    result = snapshotSettings(current)
+    change(result))
+
 proc newSettings*(): Settings =
   let profile = Profile(name: "林晓", email: "linxiao@example.com",
                         team: "设计与产品团队", notifications: true)
   Settings(current: profile, saved: profile)
 
-proc edited(state: Settings) =
+proc editedInto(state: var Settings) =
   state.message = ""
   state.invalid = false
 
-proc save(state: Settings) =
+proc saveInto(state: var Settings) =
   if state.current.name.strip.len == 0 or state.current.team.strip.len == 0 or
       not validEmail(state.current.email):
     state.invalid = true
@@ -31,7 +43,10 @@ proc save(state: Settings) =
   state.invalid = false
   state.message = "设置已保存（本次运行内有效）。"
 
-proc render*(state: Settings; ctx: BuildContext): Node =
+proc save*(state: Settings) =
+  state.edit(proc(v: var Settings) = saveInto(v))
+
+proc render*(state: Settings): Node =
   let dirty = state.current != state.saved
   var form = views:
     card:
@@ -45,21 +60,18 @@ proc render*(state: Settings; ctx: BuildContext): Node =
       label("姓名")
       input(state.current.name):
         key: "settings_name"
-        onChange(e):
-          state.current.name = e.value
-          state.edited()
+        onChange(e): state.edit(proc(v: var Settings) =
+          (v.current.name = e.value; editedInto(v)))
       label("邮箱")
       input(state.current.email):
         key: "settings_email"
-        onChange(e):
-          state.current.email = e.value
-          state.edited()
+        onChange(e): state.edit(proc(v: var Settings) =
+          (v.current.email = e.value; editedInto(v)))
       label("团队")
       input(state.current.team):
         key: "settings_team"
-        onChange(e):
-          state.current.team = e.value
-          state.edited()
+        onChange(e): state.edit(proc(v: var Settings) =
+          (v.current.team = e.value; editedInto(v)))
         onSubmit(e): state.save()
       label("当前方案")
       input("Studio / 团队版"):
@@ -70,15 +82,13 @@ proc render*(state: Settings; ctx: BuildContext): Node =
       title("通知偏好")
       switch("接收项目通知", state.current.notifications):
         key: "settings_notifications"
-        onChange(e):
-          state.current.notifications = e.checked
-          state.edited()
+        onChange(e): state.edit(proc(v: var Settings) =
+          (v.current.notifications = e.checked; editedInto(v)))
       checkbox("订阅每周工作摘要", state.current.digest):
         key: "settings_digest"
         disabled: not state.current.notifications
-        onChange(e):
-          state.current.digest = e.checked
-          state.edited()
+        onChange(e): state.edit(proc(v: var Settings) =
+          (v.current.digest = e.checked; editedInto(v)))
       label((if state.current.notifications: "每周摘要将发送到你的邮箱。" else: "开启项目通知后，可以修改摘要订阅。"))
     line:
       button("保存设置"):
@@ -88,10 +98,9 @@ proc render*(state: Settings; ctx: BuildContext): Node =
       button("撤销修改"):
         key: "settings_cancel"
         disabled: not dirty
-        onClick(e):
-          state.current = state.saved
-          state.invalid = false
-          state.message = "已撤销未保存的修改。"
+        onClick(e): state.edit(proc(v: var Settings) =
+          (v.current = v.saved; v.invalid = false;
+           v.message = "已撤销未保存的修改。"))
   if state.message.len > 0:
     let feedback = view:
       text(state.message):
@@ -115,9 +124,8 @@ proc render*(state: Settings; ctx: BuildContext): Node =
     let finishSync = view:
       button("完成本次同步"):
         key: "sync_finish"
-        onClick(e):
-          state.syncing = false
-          inc state.syncCount
+        onClick(e): state.edit(proc(v: var Settings) =
+          (v.syncing = false; inc v.syncCount))
     sync.add(finishSync)
   else:
     let syncStatus = view:
@@ -128,7 +136,7 @@ proc render*(state: Settings; ctx: BuildContext): Node =
     let startSync = view:
       button("开始模拟同步"):
         key: "sync_start"
-        onClick(e): state.syncing = true
+        onClick(e): state.edit(proc(v: var Settings) = v.syncing = true)
     sync.add(startSync)
   let syncSummary = view:
     label("已完成 " & $state.syncCount & " 次同步"):

@@ -1,11 +1,23 @@
+import ../fixture_app
 when not defined(windows): {.error: "Win32 input tests require Windows".}
 import std/[unittest, widestrs, os, tables, strutils]
 import leaf/[core, widgets, backend, backend_session, native_layout, ui_thread, styles]
 import leaf/backends/win32/[api, calls, host, backend]
 type Fixture = tuple[h: Win32Host, win: Win32Backend, s: BackendSession, runtime: Runtime]
-proc mounted(render: RenderProc, c = systemWin32Calls()): Fixture =
+proc mounted(render: proc(): Node, c = systemWin32Calls()): Fixture =
   let activity = newUiScopeActivity()
-  let runtime = newRuntime(guardUiApplication(Application(title: "Native input", width: 400, height: 300, render: render),
+  let runtime = newRuntime(guardUiApplication(fixtureApplication(render, "Native input", 400, 300),
+    proc(): uint64 = uint64(GetCurrentThreadId()), activity))
+  let h = createHost("Native input", DipSize(width: 400, height: 300))
+  h.setStartupScope(proc(): bool = activity.busy or runtime.installingHook or runtime.installingUpdate)
+  let win = newWin32Backend(h, c)
+  let session = win.attachWin32Backend(runtime)
+  win.bindSession(session)
+  h.bindSession(session, proc(): bool = activity.busy)
+  (h, win, session, runtime)
+proc mountedApp(app: Application, c = systemWin32Calls()): Fixture =
+  let activity = newUiScopeActivity()
+  let runtime = newRuntime(guardUiApplication(app,
     proc(): uint64 = uint64(GetCurrentThreadId()), activity))
   let h = createHost("Native input", DipSize(width: 400, height: 300))
   h.setStartupScope(proc(): bool = activity.busy or runtime.installingHook or runtime.installingUpdate)
@@ -48,7 +60,7 @@ proc turns(f: Fixture, action, checkAfter: proc() {.closure.}) =
 suite "real Win32 controlled input and composition messages":
   test "zero diff model rejection writes the accepted text exactly once":
     var calls = 0
-    let f = mounted(proc(c: BuildContext): Node = input("7", key="i", onChange=proc(e: Event) = inc calls))
+    let f = mounted(proc(): Node = input("7", key="i", onChange=proc(e: Event) = inc calls))
     defer: f.h.destroyHost()
     let e = f.editor()
     let before = f.win.diagnostics.setTexts
@@ -60,7 +72,15 @@ suite "real Win32 controlled input and composition messages":
     check f.win.diagnostics.setTexts == before + 1
   test "echo ack preserves the Unicode editor handle and selection":
     var value = "a😀b"
-    let f = mounted(proc(c: BuildContext): Node = input(value, key="i", onChange=proc(e: Event) = value = e.value))
+    type EchoModel = object
+      value: string
+    let EchoRoot=defineComponent[int,State[EchoModel]]("InputEcho",
+      proc(ctx: MountContext,p:int):State[EchoModel]=ctx.state(EchoModel(value:"a😀b")),
+      proc(ctx: ComponentContext,p:int,m:State[EchoModel]):UiDescription =
+        let v=ctx.value(m)
+        host(input(v.value,key="i",onChange=proc(e: Event)=
+          (value=e.value; discard m.set(EchoModel(value:e.value))))))
+    let f = mountedApp(componentApplication(component(EchoRoot,0),"Native input",400,300))
     defer: f.h.destroyHost()
     let e = f.editor()
     typeText(e, "a😀bc")
@@ -74,9 +94,16 @@ suite "real Win32 controlled input and composition messages":
   test "two native edits captured before drain never reset the newer text":
     var value = ""
     var seen: seq[string]
-    let f = mounted(proc(c: BuildContext): Node = input(value, key="i", onChange=proc(e: Event) =
-      seen.add(e.value)
-      value = e.value))
+    type EditModel = object
+      value: string
+    let EditRoot=defineComponent[int,State[EditModel]]("InputEdits",
+      proc(ctx: MountContext,p:int):State[EditModel]=ctx.state(EditModel(value:"")),
+      proc(ctx: ComponentContext,p:int,m:State[EditModel]):UiDescription =
+        let v=ctx.value(m)
+        host(input(v.value,key="i",onChange=proc(e: Event)=
+          (seen.add(e.value); value=e.value;
+           discard m.set(EditModel(value:e.value))))))
+    let f = mountedApp(componentApplication(component(EditRoot,0),"Native input",400,300))
     defer: f.h.destroyHost()
     let e = f.editor()
     typeText(e, "a")
@@ -88,7 +115,7 @@ suite "real Win32 controlled input and composition messages":
     check f.win.diagnostics.setTexts == before
   test "composition conflict waits for the end message and then settles":
     var phase: seq[CompositionPhase]
-    let f = mounted(proc(c: BuildContext): Node = input("accepted", key="i", onChange=proc(e: Event) = phase.add(e.composition)))
+    let f = mounted(proc(): Node = input("accepted", key="i", onChange=proc(e: Event) = phase.add(e.composition)))
     defer: f.h.destroyHost()
     let e = f.editor()
     discard SendMessageW(e, WM_IME_STARTCOMPOSITION, 0, 0)
@@ -101,7 +128,7 @@ suite "real Win32 controlled input and composition messages":
     check compositionStart in phase and compositionEnd in phase
   test "explicit accepted reset executes once at the safe native boundary":
     var token: uint64
-    let f = mounted(proc(c: BuildContext): Node = input("accepted", key="i", resetToken=token))
+    let f = mounted(proc(): Node = input("accepted", key="i", resetToken=token))
     defer: f.h.destroyHost()
     let e = f.editor()
     let before = f.win.diagnostics.setTexts
@@ -116,7 +143,7 @@ suite "real Win32 controlled input and composition messages":
     f.turns(action, after)
   test "enter queues a submit and programmatic setters never trigger it":
     var submits = 0
-    let f = mounted(proc(c: BuildContext): Node = input("x", key="i", onSubmit=proc(e: Event) = inc submits))
+    let f = mounted(proc(): Node = input("x", key="i", onSubmit=proc(e: Event) = inc submits))
     defer: f.h.destroyHost()
     let e = f.editor()
     discard SendMessageW(e, WM_IME_STARTCOMPOSITION, 0, 0)
@@ -137,7 +164,7 @@ suite "real Win32 controlled input and composition messages":
     var model = "old"
     var token: uint64
     var actions = 0
-    let f = mounted(proc(c: BuildContext): Node = input(model, key="i", resetToken=token,
+    let f = mounted(proc(): Node = input(model, key="i", resetToken=token,
       onChange=proc(e: Event) =
         inc actions
         model = e.value))
@@ -170,7 +197,7 @@ suite "real Win32 controlled input and composition messages":
       realSet(window, text)
     var token: uint64
     var actions = 0
-    let f = mounted(proc(ctx: BuildContext): Node = input("accepted", key="i", resetToken=token,
+    let f = mounted(proc(): Node = input("accepted", key="i", resetToken=token,
       onChange=proc(e: Event) = inc actions), c)
     defer: f.h.destroyHost()
     let before = f.win.diagnostics.setTexts
@@ -201,7 +228,7 @@ suite "real Win32 controlled input and composition messages":
         # Actual EDIT's synchronous EN_CHANGE models its default IME result path.
         typeText(window, "result")
     var phases: seq[CompositionPhase]
-    let f = mounted(proc(ctx: BuildContext): Node = input("result", key="i",
+    let f = mounted(proc(): Node = input("result", key="i",
       onChange=proc(e: Event) = phases.add(e.composition)), c)
     defer: f.h.destroyHost()
     discard SendMessageW(f.editor(), WM_IME_STARTCOMPOSITION, 0, 0)
@@ -213,7 +240,7 @@ suite "real Win32 controlled input and composition messages":
 
   test "notifications sent to the wrong direct parent cannot enter business":
     var actions = 0
-    let f = mounted(proc(ctx: BuildContext): Node = column(@[
+    let f = mounted(proc(): Node = column(@[
       input("nested", key="i", onChange=proc(e: Event) = inc actions)], key="root"))
     defer: f.h.destroyHost()
     let e = f.editor()
@@ -251,7 +278,7 @@ suite "real Win32 controlled input and composition messages":
         return 0
       realRelease(window, context)
     var token: uint64
-    let f = mounted(proc(ctx: BuildContext): Node = input("accepted", key="i", resetToken=token), c)
+    let f = mounted(proc(): Node = input("accepted", key="i", resetToken=token), c)
     defer: f.h.destroyHost()
     let e = f.editor()
     discard SendMessageW(e, WM_IME_STARTCOMPOSITION, 0, 0)
@@ -293,7 +320,7 @@ suite "real Win32 controlled input and composition messages":
         raise newException(UiError, "selection-reset-primary")
       realSend(window, message, wp, lp)
     var token: uint64
-    let f = mounted(proc(ctx: BuildContext): Node = input("accepted", key="i", resetToken=token), c)
+    let f = mounted(proc(): Node = input("accepted", key="i", resetToken=token), c)
     defer: f.h.destroyHost()
     var stage = 0
     f.h.setSafeTick(proc() =
@@ -314,7 +341,7 @@ suite "real Win32 controlled input and composition messages":
       for hasHandler in [false, true]:
         var actions = 0
         let handler: Callback = if hasHandler: (proc(e: Event) = inc actions) else: nil
-        let f = mounted(proc(ctx: BuildContext): Node =
+        let f = mounted(proc(): Node =
           if toggle: switch("toggle", false, key="c", onChange=handler)
           else: checkbox("check", false, key="c", onChange=handler))
         windows.setLen(0)
@@ -334,7 +361,7 @@ suite "real Win32 controlled input and composition messages":
     var token: uint64
     var invalid = false
     var actions = 0
-    let f = mounted(proc(ctx: BuildContext): Node = column(@[
+    let f = mounted(proc(): Node = column(@[
       input(model, key="i", resetToken=token, onChange=proc(e: Event) =
         inc actions
         model = e.value),
@@ -400,7 +427,7 @@ suite "real Win32 controlled input and composition messages":
       realDefault(window, message, wp, lp)
     var model = "old"
     var actions = 0
-    let f = mounted(proc(ctx:BuildContext):Node = input(model, key="i",
+    let f = mounted(proc():Node = input(model, key="i",
       onChange=proc(e:Event) =
         inc actions
         model = e.value), c)

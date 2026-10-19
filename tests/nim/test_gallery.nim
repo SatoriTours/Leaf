@@ -1,5 +1,6 @@
 import std/[unittest, tables]
 import leaf
+import leaf/host_session
 import ../../example/main
 
 proc click(runtime: Runtime, key: string) = discard runtime.dispatch(key, Event(kind: click))
@@ -125,3 +126,40 @@ suite "Seven-page Nim application UI behavior":
       ("signup", "700"), ("stocks", "1030"), ("reports", "1260"), ("chat", "870")]:
       rt.click("nav_" & id)
       check rt.find("page_content").node.styles["min_height"] == height
+
+suite "gallery page accepted-State isolation":
+  test "a rejected dashboard refresh is not counted by the next refresh":
+    var reject = false
+    let rt = newRuntime(galleryApp("dashboard"))
+    let session = attachHostSession(rt, HostConsumer(sessionId: 99103,
+      prepare: proc(batch: HostBatch) = discard,
+      apply: proc() =
+        if reject: fail("probe rejects gallery dashboard"),
+      accept: proc(revision: uint64) {.raises: [].} = discard,
+      discardPrepared: proc() {.raises: [].} = discard))
+    reject = true
+    expect UiError: rt.click("refresh")
+    check rt.value("dashboard_status") == "已刷新 0 次 · 筛选后 4 个项目"
+    reject = false
+    rt.click("refresh")
+    check rt.value("dashboard_status") == "已刷新 1 次 · 筛选后 4 个项目"
+    session.close()
+
+  test "a rejected settings draft is not saved by the next accepted save":
+    var reject = false
+    let rt = newRuntime(galleryApp("settings"))
+    let session = attachHostSession(rt, HostConsumer(sessionId: 99104,
+      prepare: proc(batch: HostBatch) = discard,
+      apply: proc() =
+        if reject: fail("probe rejects gallery settings"),
+      accept: proc(revision: uint64) {.raises: [].} = discard,
+      discardPrepared: proc() {.raises: [].} = discard))
+    rt.change("settings_name", "保留的草稿")
+    reject = true
+    expect UiError: rt.change("settings_name", "泄漏草稿")
+    check rt.value("settings_name") == "保留的草稿"
+    reject = false
+    rt.click("settings_save")
+    check rt.value("settings_name") == "保留的草稿"
+    check rt.value("settings_message") == "设置已保存（本次运行内有效）。"
+    session.close()

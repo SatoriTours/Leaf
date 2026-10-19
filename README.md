@@ -66,18 +66,22 @@ nim c -r examples/counter.nim --headless --click add --click add
 import leaf
 
 var count = 0
+let Root = defineComponent[int, State[int]]("ReadmeCounter",
+  proc(ctx: MountContext, p: int): State[int] = ctx.state(0),
+  proc(ctx: ComponentContext, p: int, revision: State[int]): UiDescription =
+    discard ctx.value(revision)
+    let node =
+      view:
+        column:
+          styles: {"padding": "24", "gap": "12"}
+          text "计数：" & $count
+          button "增加":
+            key: "add"
+            onClick(e): inc count
+    wrapEventHandlers(node, proc() = discard revision.update(proc(v: int): int = v + 1))
+    host(node))
 
-proc render(ctx: BuildContext): Node =
-  view:
-    column:
-      styles: {"padding": "24", "gap": "12"}
-      text "计数：" & $count
-      button "增加":
-        key: "add"
-        onClick(e): inc count
-
-let app = Application(title: "Nim + GPUI", width: 640, height: 480, render: render)
-
+let app = componentApplication(component(Root, 0), "Nim + GPUI", 640, 480)
 when isMainModule: quit(run(app))
 ```
 

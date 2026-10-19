@@ -5,5 +5,5 @@ proc renderSettings(state: HomeState): Node =
       text "Settings"
       checkbox("Hide completed tasks", state.hideCompleted):
         key: "hide_completed"
-        onChange(e): state.hideCompleted = e.checked
+        onChange(e): state.setHideCompleted(e.checked)
       text "Task records are saved in SQLite. View settings apply to this session."

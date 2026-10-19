@@ -351,8 +351,7 @@ fn typed_reset_reuses_entity_and_click_dispatches(cx: &mut gpui::TestAppContext)
 }
 
 #[gpui::test]
-fn typed_enter_and_event_transport_use_no_json(cx: &mut gpui::TestAppContext) {
-    let before = crate::bridge::json_bridge_calls();
+fn typed_enter_and_event_transport_uses_typed_callbacks(cx: &mut gpui::TestAppContext) {
     let mut f = Fixture::new();
     let (_host, view, cx) = form(&mut f, cx);
     let input = view.read_with(cx, |v, _| v.inputs.borrow()[&2].state.clone());
@@ -360,7 +359,6 @@ fn typed_enter_and_event_transport_use_no_json(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(f.events, 1);
-    assert_eq!(crate::bridge::json_bridge_calls(), before);
 }
 
 #[gpui::test]

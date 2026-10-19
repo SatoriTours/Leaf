@@ -1,4 +1,4 @@
-import std/[unittest,options]
+import std/[unittest,options,os,osproc,strutils]
 import leaf/[core,widgets,components]
 var counter:State[int]
 var renders=0
@@ -129,7 +129,7 @@ suite "separate component and host budgets":
     var children:seq[UiDescription]
     for i in 0..<5000:children.add(component(BudgetLeaf,i,key= $i))
     let rt=newRuntime(componentApplication(hostShell(column(@[]),children),"budget"))
-    check rt.stats.mountedNodes==10001
+    check rt.stats.mountedNodes==5001
     expect UiError:discard rt.find("shared")
     check rt.snapshot.root.children.len==5000
 
@@ -194,3 +194,23 @@ suite "component editor identity":
     let old=rt.find("field").id
     discard rt.dispatch("swap",Event(kind:click))
     check rt.find("field").id!=old
+
+suite "production application surface":
+  test "raw render Application is rejected in a production build":
+      let root = getTempDir() / ("leaf-raw-render-" & $getCurrentProcessId())
+      createDir(root)
+      defer: removeDir(root)
+      let entry = root / "main.nim"
+      writeFile(entry, """import leaf
+let app = Application(title: "raw", width: 320, height: 200,
+  render: proc(): Node = text("raw"))
+discard app
+""")
+      let source = currentSourcePath().parentDir.parentDir.parentDir / "src"
+      let nim = if getEnv("NIM").len > 0: getEnv("NIM") else: findExe("nim")
+      check nim.len > 0
+      let command = quoteShell(nim) & " c --skipParentCfg:on --skipUserCfg:on --hints:off --path:" &
+        quoteShell(source) & " --out:" & quoteShell(root / "raw") & " " & quoteShell(entry)
+      let result = execCmdEx(command, options = {poUsePath, poStdErrToStdOut})
+      check result.exitCode != 0
+      check ("render" in result.output) or ("componentApplication" in result.output)

@@ -1,5 +1,6 @@
+import ../fixture_app
 import std/[unittest, options, math, tables, json]
-import leaf/[core, widgets, styles, gpui_styles, backend, gpui_bridge]
+import leaf/[core, widgets, styles, gpui_styles, backend]
 
 proc rejectsStyle(pairs: openArray[(string, string)]): bool =
   try:
@@ -222,17 +223,12 @@ suite "Native reset token signal":
     let snapshot = Snapshot(title: "t", width: 320, height: 200, root: mount(node))
     check snapshot.toJson()["root"]["attributes"] == %*{}
 
-  test "GPUI bridge rejects the new token while styles stay style-only":
-    # gpui_styles remains style-only and does not enforce control attributes.
+  test "GPUI styles stay style-only and never enforce control attributes":
     validateStyles(mount(ui(NodeKind.checkbox,
       attributes = style({"checked": "maybe"}))))
     expect UiError:
       discard normalizeProps(ui(NodeKind.checkbox,
         attributes = style({"checked": "maybe"})))
-    expect UiError:
-      rejectNativeResetSignals(mount(input("v", key = "i", resetToken = 1)))
-    rejectNativeResetSignals(mount(input("v", key = "i", resetToken = 0)))
-    rejectNativeResetSignals(mount(input("v", key = "i")))
 
   test "old variants and lazy illegal attributes are preserved":
     check normalizeProps(button("b", variant = "outline")).control.variant.get ==
@@ -267,21 +263,19 @@ suite "Native reset token grammar and lazy materialization":
 
   test "lazy row materialization rejects illegal reset tokens":
     var items = @["a"]
-    proc render(ctx: BuildContext): Node =
+    proc render(): Node =
       column(@[virtualList("list", items, proc(index: int): Node =
         ui(NodeKind.input, text = "v",
           attributes = style({"input_reset_token": "+1"})))], key = "root")
-    let runtime = newRuntime(Application(title: "lazy", width: 320, height: 200,
-      render: render), validator = proc(snapshot: Snapshot) = validateProps(snapshot.root))
+    let runtime = newRuntime(fixtureApplication(render, "lazy", 320, 200), validator = proc(snapshot: Snapshot) = validateProps(snapshot.root))
     # The illegal attribute is not validated until the row is materialized.
     expect UiError:
       discard runtime.materialize("list", 0, 1)
 
   test "lazy row materialization accepts a valid reset token":
     var items = @["a"]
-    proc render(ctx: BuildContext): Node =
+    proc render(): Node =
       column(@[virtualList("list", items, proc(index: int): Node =
         input("v", key = "row", resetToken = 7))], key = "root")
-    let runtime = newRuntime(Application(title: "lazy", width: 320, height: 200,
-      render: render), validator = proc(snapshot: Snapshot) = validateProps(snapshot.root))
+    let runtime = newRuntime(fixtureApplication(render, "lazy", 320, 200), validator = proc(snapshot: Snapshot) = validateProps(snapshot.root))
     check runtime.materialize("list", 0, 1).len == 1

@@ -6,5 +6,5 @@ proc renderSearch(state: HomeState): Node =
       input state.query:
         key: "search_query"
         placeholder: "Search tasks"
-        onChange(e): state.query = e.value
+        onChange(e): state.setQuery(e.value)
       renderTasks(state, state.query)

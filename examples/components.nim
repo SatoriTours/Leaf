@@ -1,37 +1,30 @@
 import leaf
 
-type CounterCard = ref object
-  label: string
-  count: int
+var leftRenders*, rightRenders* = 0
 
-proc render(state: CounterCard, key: string): Node =
-  view:
-    column:
-      key: key
-      styles: {"padding": "24", "gap": "16", "background": "#1F2937",
-        "radius": "12", "width": "240"}
-      text state.label:
-        styles: {"font_size": "20", "weight": "bold"}
-      text $state.count:
-        key: "count"
-        styles: {"font_size": "40", "color": "#93C5FD"}
-      button "增加":
-        key: "increment"
-        onClick(e): inc state.count
+let CounterCard = defineComponent[string, State[int]]("ExampleCounterCard",
+  proc(ctx: MountContext, cardKey: string): State[int] = ctx.state(0),
+  proc(ctx: ComponentContext, cardKey: string, count: State[int]): UiDescription =
+    let n = ctx.value(count)
+    if cardKey == "left": inc leftRenders else: inc rightRenders
+    host(column(@[
+      text("独立计数器", styles=style({"font_size": "20", "weight": "bold"})),
+      text($n, key=cardKey & "_count", styles=style({"font_size": "40", "color": "#93C5FD"})),
+      button("增加", key=cardKey & "_increment",
+        onClick=proc(e: Event) = discard count.update(proc(v: int): int = v + 1))],
+      key="card", styles=style({"padding": "24", "gap": "16", "background": "#1F2937",
+        "radius": "12", "width": "240"}))))
+
+let Root = defineComponent[int, int]("ExampleComponentsRoot",
+  proc(ctx: MountContext, p: int): int = p,
+  proc(ctx: ComponentContext, p, m: int): UiDescription =
+    hostShell(column(@[], key="components-root"), @[
+      host(text("组件组合", styles=style({"font_size": "28", "weight": "bold"}))),
+      hostShell(row(@[], key="cards", styles=style({"gap": "20"})), @[
+        component(CounterCard, "left", key="left"),
+        component(CounterCard, "right", key="right")])]))
 
 proc componentsApp*(): Application =
-  let left = CounterCard(label: "独立计数器 A")
-  let right = CounterCard(label: "独立计数器 B")
-  proc render(ctx: BuildContext): Node =
-    view:
-      column:
-        styles: {"padding": "32", "gap": "24", "width": "full", "height": "full"}
-        text "组件组合":
-          styles: {"font_size": "28", "weight": "bold"}
-        row:
-          styles: {"gap": "20"}
-          left.render("left")
-          right.render("right")
-  Application(title: "Leaf · Components", width: 620, height: 340, render: render)
+  componentApplication(component(Root, 0), "Leaf · Components", 620, 340)
 
 when isMainModule: quit(run(componentsApp()))

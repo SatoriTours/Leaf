@@ -1,5 +1,5 @@
 import ./core
-## Managed components opt in explicitly; importing this module loads no desktop.
+## Public component API: applications are always managed component runtimes.
 import ./[component_description,component_view]
 # ownsState, outlet internals and owner-accounting hooks stay runtime-internal.
 export component_description except ownsState,pageOutlet,outletSpec,PageOutletSpec,

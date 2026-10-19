@@ -34,10 +34,10 @@ proc pageRegistry(resources: seq[ResourceSpec], modelSchema: int): string =
   for resource in resources:
     result.add("import ../pages/" & resource.plural & "/page as " & resource.plural & "_page\n")
   if modelSchema == 1:
-    result.add("\nproc generatedPages*(database: storage.Database): seq[PageDefinition] =\n  @[home_page.definition(database)")
+    result.add("\nproc generatedPages*(database: storage.Database): seq[ComponentPageDefinition] =\n  @[home_page.definition(database)")
     for resource in resources: result.add(",\n    " & resource.plural & "_page.definition(database)")
   else:
-    result.add("\nproc generatedPages*(): seq[PageDefinition] =\n  @[home_page.definition()")
+    result.add("\nproc generatedPages*(): seq[ComponentPageDefinition] =\n  @[home_page.definition()")
     for resource in resources: result.add(",\n    " & resource.plural & "_page.definition()")
   result.add("]\n")
 

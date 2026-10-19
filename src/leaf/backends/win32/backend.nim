@@ -31,7 +31,11 @@ type
     measurement: NativeMeasure
     controls: Table[NodeHandle, NativeControl]
     prepared: Table[NodeHandle, NativeControl]
-    current, candidate, accepted: Table[NodeHandle, MountedEntity]
+    preparedModels: Table[NodeHandle, PreparedModelAccept]
+    # current/candidate are lazy native layout/apply state; there is no
+    # MaxNodes preallocation. The old `accepted` copy was never read and was
+    # removed: accepted metadata lives in the native consumer's prepared map.
+    current, candidate: Table[NodeHandle, MountedEntity]
     cache: MeasureCache
     controlIds: ControlIdPool
     pendingRegions: seq[HRGN]
@@ -437,9 +441,21 @@ proc relayout*(win: Win32Backend, content: DipSize, dpi: int) =
   inc win.stats.layouts
   win.dirty = false
 
+proc prepareModels(win: Win32Backend) =
+  ## Prepare owned editor-model values for every entity this batch may accept.
+  ## Accept then moves them into EditorState without copying dynamic text.
+  win.preparedModels.clear()
+  for handle, entity in win.candidate:
+    var control: NativeControl
+    if handle in win.prepared: control = win.prepared[handle]
+    else: control = win.controls.getOrDefault(handle)
+    if control == nil: continue
+    win.preparedModels[handle] = prepareModelAccept(control.editor, entity.value)
+
 proc discardPrepared(win: Win32Backend) =
   win.clear(win.prepared)
   win.candidate.clear()
+  win.preparedModels.clear()
 proc prepare(win: Win32Backend, batch: UpdateBatch) =
   win.checkLive()
   if win.prepared.len != 0: win.discardPrepared()
@@ -467,6 +483,7 @@ proc prepare(win: Win32Backend, batch: UpdateBatch) =
         win.candidate[op.handle]=entity
       of opRemove:
         if op.handle notin win.current:fail("unknown native handle")
+    win.prepareModels()
     return
   win.candidate = win.current
   if win.measurement == nil: win.measurement = newNativeMeasure(win.host.windowHandle, win.calls)
@@ -503,6 +520,7 @@ proc prepare(win: Win32Backend, batch: UpdateBatch) =
       for handle, entity in win.candidate.mpairs:
         if entity.parent == old.parent and entity.index > old.index: dec entity.index
   if win.candidate.len > MaxNodes: fail("native entity budget exceeded")
+  win.prepareModels()
 proc apply(win: Win32Backend, batch: UpdateBatch) =
   win.checkLive()
   inc win.depth
@@ -532,21 +550,30 @@ proc apply(win: Win32Backend, batch: UpdateBatch) =
     win.relayout(DipSize(width: ctx.contentWidth, height: ctx.contentHeight), int(ctx.scale * 96))
   win.reportError()
 proc accept(win: Win32Backend, entities: Table[NodeHandle, MountedEntity], revision: uint64) {.raises: [].} =
-  win.accepted = entities
   win.revision = revision
   for handle, control in win.controls.mpairs:
     if handle notin entities: continue
     let entity = entities.getOrDefault(handle)
-    control.editor.acceptModel(entity.value, revision, entity.props.control.resetToken)
+    var preparedAccept = false
+    win.preparedModels.withValue(handle, prepared):
+      control.editor.acceptPreparedModel(prepared[], revision, entity.props.control.resetToken)
+      preparedAccept = true
+    if not preparedAccept:
+      control.editor.acceptModel(entity.value, revision, entity.props.control.resetToken)
     if control.editor.pendingReset.isSome: control.armed = false
     elif win.bound: control.armed = true
 proc acceptDelta(win:Win32Backend,delta:HostAcceptedDelta) {.raises:[].}=
-  for handle in delta.removals:win.accepted.del(handle)
+  # Accepted metadata is owned by the native consumer; the backend only
+  # settles control editor models here. No table grows in the accept window.
   for entity in delta.upserts:
-    win.accepted[entity.handle]=entity
     let control=win.controls.getOrDefault(entity.handle)
     if control!=nil:
-      control.editor.acceptModel(entity.value,delta.revision,entity.props.control.resetToken)
+      var preparedAccept=false
+      win.preparedModels.withValue(entity.handle,prepared):
+        control.editor.acceptPreparedModel(prepared[],delta.revision,entity.props.control.resetToken)
+        preparedAccept=true
+      if not preparedAccept:
+        control.editor.acceptModel(entity.value,delta.revision,entity.props.control.resetToken)
       if control.editor.pendingReset.isSome:control.armed=false
       elif win.bound:control.armed=true
   win.revision=delta.revision
@@ -628,7 +655,7 @@ proc dispose(win: Win32Backend) =
   for old in win.retiredMeasures:
     if old != nil: old.close()
   win.retiredMeasures.setLen(0)
-  win.current.clear(); win.accepted.clear(); win.cache.clear()
+  win.current.clear(); win.preparedModels.clear(); win.cache.clear()
   win.closed = true
 proc newWin32Backend*(host: Win32Host, calls: Win32Calls = systemWin32Calls()): Win32Backend =
   discard host.context
@@ -668,6 +695,22 @@ proc newWin32Backend*(host: Win32Host, calls: Win32Calls = systemWin32Calls()): 
   var common = INITCOMMONCONTROLSEX(dwSize: DWORD(sizeof(INITCOMMONCONTROLSEX)), dwICC: ICC_PROGRESS_CLASS)
   if initControls(addr common) == 0: nativeError("InitCommonControlsEx")
   win
+when defined(leafProtocolProbes):
+  proc observeCompositionForTest*(win: Win32Backend, handle: NodeHandle,
+      text: string) =
+    ## Probe-only seam: put the editor into an active composition without
+    ## driving OS IME messages, so the prepared conflict path is measurable.
+    win.checkLive()
+    let control = win.controls.getOrDefault(handle)
+    if control == nil: fail("missing editor control")
+    control.editor.observeEditor(ControlValue(text: text), compositionStart,
+      Selection16(), control.editor.latestObserved + 1)
+
+  proc conflictTextForTest*(win: Win32Backend, handle: NodeHandle): string =
+    let control = win.controls.getOrDefault(handle)
+    if control == nil or control.editor.conflict.isNone: return ""
+    control.editor.conflict.get.text
+
 proc asBackend*(win: Win32Backend): Backend = win.checkOwner(); win.protocol
 proc bindSession*(win: Win32Backend, session: BackendSession) =
   win.checkLive()

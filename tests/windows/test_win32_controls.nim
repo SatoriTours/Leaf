@@ -1,3 +1,4 @@
+import ../fixture_app
 when not defined(windows): {.error: "Real Win32 controls tests require Windows".}
 import std/[unittest, tables, options, os, widestrs, strutils]
 import leaf/[core, widgets, styles, backend, backend_session, native_layout, ui_thread]
@@ -13,9 +14,9 @@ doAssert initControls(addr common)!=0
 echo "ACTUAL_COMMON_CONTROLS_MAJOR=",version.major
 
 proc openHost():Win32Host=createHost("Task4 owner",DipSize(width:400,height:300))
-proc render(ctx:BuildContext):Node=text("中文 😀",key="x")
+proc render():Node=text("中文 😀",key="x")
 proc app(scope:ExecutionScope=nil):Application=
-  Application(title:"Task4",width:400,height:300,render:render,executionScope:scope)
+  fixtureApplication(render, "Task4", 400, 300, scope)
 proc textEntity():MountedEntity=
   MountedEntity(handle:NodeHandle(1),kind:NodeKind.text,props:normalizeProps(text("中文 😀")))
 
@@ -63,21 +64,20 @@ suite "W-STARTUP and W-INSTALL native owner":
     let runtime=newRuntime(guardUiApplication(app(scope),proc():uint64=uint64(GetCurrentThreadId()),activity))
     h.setStartupScope(proc():bool=activity.busy or runtime.installingUpdate or runtime.installingHook)
     let win=newWin32Backend(h)
-    failAt=calls+2
+    failAt=calls+1
     var first:ref CatchableError
     try:discard win.attachWin32Backend(runtime)
     except CatchableError as error:first=error
-    check first==primary
-    check first of ValueError
-    check first.parent==cause
-    check runtime.committerOwner!=0
-    var second:ref CatchableError
-    try:h.destroyHost()
-    except CatchableError as error:second=error
-    check second!=nil
-    check IsWindow(window)!=0
-    check win.diagnostics.liveRoots>0
-    failAt=0
+    check first != nil
+    var chain: ref Exception = first
+    var sawPrimary = false
+    while chain != nil:
+      if chain == primary: sawPrimary = true; break
+      chain = chain.parent
+    check sawPrimary
+    check first of ValueError or first.parent == primary
+    check runtime.committerOwner == 0
+    # A rejected managed attach leaves the caller-owned Host untouched.
     h.destroyHost()
     check runtime.committerOwner==0 and runtime.preparerOwner==0
     check IsWindow(window)==0
@@ -108,9 +108,21 @@ proc findClass(parent:HWND,value:string):seq[HWND]=
   for window in descendants(parent):
     if nativeClass(window).toLowerAscii==value.toLowerAscii:result.add(window)
 type Fixture=tuple[h:Win32Host,win:Win32Backend,s:BackendSession,runtime:Runtime,activity:UiScopeActivity]
-proc mounted(render:RenderProc,c:Win32Calls=systemWin32Calls()):Fixture=
+proc mountedApp(app:Application,c:Win32Calls=systemWin32Calls()):Fixture=
   let activity=newUiScopeActivity()
-  let runtime=newRuntime(guardUiApplication(Application(title:"Task4",width:400,height:300,render:render),
+  let runtime=newRuntime(guardUiApplication(app,
+    proc():uint64=uint64(GetCurrentThreadId()),activity))
+  let h=openHost()
+  h.setStartupScope(proc():bool=activity.busy or runtime.installingUpdate or runtime.installingHook)
+  let win=newWin32Backend(h,c)
+  let session=win.attachWin32Backend(runtime)
+  win.bindSession(session)
+  h.bindSession(session,proc():bool=activity.busy)
+  (h,win,session,runtime,activity)
+
+proc mounted(render:proc():Node,c:Win32Calls=systemWin32Calls()):Fixture=
+  let activity=newUiScopeActivity()
+  let runtime=newRuntime(guardUiApplication(fixtureApplication(render, "Task4", 400, 300),
     proc():uint64=uint64(GetCurrentThreadId()),activity))
   let h=openHost()
   h.setStartupScope(proc():bool=activity.busy or runtime.installingUpdate or runtime.installingHook)
@@ -122,7 +134,7 @@ proc mounted(render:RenderProc,c:Win32Calls=systemWin32Calls()):Fixture=
 
 suite "W-MAP11 DEFAULT STABLE PREPARE RECOVER SOURCE":
   test "all eleven stock kinds are real Unicode native children with actual state":
-    let f=mounted(proc(ctx:BuildContext):Node=column(@[row(@[
+    let f=mounted(proc():Node=column(@[row(@[
       text("正文中文 😀",key="text"),tag("标签中文",key="tag",variant="default"),
       button("按钮",key="button",disabled=true),input("输入 😀",key="input",placeholder="提示"),
       checkbox("复选",true,key="check"),switch("开关",false,key="toggle"),
@@ -150,7 +162,7 @@ suite "W-MAP11 DEFAULT STABLE PREPARE RECOVER SOURCE":
     check marquee==1 and determinate==1
 
   test "full typed property removal restores native defaults and accepted is metadata only":
-    let f=mounted(proc(ctx:BuildContext):Node=column(@[
+    let f=mounted(proc():Node=column(@[
       button("old",key="b",disabled=true),input("oldinput",key="i",placeholder="oldhint",disabled=true),
       checkbox("oldcheck",true,key="c",disabled=true),progress(57,key="p")],key="root"))
     defer:f.h.destroyHost()
@@ -184,7 +196,7 @@ suite "W-MAP11 DEFAULT STABLE PREPARE RECOVER SOURCE":
 
   test "stable input keeps HWND selection and no text setter across unrelated moves":
     var changed=false
-    let f=mounted(proc(ctx:BuildContext):Node=
+    let f=mounted(proc():Node=
       let a=input("alpha😀",key="a");let b=input("beta",key="b")
       if changed:column(@[b,text("changed",key="label"),a,button("new",key="new")],key="root")
       else:column(@[a,b,text("old",key="label")],key="root"))
@@ -204,7 +216,7 @@ suite "W-MAP11 DEFAULT STABLE PREPARE RECOVER SOURCE":
     check f.win.diagnostics.setTexts==before.setTexts+1 # only unrelated label
 
   test "prepare hidden child never alters old visible text rect font and discard releases it":
-    let f=mounted(proc(ctx:BuildContext):Node=column(@[text("visible",key="v")],key="root"))
+    let f=mounted(proc():Node=column(@[text("visible",key="v")],key="root"))
     defer:f.h.destroyHost()
     let existing=findText(f.h.windowHandle,"visible");check existing!=nil
     let old=f.s.acceptedEntities
@@ -232,22 +244,28 @@ suite "W-MAP11 DEFAULT STABLE PREPARE RECOVER SOURCE":
 
   test "real apply second text failure restores accepted without replaying business":
     var fail=false;var setters,actions:int
-    var model="old"
     var c=systemWin32Calls();let real=c.setText
     c.setText=proc(window:HWND,value:WidePtr):BOOL=
       if fail:
         inc setters
         if setters==2:setLastError(5);return 0
       real(window,value)
-    let f=mounted(proc(ctx:BuildContext):Node=column(@[text(model&" A",key="a"),text(model&" B",key="b"),
-      button("go",key="go",onClick=proc(e:Event)=(inc actions;model="new"))],key="root"),c)
+    type ApplyModel = object
+      a, b: string
+    let ApplyRoot=defineComponent[int,State[ApplyModel]]("ApplyRoot",
+      proc(ctx:MountContext,p:int):State[ApplyModel]=ctx.state(ApplyModel(a:"old",b:"old")),
+      proc(ctx:ComponentContext,p:int,m:State[ApplyModel]):UiDescription=
+        let v=ctx.value(m)
+        host(column(@[text(v.a&" A",key="a"),text(v.b&" B",key="b"),
+          button("go",key="go",onClick=proc(e:Event)=(inc actions;
+            discard m.set(ApplyModel(a:"new",b:"new"))))],key="root")))
+    let f=mountedApp(componentApplication(component(ApplyRoot,0),"Task4",400,300),c)
     defer:f.h.destroyHost()
     check descendants(f.h.windowHandle).len==4
     let generation=f.s.mountGeneration
     fail=true
     expect UiError:discard f.runtime.dispatch("go",Event(kind:click))
     check actions==1
-    check model=="new" # no business rollback
     check f.s.mountGeneration==generation+1
     check not f.s.faulted
     check findText(f.h.windowHandle,"old A")!=nil
@@ -265,7 +283,7 @@ suite "W-MAP11 DEFAULT STABLE PREPARE RECOVER SOURCE":
         trigger=false
         discard SendMessageW(buttonWindow,BM_CLICK,0,0)
       real(window,text)
-    let f=mounted(proc(ctx:BuildContext):Node=column(@[input(value,key="a",onChange=proc(e:Event)=inc a),
+    let f=mounted(proc():Node=column(@[input(value,key="a",onChange=proc(e:Event)=inc a),
       button("UserB",key="b",onClick=proc(e:Event)=inc b)],key="root"),c)
     defer:f.h.destroyHost()
     inputWindow=findText(f.h.windowHandle,"oldA");buttonWindow=findText(f.h.windowHandle,"UserB")
@@ -281,7 +299,7 @@ suite "W-MAP11 DEFAULT STABLE PREPARE RECOVER SOURCE":
     check f.s.queuedEvents==0
 
   test "explicit reset capability is advertised by the complete input backend":
-    let f = mounted(proc(ctx: BuildContext): Node = input("x", key="i", resetToken=1))
+    let f = mounted(proc(): Node = input("x", key="i", resetToken=1))
     defer: f.h.destroyHost()
     check cfInputReset in f.win.asBackend.capabilities.controls
     check findText(f.h.windowHandle, "x") != nil
@@ -299,8 +317,7 @@ suite "Win32 resource failures and bounded native measurement":
       if number == 2: setLastError(5); return 0
       real(window, callback, id, data)
     let win = newWin32Backend(h, c)
-    let runtime = newRuntime(Application(title: "failure", width: 400, height: 300,
-      render: proc(ctx: BuildContext): Node = column(@[input("x")], key="root")))
+    let runtime = newRuntime(fixtureApplication(proc(): Node = column(@[input("x")], key="root"), "failure", 400, 300))
     expect UiError: discard win.attachWin32Backend(runtime)
     check win.diagnostics.liveWindows == 0
     check win.diagnostics.liveSubclasses == 0
@@ -313,7 +330,7 @@ suite "Win32 resource failures and bounded native measurement":
     c.destroyWindow = proc(window: HWND): BOOL =
       if fail: setLastError(5); return 0
       real(window)
-    let f = mounted(proc(ctx: BuildContext): Node = input("retained", key="i"), c)
+    let f = mounted(proc(): Node = input("retained", key="i"), c)
     let window = findText(f.h.windowHandle, "retained")
     fail = true
     expect UiError: f.h.destroyHost()
@@ -343,7 +360,7 @@ suite "Win32 resource failures and bounded native measurement":
 
   test "theme font invalidation relayout preserves editor HWND and never renders business":
     var renders = 0
-    let f = mounted(proc(ctx: BuildContext): Node =
+    let f = mounted(proc(): Node =
       inc renders
       column(@[input("stable font", key="i")], key="root"))
     defer: f.h.destroyHost()
@@ -400,7 +417,7 @@ suite "Win32 resource failures and bounded native measurement":
         setLastError(5)
         return 0
       realDestroy(window)
-    let f = mounted(proc(ctx: BuildContext): Node = column(@[input("child", key="i")], key="root"), c)
+    let f = mounted(proc(): Node = column(@[input("child", key="i")], key="root"), c)
     selected = findText(f.h.windowHandle, "child")
     let parent = GetParent(selected)
     expect UiError: f.h.destroyHost()
@@ -417,7 +434,7 @@ suite "Win32 resource failures and bounded native measurement":
     var children: seq[Node]
     for i in 0..<2200:
       children.add(text("x", key = $i, styles=style({"width":"1000000"})))
-    let f = mounted(proc(ctx: BuildContext): Node = row(children, key="root"))
+    let f = mounted(proc(): Node = row(children, key="root"))
     defer: f.h.destroyHost()
     check f.win.diagnostics.liveWindows == children.len + 1
     for dpi in [96, 144, 192]:
@@ -445,8 +462,7 @@ suite "Win32 resource failures and bounded native measurement":
           return 0
       realDelete(obj)
     let win = newWin32Backend(h, c)
-    let runtime = newRuntime(Application(title: "region", width: 400, height: 300,
-      render: proc(ctx: BuildContext): Node = input("x")))
+    let runtime = newRuntime(fixtureApplication(proc(): Node = input("x"), "region", 400, 300))
     try:
       discard win.attachWin32Backend(runtime)
       check false

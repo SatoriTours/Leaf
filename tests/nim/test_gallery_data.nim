@@ -43,7 +43,7 @@ suite "Seven-page Nim market and report data behavior":
     rt.click("report_size_1000"); rt.checked("report_full", true)
     check rt.find("report_rows").node.listSource.len == 1000
     discard rt.materialize("report_rows", 990, 1000)
-    check rt.keyed("record_").len == 10
+    check rt.keyed("record_").len == 12
     check rt.stats.mountedNodes < 1000
     check rt.value("report_matches") == "1000"
     check rt.find("report_next").node.disabled
@@ -89,7 +89,7 @@ suite "Seven-page Nim market and report data behavior":
     let report = newRuntime(reportsApp())
     check report.find("report_rows").node.listSource.len == 1000
     discard report.materialize("report_rows", 0, 10)
-    check report.keyed("record_").len == 10
+    check report.keyed("record_").len == 12
 
   test "chat ignores whitespace and sends trimmed Chinese on Enter":
     let rt = newRuntime(galleryApp("chat"))
@@ -126,7 +126,7 @@ suite "Seven-page Nim market and report data behavior":
     check source.len == 1000
     check rt.value("chat_total") == "1000"
     discard rt.materialize("message_list", 0, 10)
-    check rt.keyed("message_body_").len == 10
+    check rt.keyed("message_body_").len == 12
     check rt.find("message_body_1_1001") != nil
     rt.change("chat_draft", "stable")
     check rt.find("message_list").node.listSource == source
@@ -153,4 +153,4 @@ suite "Seven-page Nim market and report data behavior":
     let rt = newRuntime(chatApp())
     check rt.find("message_list").node.listSource.len == 1000
     discard rt.materialize("message_list", 0, 10)
-    check rt.keyed("message_body_").len == 10
+    check rt.keyed("message_body_").len == 12

@@ -1,6 +1,6 @@
 ## One owner-bound, synchronous commit consumer. prepare/apply may fail;
 ## accept/discard publish metadata only and may not invoke application code.
-import std/options
+import std/[options,tables]
 import ./[core, backend, host_reconcile,managed_runtime]
 export host_reconcile
 
@@ -12,6 +12,19 @@ type
     accept*: proc(revision:uint64) {.closure,raises:[].}
     discardPrepared*: proc() {.closure,raises:[].}
     faultPrepared*:proc() {.closure,raises:[].}
+    # Optional accepted-metadata view for backend sessions. Native consumers
+    # expose their prepared accepted map without duplicating it; custom test
+    # consumers may leave these nil. Explicit materialization may allocate.
+    entityQuery*: proc(handle:NodeHandle,value:var MountedEntity):bool {.closure,raises:[].}
+    nodeIdQuery*: proc(nodeId:string):NodeHandle {.closure,raises:[].}
+    acceptedCount*: proc():int {.closure,raises:[].}
+    materializeAccepted*: proc():Table[NodeHandle,MountedEntity] {.closure.}
+    # Optional accepted-metadata observers. prepare may allocate/prepare owned
+    # state; accept/discard only apply or roll back prepared metadata and may
+    # not allocate or fail.
+    prepareAcceptedMetadata*: proc(issues:seq[CapabilityIssue]) {.closure.}
+    acceptAcceptedMetadata*: proc() {.closure,raises:[].}
+    discardAcceptedMetadata*: proc() {.closure,raises:[].}
     lease: uint64
   HostSession* = ref object
     runtime*: Runtime
@@ -27,6 +40,20 @@ proc revision*(session:HostSession):uint64=session.reconciler.revision
 proc sessionId*(session:HostSession):uint64=session.consumer.sessionId
 proc handleFor*(session:HostSession,id:string):NodeHandle=session.reconciler.handleFor(id)
 proc record*(session:HostSession,handle:NodeHandle):Option[HostRecord]=session.reconciler.record(handle)
+proc hasAcceptedEntity*(session:HostSession,handle:NodeHandle):bool {.raises:[].}=
+  if session.consumer.entityQuery==nil:return false
+  var value:MountedEntity
+  session.consumer.entityQuery(handle,value)
+proc acceptedEntity*(session:HostSession,handle:NodeHandle):MountedEntity {.raises:[].}=
+  if session.consumer.entityQuery!=nil:discard session.consumer.entityQuery(handle,result)
+proc acceptedHandle*(session:HostSession,nodeId:string):NodeHandle {.raises:[].}=
+  if session.consumer.nodeIdQuery==nil:return NoHandle
+  session.consumer.nodeIdQuery(nodeId)
+proc acceptedEntityCount*(session:HostSession):int {.raises:[].}=
+  if session.consumer.acceptedCount==nil:0 else:session.consumer.acceptedCount()
+proc materializeAccepted*(session:HostSession):Table[NodeHandle,MountedEntity]=
+  if session.consumer.materializeAccepted==nil:return default(Table[NodeHandle,MountedEntity])
+  session.consumer.materializeAccepted()
 proc alive(session:HostSession):bool =
   not session.disposed and not session.closing and session.consumer.lease==session.lease
 proc requestClose*(session:HostSession)=session.closing=true
@@ -39,7 +66,9 @@ proc dropPending(session:HostSession,scoped=true) {.raises:[].} =
 proc acceptPending(session:HostSession) {.raises:[].} =
   let candidate=session.pending
   session.consumer.accept(session.pendingWire.nextRevision)
-  if not session.isManaged:session.reconciler.publish(candidate)
+  if not session.isManaged:
+    session.reconciler.publish(candidate)
+    session.reconciler.finishPublish(candidate)
   session.pending=nil
   session.pendingWire=default(HostBatch)
 proc commit(session:HostSession,accepted,candidate:Runtime)=

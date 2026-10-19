@@ -49,6 +49,11 @@ type
     viewports: Table[NodeHandle, ViewportState]
     issues: seq[CapabilityIssue]
     seenIssues: HashSet[string]
+    pendingIssueBase: int
+    pendingIssueValues: seq[CapabilityIssue]
+    pendingIssueKeys: seq[string]
+    acceptedIssueCount: int
+    metadataPrepared: bool
     disposed: bool
     faulted: bool
     frozen: bool
@@ -63,15 +68,81 @@ proc disposed*(session: BackendSession): bool = session.disposed
 proc closing*(session: BackendSession): bool = session.closing
 proc faulted*(session: BackendSession): bool = session.faulted
 proc frozen*(session: BackendSession): bool = session.frozen
-proc capabilityIssues*(session: BackendSession): seq[CapabilityIssue] = session.issues
+proc capabilityIssues*(session: BackendSession): seq[CapabilityIssue] =
+  ## Public read view: only accepted diagnostics. Physical slots reserved by a
+  ## pending prepare are hidden until accept advances acceptedIssueCount; a
+  ## materialized prefix copy is an explicit read-only query cost.
+  if session == nil: return @[]
+  if session.acceptedIssueCount == session.issues.len: return session.issues
+  result = newSeq[CapabilityIssue](session.acceptedIssueCount)
+  for index in 0..<session.acceptedIssueCount:
+    result[index] = session.issues[index]
+
+proc prepareAcceptedIssues(session: BackendSession, issues: seq[CapabilityIssue]) =
+  ## Prepare-time diagnostic publication. New dedup keys and the reserved
+  ## issue slots are owned here; accept only copies the prepared values into
+  ## already-sized storage. A rejected prepare/apply rolls both back.
+  if session.metadataPrepared or issues.len == 0: return
+  var values: seq[CapabilityIssue]
+  var keys: seq[string]
+  for issue in issues:
+    let key = issue.nodeId & "\x1f" & issue.property
+    if key in session.seenIssues: continue
+    var duplicate = false
+    for existing in keys:
+      if existing == key: duplicate = true; break
+    if duplicate: continue
+    keys.add(key)
+    values.add(issue)
+  if keys.len == 0: return
+  let base = session.acceptedIssueCount
+  doAssert base == session.issues.len
+  session.issues.setLen(base + values.len)
+  for key in keys: session.seenIssues.incl(key)
+  session.pendingIssueBase = base
+  session.pendingIssueValues = move(values)
+  session.pendingIssueKeys = move(keys)
+  session.metadataPrepared = true
+
+proc publishAcceptedIssues(session: BackendSession) {.raises:[].} =
+  if not session.metadataPrepared: return
+  let count = session.pendingIssueValues.len
+  for index in 0..<count:
+    session.issues[session.pendingIssueBase + index] = move(session.pendingIssueValues[index])
+  inc session.acceptedIssueCount, count
+  session.pendingIssueValues.setLen(0)
+  session.pendingIssueKeys.setLen(0)
+  session.metadataPrepared = false
+
+proc discardAcceptedIssues(session: BackendSession) {.raises:[].} =
+  if not session.metadataPrepared: return
+  session.issues.setLen(session.acceptedIssueCount)
+  for key in session.pendingIssueKeys: session.seenIssues.excl(key)
+  session.pendingIssueValues.setLen(0)
+  session.pendingIssueKeys.setLen(0)
+  session.metadataPrepared = false
 
 proc acceptedEntities*(session: BackendSession): Table[NodeHandle, MountedEntity] =
+  ## Explicit metadata snapshot. Managed sessions query the consumer's accepted
+  ## map; the returned Table is materialized on demand, never per commit.
+  if session.typedHost != nil: return session.typedHost.materializeAccepted()
   session.entities
 
+proc hasAcceptedEntity(session: BackendSession, handle: NodeHandle): bool =
+  if session.typedHost != nil: session.typedHost.hasAcceptedEntity(handle)
+  else: session.entities.hasKey(handle)
+
+proc acceptedEntity(session: BackendSession, handle: NodeHandle): MountedEntity =
+  if session.typedHost != nil: session.typedHost.acceptedEntity(handle)
+  else: session.entities.getOrDefault(handle)
+
 proc handleFor*(session: BackendSession, nodeId: string): NodeHandle =
-  if nodeId notin session.byNodeId:
-    fail("session has no entity for node: " & nodeId)
-  session.byNodeId[nodeId]
+  if session.typedHost != nil:
+    result = session.typedHost.acceptedHandle(nodeId)
+    if result != NoHandle: return
+  elif nodeId in session.byNodeId:
+    return session.byNodeId[nodeId]
+  fail("session has no entity for node: " & nodeId)
 
 proc collectIssues(session: BackendSession, root: MountedNode) =
   ## Structured decoration diagnostics are reported once per node/property for
@@ -81,6 +152,7 @@ proc collectIssues(session: BackendSession, root: MountedNode) =
     if key notin session.seenIssues:
       session.seenIssues.incl(key)
       session.issues.add(issue)
+      inc session.acceptedIssueCount
 
 proc adapterFor(session: BackendSession): PropsAdapter =
   ## Diff capability-filtered effective properties so the accepted entity props
@@ -241,8 +313,8 @@ proc restoreViewports(session: BackendSession, candidate: Runtime) =
   ## list that is no longer mounted in this candidate is skipped; row-build,
   ## validation and materialize errors propagate so the candidate is rejected.
   for handle, viewport in session.viewports:
-    if not session.entities.hasKey(handle): continue
-    let nodeId = session.entities[handle].nodeId
+    if not session.hasAcceptedEntity(handle): continue
+    let nodeId = session.acceptedEntity(handle).nodeId
     var target: MountedNode
     try:
       target = candidate.find(nodeId)
@@ -288,10 +360,9 @@ proc attachBackendImpl(runtime: Runtime, backend: Backend, host: HostContext,
     mode: mode, reconciler: newReconciler(), sessionId: host.sessionId,
     mountGeneration: host.mountGeneration)
   if runtime.managed:
-    session.entities=initTable[NodeHandle,MountedEntity](MaxNodes*4)
-    session.byNodeId=initTable[string,NodeHandle](MaxNodes*4)
     session.issues=runtime.useNativePolicy(backend.capabilities,mode)
     for issue in session.issues:session.seenIssues.incl(issue.nodeId & "\x1f" & issue.property)
+    session.acceptedIssueCount=session.issues.len
   else:session.collectIssues(runtime.snapshot.root)
   session.backendToken = backend.reserveSession()
 
@@ -304,17 +375,6 @@ proc attachBackendImpl(runtime: Runtime, backend: Backend, host: HostContext,
       backend.rebind(session.sessionId, session.mountGeneration)
     if runtime.managed:
       let consumer=nativeHostConsumer(backend,session.sessionId,mode=mode,
-        onAccepted=proc(delta:HostAcceptedDelta) {.raises:[].}=
-          for issue in delta.issues:
-            let key=issue.nodeId & "\x1f" & issue.property
-            if key notin session.seenIssues:
-              session.seenIssues.incl(key);session.issues.add(issue)
-          for handle in delta.removals:
-            let old=session.entities.getOrDefault(handle)
-            session.byNodeId.del(old.nodeId);session.entities.del(handle)
-          for entity in delta.upserts:
-            session.entities[entity.handle]=entity
-            session.byNodeId[entity.nodeId]=entity.handle,
         onRecover=proc()=
           inc session.mountGeneration
           session.queue.setLen(0);session.lastQueued=0;session.lastProcessed=0
@@ -322,6 +382,12 @@ proc attachBackendImpl(runtime: Runtime, backend: Backend, host: HostContext,
         onFault=proc(reason:string) {.raises:[].}=
           session.faulted=true
           runtime.freezeEvents("native restore failed: " & reason))
+      consumer.prepareAcceptedMetadata=proc(issues:seq[CapabilityIssue])=
+        session.prepareAcceptedIssues(issues)
+      consumer.acceptAcceptedMetadata=proc() {.raises:[].}=
+        session.publishAcceptedIssues()
+      consumer.discardAcceptedMetadata=proc() {.raises:[].}=
+        session.discardAcceptedIssues()
       session.typedHost=attachHostSession(runtime,consumer)
       session.committerToken=runtime.committerOwner
       return session
@@ -427,7 +493,7 @@ proc enqueue*(session: BackendSession, envelope: EventEnvelope): bool =
   if envelope.mountGeneration != session.mountGeneration: return false
   if envelope.observedRevision > session.runtime.acceptedRevision: return false
   if envelope.sequence <= session.lastQueued: return false
-  if not session.entities.hasKey(envelope.handle): return false
+  if not session.hasAcceptedEntity(envelope.handle): return false
   if session.backend.bindingValid != nil and
       not session.backend.bindingValid(envelope.handle, envelope.bindingGeneration):
     return false
@@ -455,7 +521,7 @@ proc settleEvent(session: BackendSession, envelope: EventEnvelope) =
   if session.backend.settle == nil: return
   if not session.eventEligible: return
   if envelope.mountGeneration != session.mountGeneration: return
-  if not session.entities.hasKey(envelope.handle): return
+  if not session.hasAcceptedEntity(envelope.handle): return
   if session.backend.bindingValid != nil and
       not session.backend.bindingValid(envelope.handle, envelope.bindingGeneration):
     return
@@ -466,7 +532,7 @@ proc settleEvent(session: BackendSession, envelope: EventEnvelope) =
     sequence: envelope.sequence,
     revision: session.runtime.acceptedRevision,
     handle: envelope.handle,
-    props: session.entities[envelope.handle].props)
+    props: session.acceptedEntity(envelope.handle).props)
   try:
     session.backend.settle(settlement)
   except CatchableError as error:
@@ -486,8 +552,8 @@ proc process(session: BackendSession, envelope: EventEnvelope) =
   if envelope.mountGeneration != session.mountGeneration: return
   if envelope.sequence <= session.lastProcessed: return
   session.lastProcessed = envelope.sequence
-  if not session.entities.hasKey(envelope.handle): return
-  let entity = session.entities[envelope.handle]
+  if not session.hasAcceptedEntity(envelope.handle): return
+  let entity = session.acceptedEntity(envelope.handle)
   if session.backend.bindingValid != nil and
       not session.backend.bindingValid(envelope.handle, envelope.bindingGeneration):
     return
@@ -530,9 +596,9 @@ proc requestRows*(session: BackendSession, listHandle: NodeHandle,
   if session == nil or session.disposed: fail("session is disposed")
   if session.closing: fail("session is closing")
   if session.faulted: fail("session is faulted")
-  if not session.entities.hasKey(listHandle):
+  if not session.hasAcceptedEntity(listHandle):
     fail("unknown list handle: " & $listHandle)
-  let entity = session.entities[listHandle]
+  let entity = session.acceptedEntity(listHandle)
   if entity.kind != virtualList:
     fail("handle is not a virtual list: " & entity.nodeId)
   let target = session.runtime.find(entity.nodeId)

@@ -472,9 +472,8 @@ mod tests {
         }
     }
     #[test]
-    fn query_preserves_abi_one_and_rejects_incompatible_tables() {
+    fn query_returns_abi_two_and_rejects_incompatible_tables() {
         let mut api = LeafGpuiApiV2::default();
-        assert_eq!(crate::leaf_gpui_abi_version(), 1);
         assert_eq!(
             unsafe {
                 leaf_gpui_query_v2(

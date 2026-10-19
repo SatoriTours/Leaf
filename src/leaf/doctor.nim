@@ -54,5 +54,5 @@ proc doctorReport*(selection: Option[BuildSelection] = none(BuildSelection)): Js
   except CatchableError as error: result["library_error"] = %error.msg
   try:
     let api = loadGpui()
-    result["gpui"] = %*{"available": true, "abi": api.abi()}
+    result["gpui"] = %*{"available": true, "abi": 2}
   except CatchableError as error: result["gpui"] = %*{"available": false, "error": error.msg}

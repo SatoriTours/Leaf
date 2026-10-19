@@ -4,10 +4,22 @@ type
   Signup* = ref object
     name, email, workspace: string
     accepted, attempted, created: bool
+    model*: State[Signup]
+
+
+proc snapshotSignup*(state: Signup): Signup =
+  Signup(name: state.name, email: state.email, workspace: state.workspace,
+    accepted: state.accepted, attempted: state.attempted, created: state.created)
+
+proc edit*(state: Signup, change: proc(v: var Signup)) =
+  discard state.model.update(proc(current: Signup): Signup =
+    result = snapshotSignup(current)
+    change(result))
+
 proc newSignup*(): Signup =
   Signup()
 
-proc submit(state: Signup) =
+proc submitInto(state: var Signup) =
   state.attempted = true
   if not state.accepted or state.name.strip.len == 0 or
       not validEmail(state.email) or
@@ -18,14 +30,17 @@ proc submit(state: Signup) =
   state.workspace = state.workspace.strip
   state.created = true
 
+proc submit(state: Signup) =
+  state.edit(proc(v: var Signup) = submitInto(v))
+
 proc field(state: Signup; label, key, value, placeholder, error: string;
-           change: Callback): Node =
+           change: proc(v: var Signup, value: string)): Node =
   var children = views:
     ui.label(label)
     input(value):
       key: key
       placeholder: placeholder
-      onChange: change
+      onChange(e): state.edit(proc(v: var Signup) = change(v, e.value))
       onSubmit(e): state.submit()
   if state.attempted and error.len > 0:
     let fieldError = view:
@@ -39,7 +54,7 @@ proc field(state: Signup; label, key, value, placeholder, error: string;
       gap: 8
       children: children
 
-proc render*(state: Signup; ctx: BuildContext): Node =
+proc render*(state: Signup): Node =
   var form: seq[Node]
   if state.created:
     form = views:
@@ -54,29 +69,22 @@ proc render*(state: Signup; ctx: BuildContext): Node =
       label("这是本地演示，未发送邮件或创建在线账号。")
       button("返回表单"):
         key: "signup_back"
-        onClick(e):
-          state.created = false
-          state.attempted = false
+        onClick(e): state.edit(proc(v: var Signup) =
+          (v.created = false; v.attempted = false))
   else:
-    proc changeName(e: Event) =
-      state.name = e.value
-
-    proc changeEmail(e: Event) =
-      state.email = e.value
-
-    proc changeWorkspace(e: Event) =
-      state.workspace = e.value
-
     form = views:
       title("开始你的协作空间"):
         size: 22
       label("填写以下信息，预览注册流程。")
-      state.field("姓名", "signup_name", state.name, "如何称呼你？", (if state.name.strip.len == 0: "请填写姓名。" else: ""), changeName)
-      state.field("邮箱", "signup_email", state.email, "name@example.com", (if validEmail(state.email): "" else: "请输入有效的邮箱地址。"), changeEmail)
-      state.field("工作区名称", "signup_workspace", state.workspace, "例如：设计实验室", (if state.workspace.strip.len == 0: "请填写工作区名称。" else: ""), changeWorkspace)
+      state.field("姓名", "signup_name", state.name, "如何称呼你？", (if state.name.strip.len == 0: "请填写姓名。" else: ""),
+        proc(v: var Signup, value: string) = v.name = value)
+      state.field("邮箱", "signup_email", state.email, "name@example.com", (if validEmail(state.email): "" else: "请输入有效的邮箱地址。"),
+        proc(v: var Signup, value: string) = v.email = value)
+      state.field("工作区名称", "signup_workspace", state.workspace, "例如：设计实验室", (if state.workspace.strip.len == 0: "请填写工作区名称。" else: ""),
+        proc(v: var Signup, value: string) = v.workspace = value)
       checkbox("我已了解并同意演示使用条款", state.accepted):
         key: "signup_accept"
-        onChange(e): state.accepted = e.checked
+        onChange(e): state.edit(proc(v: var Signup) = v.accepted = e.checked)
     if state.attempted and not state.accepted:
       let termsError = view:
         text("请先同意演示使用条款。"):
@@ -92,11 +100,9 @@ proc render*(state: Signup; ctx: BuildContext): Node =
       button("填入示例信息"):
         key: "signup_demo"
         variant: "ghost"
-        onClick(e):
-          state.name = "林晓"
-          state.email = "linxiao@example.com"
-          state.workspace = "设计实验室"
-          state.attempted = false
+        onClick(e): state.edit(proc(v: var Signup) =
+          (v.name = "林晓"; v.email = "linxiao@example.com";
+           v.workspace = "设计实验室"; v.attempted = false))
     form.add(demoButton)
     let divider = view:
       separator()

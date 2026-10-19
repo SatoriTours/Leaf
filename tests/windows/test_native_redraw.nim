@@ -1,3 +1,4 @@
+import ../fixture_app
 ## Regression: a bound native label must show its complete text on the settled
 ## screen after real keystrokes update its model, without any resize, forced
 ## repaint or extra redraw from the application.
@@ -270,30 +271,42 @@ type Fixture = tuple[h: Win32Host, win: Win32Backend, s: BackendSession, runtime
 
 var modelName = "Leaf 原生控件 😀"
 var submits = 0
-
-proc render(ctx: BuildContext): Node =
-  view:
-    column(key = "form", styles = style({"padding": "20", "gap": "12", "width": "full"})):
-      text("Windows 原生表单", key = "title")
-      text("输入模式：echoValue", key = "mode")
-      input(modelName, key = "name", placeholder = "输入中文、日文或 emoji",
-        onChange = proc(e: Event) = modelName = e.value,
-        onSubmit = proc(e: Event) = inc submits)
-      switch("接收通知", true, key = "notifications")
-      switch("组合期间更新冲突模型", false, key = "conflict")
-      row(key = "actions", styles = style({"gap": "12"})):
-        button("保存", key = "save", onClick = proc(e: Event) = inc submits)
-        button("重置输入", key = "reset", onClick = proc(e: Event) = discard)
-        button("切换输入模式", key = "nextMode", onClick = proc(e: Event) = discard)
-      text("已提交 " & $submits & " 次", key = "count")
-      text("模型：" & modelName, key = "model")
-      text("候选校验探针", key = "candidate")
-      progress(0.0, key = "progress")
+type RedrawModel = object
+  name: string
+  submits: int
+let RedrawRoot = defineComponent[int, State[RedrawModel]]("NativeRedrawRoot",
+  proc(ctx: MountContext, p: int): State[RedrawModel] =
+    ctx.state(RedrawModel(name: "Leaf 原生控件 😀")),
+  proc(ctx: ComponentContext, p: int, model: State[RedrawModel]): UiDescription =
+    let m = ctx.value(model)
+    modelName = m.name
+    submits = m.submits
+    host(column(@[
+      text("Windows 原生表单", key = "title"),
+      text("输入模式：echoValue", key = "mode"),
+      input(m.name, key = "name", placeholder = "输入中文、日文或 emoji",
+        onChange = proc(e: Event) = discard model.update(proc(v: RedrawModel): RedrawModel =
+          (result = v; result.name = e.value)),
+        onSubmit = proc(e: Event) = discard model.update(proc(v: RedrawModel): RedrawModel =
+          (result = v; inc result.submits))),
+      switch("接收通知", true, key = "notifications"),
+      switch("组合期间更新冲突模型", false, key = "conflict"),
+      row(@[
+        button("保存", key = "save", onClick = proc(e: Event) =
+          discard model.update(proc(v: RedrawModel): RedrawModel = (result = v; inc result.submits))),
+        button("重置输入", key = "reset", onClick = proc(e: Event) = discard),
+        button("切换输入模式", key = "nextMode", onClick = proc(e: Event) = discard)],
+        key = "actions", styles = style({"gap": "12"})),
+      text("已提交 " & $m.submits & " 次", key = "count"),
+      text("模型：" & m.name, key = "model"),
+      text("候选校验探针", key = "candidate"),
+      progress(0.0, key = "progress")],
+      key = "form", styles = style({"padding": "20", "gap": "12", "width": "full"}))))
 
 proc mounted(): Fixture =
   let activity = newUiScopeActivity()
   let runtime = newRuntime(guardUiApplication(
-    Application(title: "Native redraw", width: 640, height: 640, render: render),
+    componentApplication(component(RedrawRoot, 0), "Native redraw", 640, 640),
     proc(): uint64 = uint64(GetCurrentThreadId()), activity))
   let h = createHost("Native redraw", DipSize(width: 640, height: 640))
   h.setStartupScope(proc(): bool = activity.busy or runtime.installingHook or runtime.installingUpdate)

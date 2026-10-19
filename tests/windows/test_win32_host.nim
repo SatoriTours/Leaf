@@ -1,3 +1,4 @@
+import ../fixture_app
 when not defined(windows): {.error: "Real Win32 Host suite requires Windows".}
 import std/[unittest, strutils, typedthreads, widestrs]
 import leaf/[core, widgets, backend, backend_session, native_layout, ui_thread, windows_dpi]
@@ -139,14 +140,21 @@ _Static_assert(__builtin_types_compatible_p(__typeof__(&leaf_abi_subclass), SUBC
 
 proc makeHost(c = systemWin32Calls(), title = "Leaf 中文 😀"): Win32Host =
   createHost(title, DipSize(width: 320, height: 200), c)
-proc application(render: RenderProc, scope: ExecutionScope = nil): Application =
-  Application(title: "Host", width: 320, height: 200, render: render, executionScope: scope)
-proc attach(h: Win32Host, render: RenderProc = nil, scope: ExecutionScope = nil): tuple[s: BackendSession, r: RecordingBackend, activity: UiScopeActivity] =
+proc application(render: proc(): Node, scope: ExecutionScope = nil): Application =
+  fixtureApplication(render, "Host", 320, 200, scope)
+proc attach(h: Win32Host, render: proc(): Node = nil, scope: ExecutionScope = nil): tuple[s: BackendSession, r: RecordingBackend, activity: UiScopeActivity] =
   let activity = newUiScopeActivity()
   var actual = render
-  if actual == nil: actual = proc(ctx: BuildContext): Node = text("x", key = "x")
+  if actual == nil: actual = proc(): Node = text("x", key = "x")
   let runtime = newRuntime(guardUiApplication(application(actual, scope),
     proc(): uint64 = uint64(GetCurrentThreadId()), activity))
+  let recording = newRecordingBackend(fullCapabilities())
+  let session = attachBackend(runtime, recording.backend, h.context)
+  h.bindSession(session, proc(): bool = activity.busy)
+  (session, recording, activity)
+proc attachApp(h: Win32Host, app: Application): tuple[s: BackendSession, r: RecordingBackend, activity: UiScopeActivity] =
+  let activity = newUiScopeActivity()
+  let runtime = newRuntime(guardUiApplication(app, proc(): uint64 = uint64(GetCurrentThreadId()), activity))
   let recording = newRecordingBackend(fullCapabilities())
   let session = attachBackend(runtime, recording.backend, h.context)
   h.bindSession(session, proc(): bool = activity.busy)
@@ -262,7 +270,7 @@ suite "Unicode owned Win32 Host":
   test "wrong Session binding rejects without disposing another lease":
     let h = makeHost()
     defer: h.destroyHost()
-    let runtime = newRuntime(application(proc(ctx: BuildContext): Node = text("x",key="x")))
+    let runtime = newRuntime(application(proc(): Node = text("x",key="x")))
     let recording = newRecordingBackend(fullCapabilities())
     var wrong = h.context
     inc wrong.sessionId
@@ -278,7 +286,7 @@ suite "Unicode owned Win32 Host":
     var count = 0
     var session: BackendSession
     var recording: RecordingBackend
-    let bound = h.attach(proc(ctx: BuildContext): Node = button("close",key="close",onClick=proc(e: Event) =
+    let bound = h.attach(proc(): Node = button("close",key="close",onClick=proc(e: Event) =
       inc count
       discard SendMessageW(window,WM_CLOSE,0,0)
       check session.closing
@@ -302,7 +310,12 @@ suite "Unicode owned Win32 Host":
 
   test "Backend apply close and nested pump defer release until candidate publishes":
     let h = makeHost();let window = h.windowHandle
-    let bound = h.attach(proc(ctx: BuildContext): Node = button("go",key="go",onClick=proc(e: Event) = discard))
+    let Root=defineComponent[int,State[int]]("HostApplyClose",
+      proc(ctx: MountContext,p:int):State[int]=ctx.state(0),
+      proc(ctx: ComponentContext,p:int,n:State[int]):UiDescription =
+        let value=ctx.value(n)
+        host(button("go",key="go",onClick=proc(e: Event)=discard n.set(value+1))))
+    let bound = h.attachApp(componentApplication(component(Root,0),"Host",320,200))
     let original = bound.r.backend.apply
     bound.r.backend.apply = proc(batch: UpdateBatch) =
       original(batch)
@@ -469,7 +482,7 @@ suite "Unicode owned Win32 Host":
     var reject=false
     let activity=newUiScopeActivity()
     let primary=newException(ValueError,"install post scope")
-    let runtime=newRuntime(guardUiApplication(application(proc(ctx:BuildContext):Node=text("x",key="x"),
+    let runtime=newRuntime(guardUiApplication(application(proc():Node=text("x",key="x"),
       proc(body:proc(){.closure.}) =
         body()
         if reject:
@@ -589,7 +602,7 @@ suite "Win32 real thread ownership before Runtime":
       if transfer: onWorker(body)
       else: body()
     let activity=newUiScopeActivity()
-    let app=guardUiApplication(application(proc(ctx: BuildContext): Node =
+    let app=guardUiApplication(application(proc(): Node =
       inc renders
       column(@[button("go",key="go",onClick=proc(e: Event) = inc handlers),virtualList("list",@["a"],proc(index:int): Node = (inc rows;text("row",key="row")))],key="root"),scope),proc():uint64=uint64(GetCurrentThreadId()),activity)
     expect UiError:
@@ -642,6 +655,7 @@ suite "Win32 real thread ownership before Runtime":
     check h.diagnostics.liveWindows==baseline.liveWindows
     check not bound.s.closing
     check bound.r.disposeCalls==0
+    bound.s.dispose()
     h.destroyHost()
     check h.diagnostics.liveRoots==0
     check h.diagnostics.liveWindows==0

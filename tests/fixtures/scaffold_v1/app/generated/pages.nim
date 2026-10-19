@@ -3,5 +3,5 @@ import leaf
 import leaf/sqlite as storage
 import ../pages/home/page as home_page
 
-proc generatedPages*(database: storage.Database): seq[PageDefinition] =
+proc generatedPages*(database: storage.Database): seq[ComponentPageDefinition] =
   @[home_page.definition(database)]

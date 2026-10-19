@@ -26,9 +26,7 @@ suite "strict structural performance acceptance":
       of 3:report["cases"][1]["static"] = %100
       else:report["cases"][0]["checks_passed"] = %false
       check verifyComponentReport(report).len>0
-  test "legacy modes keep metadata checks without managed limits":
+  test "removed legacy modes are rejected":
     for mode in ["legacy-json","legacy-typed"]:
       let report=validReport(mode)
-      report["cases"][2]["samples"][0]["counters"]["snapshotExports"] = %1
-      report["cases"][2]["samples"][0]["counters"]["visitedHosts"] = %5000
-      check verifyComponentReport(report).len==0
+      check verifyComponentReport(report).len>0

@@ -1,3 +1,4 @@
+import ../fixture_app
 when not defined(windows): {.error: "Real Win32 measurement tests require Windows".}
 import std/[unittest, strutils]
 import leaf/[core, native_layout]

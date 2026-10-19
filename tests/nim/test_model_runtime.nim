@@ -1,5 +1,6 @@
 import std/unittest
 import leaf
+import ../fixture_app
 import leaf/model
 import leaf/sqlite
 import ./model_fixtures
@@ -11,7 +12,7 @@ proc database(): Database =
 proc application(db: Database): Application =
   proc scope(body: proc() {.closure.}) =
     withDatabase(db): body()
-  proc render(ctx: BuildContext): Node =
+  proc render(): Node =
     doAssert currentDatabase() == db
     column(@[
       text($Task.count, key = "count"),
@@ -21,8 +22,7 @@ proc application(db: Database): Application =
       button("Error", key = "error", onClick = proc(e: Event) =
         doAssert currentDatabase() == db
         raise newException(ValueError, "event failure"))])
-  Application(title: "Model runtime", width: 640, height: 480,
-    render: render, executionScope: scope)
+  fixtureApplication(render, "Model runtime", 640, 480, scope)
 
 suite "application model context":
   test "alternating application render and later events use their own connection":
@@ -32,14 +32,14 @@ suite "application model context":
     defer: b.close()
     let left = newRuntime(application(a))
     let right = newRuntime(application(b))
-    check left.dispatch("add", Event(kind: click))
-    check right.dispatch("add", Event(kind: click))
-    check left.dispatch("add", Event(kind: click))
+    check left.dispatchRefresh("add", Event(kind: click))
+    check right.dispatchRefresh("add", Event(kind: click))
+    check left.dispatchRefresh("add", Event(kind: click))
     check left.find("count").node.text == "2"
     check right.find("count").node.text == "1"
     check a.query("SELECT COUNT(*) FROM tasks")[0][0].asInt64 == 2'i64
     check b.query("SELECT COUNT(*) FROM tasks")[0][0].asInt64 == 1'i64
-    expect ValueError: discard left.dispatch("error", Event(kind: click))
+    expect ValueError: discard left.dispatchRefresh("error", Event(kind: click))
     expect DatabaseContextError: discard currentDatabase()
     check right.refresh()
     expect DatabaseContextError: discard currentDatabase()
@@ -50,13 +50,12 @@ suite "application model context":
     var rowsBuilt = 0
     proc scope(body: proc() {.closure.}) =
       withDatabase(db): body()
-    proc render(ctx: BuildContext): Node =
+    proc render(): Node =
       virtualList("list", @["one", "two"], proc(index: int): Node =
         doAssert currentDatabase() == db
         inc rowsBuilt
         text($Task.count, key = "row"))
-    let runtime = newRuntime(Application(title: "rows", width: 640, height: 480,
-      render: render, executionScope: scope))
+    let runtime = newRuntime(fixtureApplication(render, "rows", 640, 480, scope))
     check rowsBuilt == 0
     runtime.setValidator(proc(snapshot: Snapshot) = doAssert currentDatabase() == db)
     check runtime.materialize("list", 0, 2).len == 2

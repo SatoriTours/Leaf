@@ -4,20 +4,21 @@ import ./[scaffold_types, scaffold_model_templates]
 
 proc logicCode(resource: ResourceSpec): string =
   let m = "record_model." & resource.model
-  result = "type\n  Panel = enum listPanel, editorPanel, detailPanel\n  Draft = object\n"
+  result = "import leaf\ntype\n  Panel = enum listPanel, editorPanel, detailPanel\n  Draft = object\n"
   for field in resource.fields:
     result.add("    " & field.name & ": " & (if field.kind == "bool": "bool" else: "string") & "\n")
-  result.add("  State = ref object\n    draft: Draft\n    panel: Panel\n    editingId, selectedId: int64\n    error: string\n\nproc toDraft(value: " & m & "): Draft =\n")
+  result.add("  State = ref object\n    draft: Draft\n    panel: Panel\n    editingId, selectedId: int64\n    error: string\n    model: leaf.State[State]\n\nproc toDraft(value: " & m & "): Draft =\n")
   for field in resource.fields:
     result.add("  result." & field.name & " = " & (if field.kind in ["bool", "string"]: "" else: "$") & "value." & field.name & "\n")
-  result.add("\nproc back(state: State) =\n  state.panel = listPanel\n  state.error = \"\"\n\nproc beginNew(state: State) =\n  state.draft = Draft()\n  state.editingId = 0\n  state.error = \"\"\n  state.panel = editorPanel\n\nproc beginEdit(state: State, id: int64) =\n  state.draft = toDraft(" & m & ".find(id))\n  state.editingId = id\n  state.error = \"\"\n  state.panel = editorPanel\n\nproc show(state: State, id: int64) =\n  discard " & m & ".find(id)\n  state.selectedId = id\n  state.panel = detailPanel\n\nproc remove(state: State, id: int64) =\n  try:\n    " & m & ".find(id).destroyOrRaise()\n    state.back()\n  except PostCommitError as error:\n    state.back()\n    state.error = error.msg\n  except CatchableError as error: state.error = error.msg\n\nproc submit(state: State) =\n  try:\n    let value = if state.editingId == 0: " & m & ".build() else: " & m & ".find(state.editingId)\n")
+  result.add("\nproc snapshotState(state: State): State =\n  State(draft: state.draft, panel: state.panel, editingId: state.editingId,\n    selectedId: state.selectedId, error: state.error)\n\nproc edit(state: State, change: proc(v: var State)) =\n  discard state.model.update(proc(current: State): State =\n    result = snapshotState(current)\n    change(result))\n\n")
+  result.add("proc back(state: State) =\n  state.edit(proc(v: var State) = (v.panel = listPanel; v.error = \"\"))\n\nproc beginNew(state: State) =\n  state.edit(proc(v: var State) =\n    (v.draft = Draft(); v.editingId = 0; v.error = \"\"; v.panel = editorPanel))\n\nproc beginEdit(state: State, id: int64) =\n  let value = " & m & ".find(id)\n  state.edit(proc(v: var State) =\n    (v.draft = toDraft(value); v.editingId = id; v.error = \"\";\n     v.panel = editorPanel))\n\nproc show(state: State, id: int64) =\n  discard " & m & ".find(id)\n  state.edit(proc(v: var State) =\n    (v.selectedId = id; v.panel = detailPanel))\n\nproc remove(state: State, id: int64) =\n  var panel = state.model.read().panel\n  var error = \"\"\n  try:\n    " & m & ".find(id).destroyOrRaise()\n    panel = listPanel\n  except PostCommitError as caught:\n    panel = listPanel\n    error = caught.msg\n  except CatchableError as caught: error = caught.msg\n  state.edit(proc(v: var State) = (v.panel = panel; v.error = error))\n\nproc submit(state: State) =\n  let current = state.model.read()\n  var draft = current.draft\n  var editingId = current.editingId\n  var panel = current.panel\n  var error = \"\"\n  try:\n    let value = if editingId == 0: " & m & ".build() else: " & m & ".find(editingId)\n")
   for field in resource.fields:
     let expression = case field.kind
-      of "int": "parseInt(state.draft." & field.name & ".strip())"
-      of "float": "parseFloat(state.draft." & field.name & ".strip())"
-      else: "state.draft." & field.name
+      of "int": "parseInt(current.draft." & field.name & ".strip())"
+      of "float": "parseFloat(current.draft." & field.name & ".strip())"
+      else: "current.draft." & field.name
     result.add("    value." & field.name & " = " & expression & "\n")
-  result.add("    if value.save():\n      state.draft = Draft()\n      state.editingId = 0\n      state.back()\n    else: state.error = errors(value).fullMessages.join(\"\\n\")\n  except PostCommitError as error:\n    state.draft = Draft()\n    state.editingId = 0\n    state.back()\n    state.error = error.msg\n  except CatchableError as error: state.error = error.msg\n\n")
+  result.add("    if value.save():\n      draft = Draft()\n      editingId = 0\n      panel = listPanel\n    else: error = errors(value).fullMessages.join(\"\\n\")\n  except PostCommitError as caught:\n    draft = Draft()\n    editingId = 0\n    panel = listPanel\n    error = caught.msg\n  except CatchableError as caught: error = caught.msg\n  state.edit(proc(v: var State) =\n    (v.draft = draft; v.editingId = editingId; v.panel = panel; v.error = error))\n\n")
 
 proc listCode(resource: ResourceSpec): string =
   let p = resource.plural
@@ -33,9 +34,9 @@ proc editorCode(resource: ResourceSpec): string =
   for field in resource.fields:
     result.add("      text " & field.name.escape & "\n")
     if field.kind == "bool":
-      result.add("      checkbox(" & field.name.escape & ", state.draft." & field.name & "):\n        key: \"" & p & "_field_" & field.name & "\"\n        onChange(e): state.draft." & field.name & " = e.checked\n")
+      result.add("      checkbox(" & field.name.escape & ", state.draft." & field.name & "):\n        key: \"" & p & "_field_" & field.name & "\"\n        onChange(e): state.edit(proc(v: var State) = v.draft." & field.name & " = e.checked)\n")
     else:
-      result.add("      input state.draft." & field.name & ":\n        key: \"" & p & "_field_" & field.name & "\"\n        onChange(e): state.draft." & field.name & " = e.value\n")
+      result.add("      input state.draft." & field.name & ":\n        key: \"" & p & "_field_" & field.name & "\"\n        onChange(e): state.edit(proc(v: var State) = v.draft." & field.name & " = e.value)\n")
   result.add("      text state.error:\n        key: \"" & p & "_error\"\n      row:\n        styles: {\"gap\": \"8\"}\n        button \"Save\":\n          key: \"" & p & "_save\"\n          onClick(e): state.submit()\n        button \"Cancel\":\n          key: \"" & p & "_cancel\"\n          onClick(e): state.back()\n")
 
 proc detailCode(resource: ResourceSpec): string =
@@ -55,4 +56,4 @@ proc resourceFilesV2*(resource: ResourceSpec): seq[ScaffoldFile] =
   result.add(ScaffoldFile(path: base & "views/detail.nim", content: detailCode(resource)))
   result.add(ScaffoldFile(path: base & "views/index.nim", content: "proc renderIndex(state: State): Node =\n  case state.panel\n  of listPanel: renderList(state)\n  of editorPanel: renderEditor(state)\n  of detailPanel: renderDetail(state)\n"))
   result.add(ScaffoldFile(path: base & "page.nim", content:
-    "import std/strutils\nimport leaf\nimport leaf/model\nfrom ../../models/" & resource.singular & " as record_model import build, modelTable, modelFields, modelValues, assignModelValues, storageType, toStorage, fromStorage, runValidations, runCallbacks\nimport ../../components/empty_state\n\ninclude logic\ninclude views/list\ninclude views/editor\ninclude views/detail\ninclude views/index\n\nproc definition*(): PageDefinition =\n  PageDefinition(name: \"" & p & "\", views: @[\"index\"],\n    create: proc(): PageGroup =\n      let state = State()\n      PageGroup(render: proc(ctx: BuildContext, panel: string): Node = renderIndex(state)))\n"))
+    "import std/strutils\nimport leaf\nimport leaf/model\nfrom ../../models/" & resource.singular & " as record_model import build, modelTable, modelFields, modelValues, assignModelValues, storageType, toStorage, fromStorage, runValidations, runCallbacks\nimport ../../components/empty_state\n\ninclude logic\ninclude views/list\ninclude views/editor\ninclude views/detail\ninclude views/index\n\nproc definition*(): ComponentPageDefinition =\n  let page = defineComponent[int, leaf.State[State]](\"" & resource.model & "Page\",\n    proc(ctx: MountContext, p: int): leaf.State[State] =\n      ctx.state(State(), snapshot = snapshotState),\n    proc(ctx: ComponentContext, p: int, model: leaf.State[State]): UiDescription =\n      let state = ctx.value(model)\n      state.model = model\n      host(renderIndex(state)))\n  ComponentPageDefinition(name: \"" & p & "\", views: @[\"index\"],\n    build: proc(view: string): UiDescription = component(page, 0))\n"))

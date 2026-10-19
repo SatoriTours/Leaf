@@ -8,12 +8,14 @@ from ../config/database as database_config import nil
 
 proc createApplication*(database: storage.Database = nil): Application =
   let connection = if database == nil: database_config.openApplicationDatabase() else: database
-  var router: Router
-  withDatabase(connection):
-    router = newRouter(applicationRoutes(), generatedPages())
-  proc scope(body: proc() {.closure.}) =
+  let executionScope: ExecutionScope = proc(body: proc() {.closure.}) =
     withDatabase(connection): body()
-  proc render(ctx: BuildContext): Node =
-    withDatabase(connection): result = renderShell(router, ctx)
-  Application(title: ApplicationTitle, width: WindowWidth, height: WindowHeight,
-    render: render, executionScope: scope)
+  type ShellModel = ref object
+    router: ComponentRouter
+  let shell = defineComponent[int, ShellModel]("ScaffoldModelShell",
+    proc(ctx: MountContext, p: int): ShellModel =
+      ShellModel(router: newComponentRouter(ctx, applicationRoutes(), generatedPages())),
+    proc(ctx: ComponentContext, p: int, model: ShellModel): UiDescription =
+      renderShell(ctx, model.router))
+  componentApplication(component(shell, 0), ApplicationTitle, WindowWidth, WindowHeight,
+    executionScope)

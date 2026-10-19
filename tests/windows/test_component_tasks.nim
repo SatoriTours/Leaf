@@ -1,3 +1,4 @@
+import ../fixture_app
 when not defined(windows): {.error: "Component task host tests require Windows".}
 import std/[unittest, atomics, os, options, strutils, widestrs]
 import leaf/[core, widgets, components, backend_session, native_layout]
@@ -341,17 +342,15 @@ suite "Win32 task and close scheduling":
 
 suite "public native cleanup ownership":
   test "nonempty output is refused before new Runtime and preserves old owner":
-    let rt = newRuntime(Application(title: "existing", width: 400, height: 300,
-      render: proc(ctx: BuildContext): Node = text("old")))
+    let rt = newRuntime(fixtureApplication(proc(): Node = text("old"), "existing", 400, 300))
     var owner = rt
     var renders = 0
     try:
       var rejected = false
       try:
-        discard runNative(Application(title: "new", width: 400, height: 300,
-          render: proc(ctx: BuildContext): Node =
+        discard runNative(fixtureApplication(proc(): Node =
             inc renders
-            raise newException(UiError, "unexpected new Runtime construction")), cleanupOwner = addr owner)
+            raise newException(UiError, "unexpected new Runtime construction"), "new", 400, 300), cleanupOwner = addr owner)
       except UiError as error:
         rejected = true
         check error.msg.contains("cleanup owner slot must be empty")

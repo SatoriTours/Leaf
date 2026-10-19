@@ -62,6 +62,7 @@ suite "Application and resource scaffolding":
     writeFile(app / "tests/persistence.nim", """
 import std/os
 import leaf
+import leaf/host_session
 import ../app/application
 proc click(rt: Runtime, key: string) = doAssert rt.dispatch(key, Event(kind: click))
 proc change(rt: Runtime, key, value: string) = doAssert rt.dispatch(key, Event(kind: change, value: value))
@@ -83,6 +84,51 @@ of "read":
   doAssert rt.find("task_title_1").node.text == title
   rt.click("nav_notes")
   doAssert rt.find("notes_title_1").node.text == "persistent note"
+of "reject":
+  var reject = false
+  let session = attachHostSession(rt, HostConsumer(sessionId: 771,
+    prepare: proc(batch: HostBatch) = discard,
+    apply: proc() =
+      if reject: fail("generated page rejection"),
+    accept: proc(revision: uint64) {.raises: [].} = discard,
+    discardPrepared: proc() {.raises: [].} = discard))
+  defer: session.close()
+  # Home draft/action: a rejected input must not be inherited by the next add.
+  reject = true
+  var rejected = false
+  try: rt.change("task_draft", "rejected")
+  except UiError: rejected = true
+  doAssert rejected
+  reject = false
+  # The accepted draft is still empty: an accepted add must not inherit "rejected".
+  rt.click("task_add")
+  var inherited = false
+  try: inherited = rt.find("task_title_2").node.text == "rejected"
+  except UiError: discard
+  doAssert not inherited
+  rt.change("task_draft", "clean")
+  rt.click("task_add")
+  doAssert rt.find("task_title_2").node.text == "clean"
+  # Resource draft/panel/error: rejected save keeps editor but not draft/error.
+  rt.click("nav_notes")
+  rt.click("notes_new")
+  reject = true
+  rejected = false
+  try: rt.change("notes_field_title", "leak")
+  except UiError: rejected = true
+  doAssert rejected
+  doAssert rt.find("notes_field_title") != nil
+  reject = false
+  # Saving immediately must use the accepted draft, never the rejected "leak".
+  rt.click("notes_save")
+  var leaked = false
+  try: leaked = rt.find("notes_title_2") != nil and rt.find("notes_title_2").node.text == "leak"
+  except UiError: discard
+  doAssert not leaked
+  if rt.find("notes_field_title") == nil: rt.click("notes_new")
+  rt.change("notes_field_title", "kept")
+  rt.click("notes_save")
+  doAssert rt.find("notes_title_2").node.text == "kept"
 else: doAssert false
 """)
     let binary = app / "target/persistence".addFileExt(ExeExt)
@@ -97,7 +143,7 @@ else: doAssert false
     check fileExists(app / "target/testing.sqlite3")
     require runCliIn(app, @["g", "scaffold", "Note", "title:string"]) == 0
     require compileFixture()
-    for mode in ["extend", "read", "read"]:
+    for mode in ["extend", "reject", "read"]:
       let ran = runChild(binary, @[mode], app)
       checkpoint ran.output
       check ran.code == 0

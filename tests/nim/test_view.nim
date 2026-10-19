@@ -1,5 +1,6 @@
 import std/[unittest, tables]
 import leaf
+import ../fixture_app
 
 proc panel(children: seq[Node], key = "", styles = default(Styles)): Node =
   column(children, key, styles)
@@ -33,7 +34,7 @@ suite "Indented UI descriptions":
   test "event blocks capture state and receive typed events":
     var value, submitted: string
     var clicks = 0
-    proc render(ctx: BuildContext): Node =
+    proc render(): Node =
       view:
         column:
           input value:
@@ -47,12 +48,12 @@ suite "Indented UI descriptions":
             onClick(e):
               inc clicks
               value = "次数：" & $clicks
-    let runtime = newRuntime(Application(title: "Events", width: 640, height: 480, render: render))
-    check runtime.dispatch("entry", Event(kind: change, value: "中文 👋"))
+    let runtime = newRuntime(fixtureApplication(render, "Events", 640, 480))
+    check runtime.dispatchRefresh("entry", Event(kind: change, value: "中文 👋"))
     check runtime.find("entry").node.text == "中文 👋"
-    check runtime.dispatch("entry", Event(kind: submit, value: value))
+    check runtime.dispatchRefresh("entry", Event(kind: submit, value: value))
     check submitted == "中文 👋"
-    check runtime.dispatch("add", Event(kind: click))
+    check runtime.dispatchRefresh("add", Event(kind: click))
     check runtime.find("entry").node.text == "次数：2"
 
   test "loops conditionals and case branches append only visible children":
@@ -99,23 +100,18 @@ suite "Indented UI descriptions":
     check tree.children[1].children[0].text == "dynamic"
     check tree.children[2].children.len == 0
 
-  test "virtual list builders remain lazy and existing callbacks work":
+  test "component list builders remain lazy and existing callbacks work":
     var builds, clicks = 0
-    proc build(index: int): Node =
-      inc builds
-      view:
-        text $index
-    let clicked: Callback = proc(e: Event) = inc clicks
-    proc render(ctx: BuildContext): Node =
-      view:
-        column:
-          virtualList "list", @["a", "b"], build:
-            rowHeight: 24.0
-            styles: {"height": "200"}
-          button "Click":
-            key: "click"
-            onClick: clicked
-    let runtime = newRuntime(Application(title: "List", width: 640, height: 480, render: render))
+    let ListRoot = defineComponent[int, State[int]]("ViewListRoot",
+      proc(ctx: MountContext, p: int): State[int] = ctx.state(0),
+      proc(ctx: ComponentContext, p: int, s: State[int]): UiDescription =
+        hostShell(column(@[]), @[
+          componentList("list", @["a", "b"], proc(index: int): UiDescription =
+            inc builds
+            host(text($index)), rowHeight = 24, overscan = 0),
+          host(button("Click", key = "click", onClick=proc(e: Event) =
+            inc clicks; discard s.update(proc(v: int): int = v + 1)))]))
+    let runtime = newRuntime(componentApplication(component(ListRoot, 0), "List", 640, 480))
     check builds == 0
     let rows = runtime.materialize("list", 1, 2)
     check builds == 1

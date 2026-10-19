@@ -1,7 +1,5 @@
 #include "../../include/leaf_gpui_v2.h"
 #include <string.h>
-uint32_t leaf_gpui_abi_version(void) {return 1;}
-int leaf_gpui_run(const uint8_t*d,size_t n,void*c,void*ctx) {(void)d;(void)n;(void)c;(void)ctx;return 0;}
 #ifndef OLD_ONLY
 static int32_t prepare(void*ctx,const LeafBatch*b,LeafError*e) {(void)ctx;(void)e;return b && b->abi==2 ? 0:1;}
 static int32_t apply(void*ctx,LeafError*e) {(void)ctx;(void)e;return 0;}

@@ -13,10 +13,6 @@ const
 
 type
   UiError* = object of CatchableError
-  RuntimeCleanupError* = object of UiError
-    ## Caller retains the owner until an ordinary close succeeds.
-    cleanupRuntime*: Runtime
-    exitStatus*: Option[int]
   NodeKind* = enum
     column, row, text, button, input, checkbox, toggle, progress, tag,
     separator, spinner, virtualList
@@ -60,22 +56,12 @@ type
     width*, height*: int
     root*: MountedNode
   SnapshotValidator* = proc(snapshot: Snapshot) {.closure.}
-  CacheEntry = object
-    revision: string
-    node: Node
-    dependencies: seq[string]
-  BuildContext* = ref object
-    previous, candidate: Table[string, CacheEntry]
-    active: seq[string]
-    dependencies: seq[seq[string]]
-    hits, misses: int
-    building: bool
-  RenderProc* = proc(context: BuildContext): Node {.closure.}
+
+type
   ExecutionScope* = proc(body: proc() {.closure.}) {.closure.}
   Application* = object
     title*: string
     width*, height*: int
-    render*: RenderProc
     executionScope*: ExecutionScope
     driverFactory: proc(owner:Runtime):RuntimeDriver {.closure.}
   RuntimeDriver* = ref object of RootObj
@@ -84,29 +70,16 @@ type
     builtItems*, rowCacheHits*: uint64
     cachedSubtrees*, mountedNodes*, treeBytes*: int
     cachedItems*, cachedRowBytes*: int
-  RowEntry = object
-    node: MountedNode
-    used: uint64
-    bytes: int
-  RowCache = object
-    source: ListSource
-    rows: Table[int, RowEntry]
   Runtime* = ref object
     executionId:uint64
     app: Application
     driver:RuntimeDriver
-    current: Snapshot
-    index: Table[string, MountedNode]
-    keys: Table[string, seq[MountedNode]]
-    context: BuildContext
-    counters: PerformanceStats
     inUpdate: bool
     taskBody: bool
     closed, cleanupBusy, cleanupBody: bool
     when compileOption("threads"): uiThreadId: int
     batchDepth:int
-    rowCaches: Table[string, RowCache]
-    rowClock: uint64
+    dispatches: uint64
     validator: SnapshotValidator
     preparer: RuntimePreparer
     committer: RuntimeCommitter
@@ -123,6 +96,10 @@ type
     hookInstallation: bool
     descriptionBytes: int
     diagnostics: Diagnostics
+  RuntimeCleanupError* = object of UiError
+    ## Caller retains the owner until an ordinary close succeeds.
+    cleanupRuntime*: Runtime
+    exitStatus*: Option[int]
   RuntimePreparer* = proc(candidate: Runtime) {.closure.}
   RuntimeCommitter* = proc(accepted: Runtime, candidate: Runtime) {.closure.}
   RuntimeInstallLifecycle* = object
@@ -149,6 +126,8 @@ method exportSnapshot*(driver:RuntimeDriver):Snapshot {.base.}=default(Snapshot)
 method find*(driver:RuntimeDriver,key:string):MountedNode {.base.}=nil
 method stats*(driver:RuntimeDriver):PerformanceStats {.base.}=default(PerformanceStats)
 method publish*(driver:RuntimeDriver) {.base,raises:[].}=discard
+method finishCommit*(driver:RuntimeDriver) {.base,raises:[].}=discard
+method validateCommit*(driver:RuntimeDriver) {.base.}=discard
 method reject*(driver:RuntimeDriver) {.base,raises:[].}=discard
 method taskPumpPendingDriverInternal*(driver:RuntimeDriver):bool {.base.}=false
 method pumpDeferred*(driver:RuntimeDriver):TaskPumpReport {.base.}=
@@ -194,6 +173,7 @@ proc attributes*(node: Node): Styles = node.nodeAttributes
 proc children*(node: Node): seq[Node] = node.descendants
 proc listSource*(node: Node): ListSource = node.source
 proc handler*(node: Node, event: EventKind): Callback = node.handlers[event]
+
 proc node*(mounted: MountedNode): Node = mounted.description
 proc id*(mounted: MountedNode): string = mounted.identity
 proc children*(mounted: MountedNode): seq[MountedNode] = mounted.descendants
@@ -257,42 +237,6 @@ proc virtualList*(key: string, keys: seq[string], builder: RowBuilder,
   result.source = ListSource(generation: listGeneration, itemKeys: keys, builder: builder,
     keyBytes: bytes, uniformHeight: rowHeight, estimate: estimatedHeight, extraRows: overscan)
 
-proc cached*(context: BuildContext, key, revision: string,
-             build: proc(): Node {.closure.}): Node =
-  ## The cache key identifies a component/subtree, not an output node key.
-  ## Include all state read by `build` in revision. Nested caches are retained.
-  if context == nil or not context.building: fail("cache used outside render")
-  if key.len == 0: fail("cache key cannot be empty")
-  if context.candidate.len >= MaxNodes and key notin context.candidate:
-    fail("too many cached subtrees")
-  if key in context.active: fail("recursive cache dependency: " & key)
-  if context.dependencies.len > 0: context.dependencies[^1].add(key)
-  if key in context.candidate:
-    if context.candidate[key].revision != revision:
-      fail("conflicting cache revisions: " & key)
-    inc context.hits
-    return context.candidate[key].node
-  if key in context.previous and context.previous[key].revision == revision:
-    inc context.hits
-    proc retain(name: string) =
-      if name in context.candidate: return
-      let entry = context.previous[name]
-      context.candidate[name] = entry
-      for child in entry.dependencies: retain(child)
-    retain(key)
-    return context.candidate[key].node
-  inc context.misses
-  context.active.add(key)
-  context.dependencies.add(@[])
-  try:
-    result = build()
-    if result == nil: fail("cache builder returned nil")
-    context.candidate[key] = CacheEntry(revision: revision, node: result,
-      dependencies: context.dependencies[^1])
-  finally:
-    context.active.setLen(context.active.len - 1)
-    context.dependencies.setLen(context.dependencies.len - 1)
-
 proc segment(key: string, index: int): string =
   if key.len == 0: "i:" & $index else: "k:" & $key.len & ":" & key
 
@@ -312,46 +256,6 @@ proc mountImpl(node: Node, parent: string, index, depth: int,
 proc mount*(node: Node, parent = "", index = 0, depth = 0): MountedNode =
   var count = 0
   mountImpl(node, parent, index, depth, "", false, count)
-
-proc inspect(mounted: MountedNode, index: var Table[string, MountedNode],
-             keys: var Table[string, seq[MountedNode]], nodes, bytes: var int,
-             depth = 0) =
-  inc nodes
-  if nodes > MaxNodes or depth > MaxDepth:
-    fail("UI exceeds 10000 nodes or depth 64")
-  if mounted.identity in index: fail("duplicate node ID: " & mounted.identity)
-  index[mounted.identity] = mounted
-  let n = mounted.description
-  if n.nodeKind == NodeKind.virtualList and n.source == nil:
-    fail("virtual list has no source")
-  if mounted.lookupKey.len > 0: keys.mgetOrPut(mounted.lookupKey, @[]).add(mounted)
-  bytes += 128 + mounted.identity.len + n.label.len + n.hint.len
-  for pairs in [n.nodeStyles, n.nodeAttributes]:
-    for name, value in pairs: bytes += name.len + value.len + 32
-  if n.source != nil:
-    bytes += n.source.keyBytes + n.source.len * 16
-  if bytes > MaxTreeBytes: fail("UI tree exceeds 16 MiB")
-  for child in mounted.descendants: inspect(child, index, keys, nodes, bytes, depth + 1)
-
-proc cacheBytes(context: BuildContext): int =
-  var seen: HashSet[pointer]
-  proc visit(node: Node, depth: int): int =
-    if node == nil: fail("nil cached node")
-    if depth > MaxDepth: fail("cached UI exceeds depth 64")
-    let address = cast[pointer](node)
-    if address in seen: return 0
-    seen.incl(address)
-    if seen.len > MaxNodes: fail("cache exceeds 10000 nodes")
-    result = 128 + node.nodeKey.len + node.label.len + node.hint.len
-    for pairs in [node.nodeStyles, node.nodeAttributes]:
-      for name, value in pairs: result += name.len + value.len + 32
-    if node.source != nil: result += node.source.keyBytes + node.source.len * 16
-    for child in node.descendants:
-      result += visit(child, depth + 1)
-      if result > MaxTreeBytes: fail("subtree cache exceeds 16 MiB")
-  for key, entry in context.candidate:
-    result += key.len + entry.revision.len + 64 + visit(entry.node, 0)
-    if result > MaxTreeBytes: fail("subtree cache exceeds 16 MiB")
 
 proc toJson*(snapshot: Snapshot): JsonNode
 proc snapshot*(runtime:Runtime):Snapshot
@@ -408,13 +312,11 @@ proc safeDump(runtime: Runtime) =
     stderr.writeLine("leaf: post-commit dump failed: " & error.msg)
 
 proc candidateFrom(runtime: Runtime): Runtime =
-  ## Isolated staging copy of the currently accepted description. The mount
-  ## structure is shared read-only; list preparation rebuilds changed paths
-  ## instead of mutating shared MountedNodes. The candidate carries no
-  ## committer, so nested preparation never recurses into the outer gate.
-  Runtime(executionId:runtime.executionId,app: runtime.app, driver:runtime.driver, current: runtime.current, index: runtime.index,
-    keys: runtime.keys, rowCaches: runtime.rowCaches, counters: runtime.counters,
-    rowClock: runtime.rowClock, validator: runtime.validator,
+  ## Isolated staging copy of accepted state. Only the managed driver holds
+  ## accepted descriptions; the candidate carries no committer so nested
+  ## preparation never recurses into the outer gate.
+  Runtime(executionId:runtime.executionId,app: runtime.app,
+    driver:runtime.driver, validator: runtime.validator,
     revision: runtime.revision, descriptionBytes: runtime.descriptionBytes,
     isCandidate: true)
 
@@ -432,92 +334,33 @@ proc publishCandidate(runtime: Runtime, candidate: Runtime, proposed: uint64) =
   if candidate.driver!=nil:
     candidate.driver.publish()
     runtime.driver=candidate.driver
-  runtime.current = candidate.current
-  runtime.index = move(candidate.index)
-  runtime.keys = move(candidate.keys)
-  runtime.rowCaches = move(candidate.rowCaches)
-  runtime.rowClock = candidate.rowClock
-  runtime.counters = candidate.counters
   runtime.descriptionBytes = candidate.descriptionBytes
   runtime.revision = proposed
+
+proc finishAccepted(runtime: Runtime) {.raises:[].}=
+  ## The publication boundary has completed: release values retired by the
+  ## driver. Still inside the caller's reentry guard; never a new failure point.
+  if runtime.driver!=nil:runtime.driver.finishCommit()
 
 proc gateAndPublish(runtime: Runtime, candidate: Runtime) =
   ## The single publish boundary. The proposed revision is allocated before
   ## the external callback and stays stable for the whole staging, so nested
   ## candidate preparation cannot advance it. A successful publication
   ## advances the accepted revision by exactly one.
+  if candidate.driver!=nil:candidate.driver.validateCommit()
   let proposed = runtime.revision + 1
   candidate.proposed = proposed
   if runtime.committer != nil:
     runtime.committer(runtime, candidate)
   runtime.publishCandidate(candidate, proposed)
+  runtime.finishAccepted()
 
 proc postCommitDiagnostics(runtime: Runtime) =
   ## Diagnostics run after acceptance. Their failure must never look like a
   ## rejected commit; Diagnostics reports IO errors on stderr itself.
   if runtime.diagnostics == nil: return
-  runtime.diagnostics.record("render", "ok", %*{"nodes": runtime.counters.mountedNodes})
+  runtime.diagnostics.record("render", "ok", %*{"nodes": runtime.driver.stats.mountedNodes})
   runtime.safeDump()
-
-proc refreshImpl(runtime: Runtime): bool =
-  if runtime.closed: return false
-  if runtime.isCandidate: fail("candidate runtime cannot render")
-  if runtime.inUpdate: fail("reentrant runtime update")
-  runtime.inUpdate = true
-  let ctx = runtime.context
-  ctx.candidate.clear()
-  ctx.hits = 0
-  ctx.misses = 0
-  ctx.building = true
-  try:
-    let root = mount(runtime.app.render(ctx))
-    var index: Table[string, MountedNode]
-    var keys: Table[string, seq[MountedNode]]
-    var count, bytes: int
-    inspect(root, index, keys, count, bytes)
-    let descriptionBytes = ctx.cacheBytes()
-    if bytes + descriptionBytes > MaxTreeBytes:
-      fail("UI and subtree cache exceed 16 MiB")
-    var rowCaches: Table[string, RowCache]
-    var cachedItems, cachedBytes: int
-    for id, cache in runtime.rowCaches:
-      if id in index and index[id].description.source == cache.source:
-        rowCaches[id] = cache
-        for entry in cache.rows.values:
-          inc cachedItems
-          cachedBytes += entry.bytes
-    let snapshot = Snapshot(title: runtime.app.title, width: runtime.app.width,
-      height: runtime.app.height, root: root)
-    if runtime.validator != nil: runtime.validator(snapshot)
-    # Stage lazy renderer content in an isolated candidate. Preparation may
-    # materialize lists and fail without changing the published event index.
-    # The backend gate runs after preparation and before publication; a
-    # rejected candidate leaves snapshot, index, caches and revision untouched.
-    var candidate = Runtime(executionId:runtime.executionId,app: runtime.app, current: snapshot,
-      index: move(index), keys: move(keys), rowCaches: move(rowCaches),
-      counters: runtime.counters, rowClock: runtime.rowClock, validator: runtime.validator,
-      revision: runtime.revision, descriptionBytes: descriptionBytes, isCandidate: true)
-    candidate.counters.cachedItems = cachedItems
-    candidate.counters.cachedRowBytes = cachedBytes
-    candidate.counters.mountedNodes = count
-    candidate.counters.treeBytes = bytes
-    if runtime.preparer != nil: runtime.preparer(candidate)
-    runtime.gateAndPublish(candidate)
-    ctx.previous = move(ctx.candidate)
-    inc runtime.counters.renders
-    runtime.counters.builtNodes += uint64(count)
-    runtime.counters.cacheHits += uint64(ctx.hits)
-    runtime.counters.cacheMisses += uint64(ctx.misses)
-    runtime.counters.cachedSubtrees = ctx.previous.len
-    runtime.postCommitDiagnostics()
-    result = true
-  except CatchableError as error:
-    if runtime.diagnostics != nil: runtime.diagnostics.record("render", "error", %*{"message": error.msg})
-    raise
-  finally:
-    ctx.building = false
-    ctx.candidate.clear()
-    runtime.inUpdate = false
 
 proc flushDriverImpl(runtime:Runtime,forceRoot:bool):bool=
   if runtime.runtimeClosedInternal:
@@ -537,7 +380,9 @@ proc flushDriverImpl(runtime:Runtime,forceRoot:bool):bool=
     runtime.gateAndPublish(candidate)
     result=true
     runtime.postCommitDiagnostics()
-  except CatchableError:
+  except CatchableError as error:
+    if runtime.diagnostics != nil:
+      runtime.diagnostics.record("render", "error", %*{"message": error.msg})
     if staged!=nil:staged.reject()
     else:runtime.driver.reject()
     raise
@@ -545,7 +390,7 @@ proc flushDriverImpl(runtime:Runtime,forceRoot:bool):bool=
 proc flush*(runtime:Runtime):bool=
   var completed:bool
   inExecutionScope(runtime):
-    completed=if runtime.driver==nil:runtime.refreshImpl() else:runtime.flushDriverImpl(false)
+    completed=runtime.flushDriverImpl(false)
   completed
 proc batch*(runtime:Runtime,body:proc() {.closure.})=
   if runtime.runtimeClosedInternal:fail("Runtime is closed")
@@ -567,7 +412,7 @@ proc batch*(runtime:Runtime,body:proc() {.closure.})=
       runtime.taskBody=false
       runtime.batchDepth=0
       runtime.inUpdate=false
-    discard (if runtime.driver==nil:runtime.refreshImpl() else:runtime.flushDriverImpl(false))
+    discard runtime.flushDriverImpl(false)
 proc uiTask*(runtime:Runtime,body:proc() {.closure.})=
   ## Backend task boundary. State writes enqueue; flush follows body completion.
   runtime.batch(body)
@@ -644,20 +489,22 @@ proc closeRuntime*(runtime:Runtime)=
 proc refresh*(runtime: Runtime): bool =
   var completed: bool
   inExecutionScope(runtime):
-    completed=if runtime.driver==nil:runtime.refreshImpl() else:runtime.flushDriverImpl(true)
+    completed=runtime.flushDriverImpl(true)
   completed
 
 proc newRuntime*(app: Application, validator: SnapshotValidator = nil,
                  diagnostics: Diagnostics = nil): Runtime =
-  if app.render == nil and app.driverFactory==nil: fail("application needs a render function")
+  if app.driverFactory==nil:
+    fail("application requires componentApplication; raw render applications are not supported")
   if app.width notin 1..16_384 or app.height notin 1..16_384:
     fail("invalid window dimensions")
   validString(app.title)
   if nextRuntimeId==high(uint64):fail("Runtime identity exhausted")
   inc nextRuntimeId
-  result = Runtime(executionId:nextRuntimeId,app: app, context: BuildContext(), validator: validator, diagnostics: diagnostics)
+  result = Runtime(executionId:nextRuntimeId,app: app, validator: validator,
+    diagnostics: diagnostics)
   when compileOption("threads"): result.uiThreadId=getThreadId()
-  if app.driverFactory!=nil:result.driver=app.driverFactory(result)
+  result.driver=app.driverFactory(result)
   try:
     discard result.refresh()
   except CatchableError as primary:
@@ -676,15 +523,16 @@ proc newRuntime*(app: Application, validator: SnapshotValidator = nil,
     raise
 
 proc snapshot*(runtime: Runtime): Snapshot =
-  if runtime.driver==nil:runtime.current else:runtime.driver.exportSnapshot()
+  runtime.driver.exportSnapshot()
 proc stats*(runtime: Runtime): PerformanceStats =
-  if runtime.driver==nil:runtime.counters else:runtime.driver.stats()
+  result = runtime.driver.stats()
+  result.dispatches = runtime.dispatches
 
 proc setDiagnostics*(runtime: Runtime, diagnostics: Diagnostics) =
   ## Desktop attaches after its initial tree and lazy viewports are validated.
   runtime.diagnostics = diagnostics
   if diagnostics != nil:
-    diagnostics.record("render", "ok", %*{"nodes": runtime.counters.mountedNodes})
+    diagnostics.record("render", "ok", %*{"nodes": runtime.driver.stats.mountedNodes})
     runtime.dump()
 
 proc diagnostic*(runtime: Runtime, phase, status: string, details: JsonNode) =
@@ -754,7 +602,9 @@ proc installCommitter*(runtime: Runtime, committer: RuntimeCommitter,
       runtime.committerLifecycle = default(RuntimeInstallLifecycle)
       return 0
     if candidate.stagingChanged:
+      if candidate.driver!=nil:candidate.driver.validateCommit()
       runtime.publishCandidate(candidate, candidate.proposed)
+      runtime.finishAccepted()
       runtime.safeDump()
     runtime.committer = committer
     inc runtime.hookCounter
@@ -847,7 +697,9 @@ proc installPreparer*(runtime: Runtime, preparer: RuntimePreparer): uint64 =
       if candidate!=nil and candidate.driver!=nil and candidate.driver!=runtime.driver:candidate.driver.reject()
       raise error
     if candidate.stagingChanged:
+      if candidate.driver!=nil:candidate.driver.validateCommit()
       runtime.publishCandidate(candidate, candidate.proposed)
+      runtime.finishAccepted()
       runtime.safeDump()
     runtime.preparer = preparer
     inc runtime.hookCounter
@@ -886,11 +738,7 @@ proc retirePreparerOwner*(runtime:Runtime,owner:uint64) {.raises:[].} =
     runtime.preparerOwner=0
 
 proc find*(runtime: Runtime, key: string): MountedNode =
-  if runtime.driver!=nil:return runtime.driver.find(key)
-  if key in runtime.index: return runtime.index[key]
-  if key notin runtime.keys: fail("node key not found: " & key)
-  if runtime.keys[key].len != 1: fail("ambiguous key: " & key & "; use full node ID")
-  runtime.keys[key][0]
+  runtime.driver.find(key)
 
 proc dispatchImpl(runtime: Runtime, key: string, event: Event): bool =
   if runtime.runtimeClosedInternal:fail("Runtime is closed")
@@ -909,33 +757,18 @@ proc dispatchImpl(runtime: Runtime, key: string, event: Event): bool =
         runtime.driver.reject()
         return false
       if not invoked:return false
-      return runtime.flushDriverImpl(false)
+      result = runtime.flushDriverImpl(false)
+      inc runtime.dispatches
+      if runtime.diagnostics != nil:
+        runtime.diagnostics.record("event", "ok", %*{"key": key, "kind": $event.kind})
+      return result
     except CatchableError:
       runtime.driver.reject()
       raise
     finally:
       runtime.taskBody=false
       runtime.inUpdate=false
-  let n = runtime.find(key).description
-  if n.inactive: return false
-  let callback = n.handlers[event.kind]
-  if callback == nil: fail("node has no " & $event.kind & " handler: " & key)
-  try:
-    runtime.inUpdate = true
-    runtime.taskBody = true
-    try:
-      callback(event)
-      inc runtime.counters.dispatches
-    finally:
-      runtime.taskBody = false
-      runtime.inUpdate = false
-    result = runtime.refresh()
-    if runtime.diagnostics != nil:
-      runtime.diagnostics.record("event", "ok", %*{"key": key, "kind": $event.kind})
-  except CatchableError as error:
-    if runtime.diagnostics != nil:
-      runtime.diagnostics.record("event", "error", %*{"key": key, "kind": $event.kind, "message": error.msg})
-    raise
+  fail("runtime has no managed driver")
 
 proc dispatch*(runtime: Runtime, key: string, event: Event): bool =
   var completed: bool
@@ -970,124 +803,7 @@ proc materializeInto(runtime: Runtime, key: string, first, finish: int,
       raise
     finally:runtime.inUpdate=false
     return
-  if runtime.inUpdate: fail("reentrant list request")
-  let target = runtime.find(key)
-  let source = target.description.source
-  if source == nil: fail("node is not a virtual list")
-  if first < 0 or first > finish or finish > source.len or finish - first > MaxNodes:
-    fail("list range out of bounds")
-  var active: HashSet[int]
-  for i in protected:
-    if i < 0 or i >= source.len: fail("protected item out of bounds")
-    active.incl(i)
-  for i in first..<finish: active.incl(i)
-  if active.len > MaxNodes: fail("too many active list rows")
-  runtime.inUpdate = true
-  try:
-    var cache = runtime.rowCaches.getOrDefault(target.identity)
-    if cache.source != source: cache = RowCache(source: source)
-    var built, hits: uint64
-    var descendants: seq[MountedNode]
-    var activeOrder: seq[int]
-    for i in active: activeOrder.add(i)
-    activeOrder.sort()
-    var mountedRows: Table[int, MountedNode]
-    for child in target.descendants:
-      mountedRows[child.itemIndex] = child
-    for i in activeOrder:
-      inc runtime.rowClock
-      var entry = cache.rows.getOrDefault(i)
-      if i in mountedRows and entry.node != mountedRows[i]:
-        entry.node = mountedRows[i]
-        var rowIndex: Table[string, MountedNode]
-        var rowKeys: Table[string, seq[MountedNode]]
-        var nodes, bytes: int
-        inspect(entry.node, rowIndex, rowKeys, nodes, bytes)
-        entry.bytes = bytes
-      if entry.node == nil:
-        var count = 0
-        entry.node = mountImpl(source.buildRow(i), target.identity, i, 0,
-          source.itemKey(i), true, count)
-        entry.node.itemIndex = i
-        var rowIndex: Table[string, MountedNode]
-        var rowKeys: Table[string, seq[MountedNode]]
-        var nodes, bytes: int
-        inspect(entry.node, rowIndex, rowKeys, nodes, bytes)
-        entry.bytes = bytes
-        inc built
-      else:
-        inc hits
-      entry.used = runtime.rowClock
-      cache.rows[i] = entry
-      descendants.add(entry.node)
-    proc replace(node: MountedNode): MountedNode =
-      if node == target:
-        return MountedNode(description: node.description, identity: node.identity,
-          lookupKey: node.lookupKey, descendants: descendants, itemIndex: node.itemIndex)
-      var changed = false
-      var children: seq[MountedNode]
-      for child in node.descendants:
-        let next = replace(child)
-        children.add(next)
-        if next != child: changed = true
-      if changed:
-        return MountedNode(description: node.description, identity: node.identity,
-          lookupKey: node.lookupKey, descendants: children, itemIndex: node.itemIndex)
-      node
-    let root = replace(runtime.current.root)
-    if runtime.validator != nil:
-      var snapshot = runtime.current
-      snapshot.root = root
-      runtime.validator(snapshot)
-    var index: Table[string, MountedNode]
-    var keys: Table[string, seq[MountedNode]]
-    var count, bytes: int
-    inspect(root, index, keys, count, bytes)
-    if bytes + runtime.descriptionBytes > MaxTreeBytes:
-      fail("UI and subtree cache exceed 16 MiB")
-    var cachedBytes = 0
-    for entry in cache.rows.values: cachedBytes += entry.bytes
-    var otherBytes, otherItems: int
-    var rowCaches: Table[string, RowCache]
-    for id, existing in runtime.rowCaches:
-      if id != target.identity and id in index and index[id].description.source == existing.source:
-        rowCaches[id] = existing
-        for entry in existing.rows.values:
-          otherBytes += entry.bytes
-          inc otherItems
-    while cache.rows.len > 128 or otherBytes + cachedBytes > MaxTreeBytes:
-      var oldest = high(uint64)
-      var victim = -1
-      for i, entry in cache.rows:
-        if i notin active and entry.used < oldest:
-          oldest = entry.used
-          victim = i
-      # Large viewports may contain more than 128 rows. Their mounted nodes
-      # stay alive even when excluded from the separate warm-row cache.
-      if victim == -1:
-        for i, entry in cache.rows:
-          if entry.used < oldest:
-            oldest = entry.used
-            victim = i
-      if victim == -1: fail("list cache exceeds byte budget")
-      cachedBytes -= cache.rows[victim].bytes
-      cache.rows.del(victim)
-    runtime.current.root = root
-    runtime.index = move(index)
-    runtime.keys = move(keys)
-    rowCaches[target.identity] = move(cache)
-    runtime.rowCaches = move(rowCaches)
-    runtime.counters.builtItems += built
-    runtime.counters.rowCacheHits += hits
-    runtime.counters.mountedNodes = count
-    runtime.counters.treeBytes = bytes
-    runtime.counters.cachedItems = otherItems + runtime.rowCaches[target.identity].rows.len
-    runtime.counters.cachedRowBytes = otherBytes + cachedBytes
-    for mounted in descendants:
-      if mounted.itemIndex >= first and mounted.itemIndex < finish: result.add(mounted)
-    runtime.dump()
-  finally:
-    runtime.inUpdate = false
+  fail("runtime has no managed driver")
 
 proc materializeImpl(runtime: Runtime, key: string, first, finish: int,
                   protected: seq[int] = @[]): seq[MountedNode] =

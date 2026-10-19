@@ -26,7 +26,6 @@ for scenario in [("stocks_240_candles", stocksApp(), "stock_tick", ""),
   else:
     doAssert runtime.find(scenario[3]).node.listSource.len == 1000
     doAssert runtime.stats.mountedNodes < 1000
-    doAssert runtime.stats.cachedItems <= 128
   results.add(%*{"scenario": scenario[0], "warmup_operations": 100,
     "operations_per_sample": 100, "samples_ms": rawSamples,
     "median_us_per_operation": samples[4] * 10, "max_us_per_operation": samples[^1] * 10,

@@ -12,6 +12,19 @@ type
     hideCompleted: bool
     nextId: int
     tasks: seq[Task]
+    model*: State[Board]
+
+
+proc snapshotBoard*(state: Board): Board =
+  result = Board(draft: state.draft, hideCompleted: state.hideCompleted,
+    nextId: state.nextId)
+  for task in state.tasks: result.tasks.add(task)
+
+proc edit*(state: Board, change: proc(v: var Board)) =
+  discard state.model.update(proc(current: Board): Board =
+    result = snapshotBoard(current)
+    change(result))
+
 proc newBoard*(): Board =
   result = Board(nextId: 7)
   for i, name in ["整理首页信息架构", "补充表单错误提示",
@@ -19,7 +32,7 @@ proc newBoard*(): Board =
                   "确定界面配色", "完成组件清单"]:
     result.tasks.add(Task(id: i + 1, title: name, lane: Lane(i div 2)))
 
-proc add(state: Board) =
+proc addInto(state: var Board) =
   let value = state.draft.strip
   if value.len == 0:
     return
@@ -27,10 +40,16 @@ proc add(state: Board) =
   inc state.nextId
   state.draft = ""
 
-proc advance(state: Board; id: int) =
+proc advanceInto(state: var Board; id: int) =
   for task in state.tasks.mitems:
     if task.id == id:
       task.lane = Lane((ord(task.lane) + 1) mod 3)
+
+proc add(state: Board) =
+  state.edit(proc(v: var Board) = addInto(v))
+
+proc advance(state: Board; id: int) =
+  state.edit(proc(v: var Board) = advanceInto(v, id))
 
 proc taskView(state: Board; task: Task): Node =
   let id = task.id
@@ -51,9 +70,9 @@ proc taskView(state: Board; task: Task): Node =
         button("删除"):
           key: "delete_" & $id
           variant: "ghost"
-          onClick(e): state.tasks = state.tasks.filterIt(it.id != id)
+          onClick(e): state.edit(proc(v: var Board) = v.tasks = v.tasks.filterIt(it.id != id))
 
-proc render*(state: Board; ctx: BuildContext): Node =
+proc render*(state: Board): Node =
   var lanes: seq[Node]
   for lane in Lane:
     var entries: seq[Node]
@@ -92,7 +111,7 @@ proc render*(state: Board; ctx: BuildContext): Node =
             key: "task_draft"
             placeholder: "输入新任务，按 Enter 添加"
             styles: grow()
-            onChange(e): state.draft = e.value
+            onChange(e): state.edit(proc(v: var Board) = v.draft = e.value)
             onSubmit(e): state.add()
           button("添加任务"):
             key: "task_add"
@@ -100,7 +119,7 @@ proc render*(state: Board; ctx: BuildContext): Node =
             onClick(e): state.add()
         checkbox("隐藏已完成的任务", state.hideCompleted):
           key: "hide_completed"
-          onChange(e): state.hideCompleted = e.checked
+          onChange(e): state.edit(proc(v: var Board) = v.hideCompleted = e.checked)
       line:
         children: lanes
       line:

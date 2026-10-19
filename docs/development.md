@@ -72,7 +72,7 @@ nim c --path:src --out:target\dpi-direct.exe tests\nim\windows_dpi_app.nim
 .\target\dpi-direct.exe --trace --log-file .\dpi-direct.jsonl
 ```
 
-JSONL 的 `dpi` 记录包含 `awareness`、`status` 和 `error_code`。首帧的 `rendering` 记录包含 GPUI 当前窗口实测 `scale_factor` 和 `logical_size`；`device_size_calculated`、`dpi_from_scale_calculated` 为换算值，不是 Win32 DPI 或交换链实测。ABI1 在成功 ready 严格协商 `capabilities.rendering_diagnostics=true` 后，才在窗口 bounds 变化时继续记录并去重；旧 Nim 宿主未宣告能力时，新 DLL 禁发新 op，新 Nim 仍接受旧 DLL 的无 metadata ready。ABI2 使用类型化 `RENDERING` 请求，在 Nim 侧按比例和逻辑尺寸去重，`FRAME` 采样不重复写尺寸日志；非法尺寸或换算溢出只拒绝该诊断请求，不影响后续 ready。两条路径都不会因尺寸诊断再次 ready 或改写 watch receipt。JSONL 仅为可选日志，不用于 UI 树传输；完整诊断需要重新编译框架/DLL 和应用。
+JSONL 的 `dpi` 记录包含 `awareness`、`status` 和 `error_code`。首帧的 `rendering` 记录包含 GPUI 当前窗口实测 `scale_factor` 和 `logical_size`；`device_size_calculated`、`dpi_from_scale_calculated` 为换算值，不是 Win32 DPI 或交换链实测。旧 ABI1 兼容路径已删除；历史记录仅作存档。ABI2 在成功 ready 严格协商 `capabilities.rendering_diagnostics=true` 后，才在窗口 bounds 变化时继续记录并去重；Nim 侧按比例和逻辑尺寸去重，`FRAME` 采样不重复写尺寸日志；非法尺寸或换算溢出只拒绝该诊断请求，不影响后续 ready。诊断不会因尺寸请求再次 ready 或改写 watch receipt。JSONL 仅为可选日志，不用于 UI 树传输；完整诊断需要重新编译框架/DLL 和应用。
 
 更新 SDK/框架后应重新编译主 EXE，已有 EXE 不会获得新 manifest。比例仍不符合系统设置时，先查应用属性中的 Windows 高 DPI 兼容性覆盖、启动宿主的 DPI 模式，再用[原生验证步骤](verification.md)核对实际 HWND DPI 和 GPUI 比例。当前 Linux 测试不能证明 Windows 清晰度已改善。
 
@@ -80,9 +80,9 @@ JSONL 的 `dpi` 记录包含 `awareness`、`status` 和 `error_code`。首帧的
 
 ## 组件性能与发布回归
 
-组件 CPU 基准：`nim c -d:release --mm:orc -d:nimAllocStats --path:src --out:target/nim/component_bench benchmarks/components.nim`。分别运行 `--mode legacy-json|legacy-typed|managed-typed --static 100|1000|5000 --iterations 200 --warmup 50 --rounds 3 --output PATH`。计时内不输出报告。分配字段是 Nim allocator 的分配次数；RSS、堆占用与峰值另记，不能把存活堆增量当总分配字节数。
+组件 CPU 基准：`nim c -d:release --mm:orc -d:nimAllocStats --path:src --out:target/nim/component_bench benchmarks/components.nim`。运行 `--mode managed-typed --static 100|1000|5000 --iterations 200 --warmup 50 --rounds 3 --output PATH`；仅托管模式保留，旧 JSON/typed 样本作为冻结历史证据，不再重建。计时内不输出报告。分配字段是 Nim allocator 的分配次数；RSS、堆占用与峰值另记，不能把存活堆增量当总分配字节数。
 
-`nim c -r scripts/verify_component_performance.nim MODE-100.json MODE-1000.json MODE-5000.json` 验证元数据、原始样本、业务正确性和局部计数约束；legacy 模式保留完整树成本，不套 managed 上限。CPU 工具只测 Runtime 与编码，Rust apply 和 GPUI 帧字段为空，不能据此推出帧率。
+`nim c -r scripts/verify_component_performance.nim MODE-100.json MODE-1000.json MODE-5000.json` 验证元数据、原始样本、业务正确性和局部计数约束；已移除的旧模式报告会被明确拒绝。CPU 工具只测 Runtime 与编码，Rust apply 和 GPUI 帧字段为空，不能据此推出帧率。
 
 `benchmarks/components_native.nim` 使用真实 GPUI 窗口。设置 `LEAF_GPUI_LIBRARY` 和 `LEAF_BENCH_MODE`，参数由 `LEAF_BENCH_STATIC/ITERATIONS/WARMUP/ROUNDS/OUTPUT` 指定。typed 模式测量 Rust prepare/apply 与显式 GPUI draw（layout+paint 合计），event-to-frame 含调度；纯 layout 无公开独立测量时保留空值。报告必须标明 Rust profile、库 hash、实际 GPU 或软件渲染，不能与 CPU 微基准混算。
 

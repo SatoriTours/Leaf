@@ -1,6 +1,6 @@
 ## Public launch boundaries must keep accepted owners reachable until cleanup.
 import std/[unittest, os, options, atomics, strutils, osproc]
-import leaf/[core, widgets, components, headless, runner, desktop, gpui_bridge,
+import leaf/[core, widgets, components, headless, runner, desktop, gpui_errors,
   managed_runtime, task_service, task_contracts, task_worker]
 var workerCalls: Atomic[int]
 proc work(input: string, ctx: WorkerContext): string {.nimcall, gcsafe.} =
@@ -13,7 +13,7 @@ proc threadCount(): int =
 
 suite "public accepted construction cleanup":
   test "accepted scope exit failure closes once or transfers retry owner without entering":
-    for bridge in [false, true]:
+    for bridge in [false]:
       for refuseCleanup in [false, true]:
         workerCalls.store(0)
         var state: State[int]
@@ -39,8 +39,7 @@ suite "public accepted construction cleanup":
         var caught = false
         try:
           let app = componentApplication(component(Owner, 0), "constructor", executionScope = execution)
-          if bridge: discard newDesktopBridge(app, taskPumpSupported = true)
-          else: discard newRuntime(app)
+          discard newRuntime(app)
         except UiError as error:
           caught = true
           check error.msg == original.msg
@@ -118,8 +117,7 @@ proc launcherLibrary(status: int): string =
     .replace("../../include/leaf_gpui_v2.h", framework / "include/leaf_gpui_v2.h")
     .replace("LeafGpuiApiV2 api={sizeof(api),2,0,run};", "LeafGpuiApiV2 api={sizeof(api),2,LEAF_CAP_TASK_PUMP,run};")
     .replace("(void)ctx;return 0;", "(void)ctx;return " & $status & ";")
-    .replace("h->detach(ctx);return status;", "h->detach(ctx);return status==0 ? " & $status & " : status;") &
-    "\nuint32_t leaf_gpui_task_pump_version(void) {return 1;}\n")
+    .replace("h->detach(ctx);return status;", "h->detach(ctx);return status==0 ? " & $status & " : status;"))
   result = source.changeFileExt("so")
   doAssert execCmd("gcc -shared -fPIC " & quoteShell(source) & " -o " & quoteShell(result)) == 0
 
@@ -134,7 +132,7 @@ suite "public runner retry ownership":
       else: putEnv("LEAF_GPUI_ABI", previousAbi)
     for status in [0, 5]:
       putEnv("LEAF_GPUI_LIBRARY", launcherLibrary(status))
-      for abi in ["1", "2"]:
+      for abi in ["2"]:
         putEnv("LEAF_GPUI_ABI", abi)
         var entries, disposed: int
         var refuse = true
@@ -228,7 +226,7 @@ suite "construction transfer through launchers":
       if previousAbi.len == 0: delEnv("LEAF_GPUI_ABI")
       else: putEnv("LEAF_GPUI_ABI", previousAbi)
     putEnv("LEAF_GPUI_LIBRARY", launcherLibrary(0))
-    for abi in ["1", "2"]:
+    for abi in ["2"]:
       putEnv("LEAF_GPUI_ABI", abi)
       for boundary in ["headless", "desktop", "runner-headless", "runner-desktop"]:
         var entries, entered, disposed: int
@@ -295,7 +293,7 @@ suite "runner integer output and ordinary errors":
       else: putEnv("LEAF_GPUI_ABI", previousAbi)
     for status in [0, 5]:
       putEnv("LEAF_GPUI_LIBRARY", launcherLibrary(status))
-      for abi in ["1", "2"]:
+      for abi in ["2"]:
         putEnv("LEAF_GPUI_ABI", abi)
         var entries, disposed: int
         var refuse = true
@@ -341,7 +339,7 @@ suite "runner integer output and ordinary errors":
       if previousAbi.len == 0: delEnv("LEAF_GPUI_ABI")
       else: putEnv("LEAF_GPUI_ABI", previousAbi)
     putEnv("LEAF_GPUI_LIBRARY", library)
-    for abi in ["1", "2"]:
+    for abi in ["2"]:
       putEnv("LEAF_GPUI_ABI", abi)
       var entries, disposed, entered: int
       var refuse = true

@@ -131,18 +131,26 @@ suite "typed requests keep JSON off the bridge":
     defer:delEnv("LEAF_GPUI_ABI")
     let api=loadGpui(path)
     var count=0
-    rt=newRuntime(Application(title:"请求",width:640,height:480,render:proc(c:BuildContext):Node=
-      column(@[button("click",key="click",onClick=proc(e:Event)=inc count)])))
+    let Clicker = defineComponent[int, State[int]]("RequestsClicker",
+      proc(ctx: MountContext, p: int): State[int] = ctx.state(0),
+      proc(ctx: ComponentContext, p: int, s: State[int]): UiDescription =
+        componentView:
+          column:
+            button "click":
+              key: "click"
+              onClick(e):
+                inc count
+                discard s.update(proc(v: int): int = v + 1))
+    rt=newRuntime(componentApplication(component(Clicker, 0), "请求", 640, 480))
     scenario=0
     check openGpuiSession(rt,api).run()==0
     check count==1
     var built=0
     var keys:seq[string]
     for i in 0..<100000:keys.add($i)
-    rt=newRuntime(Application(title:"列表",width:640,height:480,render:proc(c:BuildContext):Node=
-      virtualList("items",keys,proc(i:int):Node=
-        inc built
-        text($i),rowHeight=30,overscan=0)))
+    rt=newRuntime(componentApplication(componentList("items",keys,proc(i:int):UiDescription=
+      inc built
+      host(text($i)),rowHeight=30,overscan=0),"列表",640,480))
     scenario=1
     check openGpuiSession(rt,api).run()==0
     check built==50
@@ -155,24 +163,25 @@ suite "typed requests keep JSON off the bridge":
     check built==50
     check rt.updateStats().snapshotExports==exports
 
-    rt=newRuntime(Application(title:"失败",width:640,height:480,render:proc(c:BuildContext):Node=
-      virtualList("items",@["a"],proc(i:int):Node=raise newException(UiError,"row failed"))))
+    rt=newRuntime(componentApplication(componentList("items",@["a"],proc(i:int):UiDescription=
+      raise newException(UiError,"row failed")),"失败",640,480))
     scenario=2
     let failed=openGpuiSession(rt,api)
     check failed.run()!=0
     check failed.readyCalls==0
 
-    var failRows=false
-    rt=newRuntime(Application(title:"replacement",width:640,height:480,render:proc(c:BuildContext):Node=
-      let broken=failRows
-      column(@[
-        virtualList("items",@["a"],proc(i:int):Node=
-          if broken:raise newException(UiError,"replacement row failed")
-          text("row")),
-        button("break",key="break",onClick=proc(e:Event)=failRows=true)])))
+    let Replacement = defineComponent[int, State[bool]]("RequestsReplacement",
+      proc(ctx: MountContext, p: int): State[bool] = ctx.state(false),
+      proc(ctx: ComponentContext, p: int, state: State[bool]): UiDescription =
+        let broken = ctx.value(state)
+        hostShell(column(@[]), @[
+          componentList("items", @["a"], proc(i:int):UiDescription=
+            if broken: raise newException(UiError,"replacement row failed")
+            host(text("row"))),
+          host(button("break", key="break", onClick=proc(e:Event)=discard state.set(true)))]))
+    rt=newRuntime(componentApplication(component(Replacement, 0), "replacement", 640, 480))
     scenario=3
     check openGpuiSession(rt,api).run()!=0
-    check failRows
 
   test "unrelated counter does not visit a mounted list source":
     let path=absolutePath("target/ffi-v2/REQUESTS.so")

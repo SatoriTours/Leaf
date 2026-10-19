@@ -1,8 +1,8 @@
 import std/[unittest, os, osproc, options]
 import leaf/[core, widgets, gpui_api, gpui_ffi_v2, host_session, gpui_session]
+import ../fixture_app
 proc app(scope:ExecutionScope=nil):Application =
-  Application(title:"会话",width:640,height:480,executionScope:scope,
-    render:proc(ctx:BuildContext):Node=text("你好",key="text"))
+  fixtureApplication(proc():Node=text("你好",key="text"),"会话",640,480,scope)
 proc consumer(id:uint64,prepared,applied,accepted,discarded:ptr int):HostConsumer =
   result=HostConsumer(sessionId:id)
   result.prepare=proc(batch:HostBatch)=inc prepared[]
@@ -52,7 +52,7 @@ suite "typed session installation":
     check c==1 and d==1
     host.close()
 suite "ABI selection and synchronous attach":
-  test "old, valid and incompatible library selection":
+  test "ABI 2 only loading rejects ABI 1, missing and incompatible libraries":
     let previous=getEnv("LEAF_GPUI_ABI")
     defer:
       if previous.len==0:delEnv("LEAF_GPUI_ABI")
@@ -63,18 +63,18 @@ suite "ABI selection and synchronous attach":
       check execCmd("gcc -shared -fPIC -D" & flavor & " tests/ffi/gpui_v2_library.c -o " & quoteShell(path))==0
       for selection in ["auto","1","2"]:
         putEnv("LEAF_GPUI_ABI",selection)
-        if selection!="1" and (flavor=="INCOMPATIBLE" or (flavor=="OLD_ONLY" and selection=="2")):
-          expect UiError:discard loadGpui(path)
-        else:
+        if selection=="1":
+          expect UiError: discard loadGpui(path)
+        elif flavor=="VALID":
           let api=loadGpui(path)
-          check api.abi()==1
-          check api.v2.isSome == (selection!="1" and flavor=="VALID")
-          if api.v2.isSome:
-            let rt=newRuntime(app())
-            let session=openGpuiSession(rt,api)
-            check session.run()==0
-            check session.readyCalls==1
-            check rt.committerOwner==0
+          check api.v2.isSome
+          let rt=newRuntime(app())
+          let session=openGpuiSession(rt,api)
+          check session.run()==0
+          check session.readyCalls==1
+          check rt.committerOwner==0
+        else:
+          expect UiError: discard loadGpui(path)
   test "initial install failure does not publish ready":
     putEnv("LEAF_GPUI_ABI","2")
     defer:delEnv("LEAF_GPUI_ABI")
@@ -102,7 +102,7 @@ suite "ABI selection and synchronous attach":
     let session=openGpuiSession(rt,api)
     check session.run()==0
     check session.readyCalls==1
-    check entries==3
+    check entries==2
     check rt.committerOwner==0
     check not rt.eventsFrozen
     rt.closeRuntime()
@@ -115,7 +115,7 @@ suite "ABI selection and synchronous attach":
     let scope:ExecutionScope=proc(body:proc())=
       inc entries
       body()
-      if entries==3:raise newException(UiError,"preparer scope exit rejected")
+      if entries==2:raise newException(UiError,"preparer scope exit rejected")
     let rt=newRuntime(app(scope))
     let session=openGpuiSession(rt,api)
     check session.run()!=0

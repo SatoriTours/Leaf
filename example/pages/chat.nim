@@ -13,14 +13,36 @@ type
     messages: seq[Message]
     nextId, unread, revision: int
     muted: bool
-  Chat* = ref object
-    threads: array[12, Conversation]
-    active, offset, epoch: int
-    renderAll, newestFirst: bool
+  ChatCache = ref object
     sourceSignature: tuple[active, revision: int, newest: bool]
     sourceNode: Node
     shownSignature: tuple[active, revision, offset: int, all, newest: bool]
     shown: seq[Message]
+  Chat* = ref object
+    threads: array[12, Conversation]
+    active, offset, epoch: int
+    renderAll, newestFirst: bool
+    cache: ChatCache
+    model*: State[Chat]
+
+
+proc snapshotChat*(state: Chat): Chat =
+  result = Chat(active: state.active, offset: state.offset, epoch: state.epoch,
+    renderAll: state.renderAll, newestFirst: state.newestFirst,
+    cache: state.cache)
+  for i in 0..<state.threads.len:
+    let source = state.threads[i]
+    if source == nil: continue
+    var copy = Conversation(title: source.title, draft: source.draft,
+      nextId: source.nextId, unread: source.unread, revision: source.revision,
+      muted: source.muted)
+    for message in source.messages: copy.messages.add(message)
+    result.threads[i] = copy
+
+proc edit*(state: Chat, change: proc(v: var Chat)) =
+  discard state.model.update(proc(current: Chat): Chat =
+    result = snapshotChat(current)
+    change(result))
 const
   Titles = ["产品设计组", "研发讨论", "林晓", "周然",
     "发布协调", "陈宁", "用户研究", "设计评审", "测试反馈",
@@ -70,7 +92,8 @@ proc historyMessage(id, chatId: int): Message =
 proc newChat*(messageCount = 80; renderAll = false): Chat =
   if messageCount < 1 or messageCount > Limit:
     fail("unsupported chat size")
-  result = Chat(active: 1, renderAll: renderAll, newestFirst: true)
+  result = Chat(active: 1, renderAll: renderAll, newestFirst: true,
+    cache: ChatCache())
   for i, name in Titles:
     let count = if i == 0:
       messageCount
@@ -83,13 +106,13 @@ proc newChat*(messageCount = 80; renderAll = false): Chat =
 proc current(state: Chat): Conversation =
   state.threads[state.active - 1]
 
-proc selectConversation(state: Chat; id: int) =
+proc selectConversationInto(state: var Chat; id: int) =
   state.active = id
   state.offset = 0
   inc state.epoch
   state.current.unread = 0
 
-proc appendMessages(state: Chat; id, count: int; side = incoming; body = "") =
+proc appendMessagesInto(state: var Chat; id, count: int; side = incoming; body = "") =
   let thread = state.threads[id - 1]
   for number in thread.nextId ..< thread.nextId + count:
     thread.messages.add(message(number, id, side, body))
@@ -103,19 +126,31 @@ proc appendMessages(state: Chat; id, count: int; side = incoming; body = "") =
   else:
     thread.unread += count
 
-proc send(state: Chat) =
+proc selectConversation(state: Chat; id: int) =
+  state.edit(proc(v: var Chat) = selectConversationInto(v, id))
+
+proc appendMessages(state: Chat; id, count: int; side = incoming; body = "") =
+  state.edit(proc(v: var Chat) = appendMessagesInto(v, id, count, side, body))
+
+proc sendInto(state: var Chat) =
   let value = state.current.draft.strip
   if value.len == 0:
     return
-  state.appendMessages(state.active, 1, outgoing, value)
+  state.appendMessagesInto(state.active, 1, outgoing, value)
   state.current.draft = ""
   state.offset = 0
 
-proc receive(state: Chat; count = 1) =
-  state.appendMessages(state.active, count)
+proc send(state: Chat) =
+  state.edit(proc(v: var Chat) = sendInto(v))
+
+proc receiveInto(state: var Chat; count: int) =
+  state.appendMessagesInto(state.active, count)
   state.offset = 0
 
-proc loadHistory(state: Chat) =
+proc receive(state: Chat; count = 1) =
+  state.edit(proc(v: var Chat) = receiveInto(v, count))
+
+proc loadHistoryInto(state: var Chat) =
   let thread = state.current
   let count = min(200, Limit - thread.messages.len)
   if count == 0:
@@ -128,7 +163,10 @@ proc loadHistory(state: Chat) =
   inc thread.revision
   state.offset = min(state.offset + count, thread.messages.len - Window)
 
-proc stress(state: Chat) =
+proc loadHistory(state: Chat) =
+  state.edit(proc(v: var Chat) = loadHistoryInto(v))
+
+proc stressInto(state: var Chat) =
   let thread = state.current
   thread.messages.setLen(0)
   for id in 1 .. Limit:
@@ -137,6 +175,9 @@ proc stress(state: Chat) =
   inc thread.revision
   state.offset = 0
   inc state.epoch
+
+proc stress(state: Chat) =
+  state.edit(proc(v: var Chat) = stressInto(v))
 
 proc messageView(entry: Message; chatId: int): Node =
   let outgoing = entry.side == outgoing
@@ -174,37 +215,32 @@ proc conversationView(state: Chat; id: int): Node =
         text((if entry.draft.len == 0: "" else: "草稿")):
           styles: {"font_size": "10", "color": "#FBBF24"}
 
-proc cachedConversation(state: Chat; ctx: BuildContext; id: int): Node =
-  let entry = state.threads[id - 1]
-  proc renderConversation(): Node =
-    state.conversationView(id)
+proc conversation(state: Chat; id: int): Node =
+  state.conversationView(id)
 
-  ctx.cached("chat/conversation/" & $id, $(state.active == id) & ":" &
-      $entry.unread &
-      ":" &
-      $(entry.draft.len == 0), renderConversation)
-
-proc render*(state: Chat; ctx: BuildContext): Node =
+proc render*(state: Chat): Node =
   let thread = state.current
+  let cache = state.cache
+  if cache == nil: fail("chat cache is missing")
   let start = max(thread.messages.len - state.offset - Window, 0)
   let shownSignature = (state.active, thread.revision, state.offset,
                         state.renderAll, state.newestFirst)
-  if state.shown.len == 0 or state.shownSignature != shownSignature:
-    state.shown = if state.renderAll:
+  if cache.shown.len == 0 or cache.shownSignature != shownSignature:
+    cache.shown = if state.renderAll:
       thread.messages
     else:
       thread.messages[start ..< min(start + Window, thread.messages.len)]
     if state.newestFirst:
-      state.shown.reverse()
-    state.shownSignature = shownSignature
-  let shown = state.shown
+      cache.shown.reverse()
+    cache.shownSignature = shownSignature
+  let shown = cache.shown
   var conversations: seq[Node]
   for id in 1 .. Titles.len:
-    conversations.add(state.cachedConversation(ctx, id))
+    conversations.add(state.conversation(id))
   var rows: Node
   if state.renderAll:
     let signature = (state.active, thread.revision, state.newestFirst)
-    if state.sourceNode == nil or state.sourceSignature != signature:
+    if cache.sourceNode == nil or cache.sourceSignature != signature:
       let chatId = state.active
       let messages = shown
       var keys: seq[string]
@@ -213,19 +249,19 @@ proc render*(state: Chat; ctx: BuildContext): Node =
       proc buildMessage(i: int): Node =
         messageView(messages[i], chatId)
 
-      state.sourceNode = view:
+      cache.sourceNode = view:
         virtualList:
           key: "message_list"
           keys: keys
           builder: buildMessage
           estimatedHeight: 100
           styles: {"height": "420", "min_height": "420", "width": "full", "gap": "10"}
-      state.sourceSignature = signature
+      cache.sourceSignature = signature
     rows = view:
       stack:
         key: "message_viewport_" & $state.active & "_" & $state.epoch
         styles: {"height": "420", "min_height": "420"}
-        state.sourceNode
+        cache.sourceNode
   else:
     var visible: seq[Node]
     for entry in shown:
@@ -291,14 +327,13 @@ proc render*(state: Chat; ctx: BuildContext): Node =
               key: "chat_older"
               variant: "ghost"
               disabled: state.renderAll or start == 0
-              onClick(e): state.offset = min(state.offset + Window, thread.messages.len - Window)
+              onClick(e): state.edit(proc(v: var Chat) = v.offset = min(v.offset + Window, v.current.messages.len - Window))
             button("最新"):
               key: "chat_latest"
               variant: "outline"
               disabled: state.offset == 0
-              onClick(e):
-                state.offset = 0
-                inc state.epoch
+              onClick(e): state.edit(proc(v: var Chat) =
+                (v.offset = 0; inc v.epoch))
           separator()
           rows
           separator()
@@ -308,7 +343,7 @@ proc render*(state: Chat; ctx: BuildContext): Node =
               key: "chat_draft"
               placeholder: "输入消息，Enter 发送"
               styles: grow()
-              onChange(e): state.current.draft = e.value
+              onChange(e): state.edit(proc(v: var Chat) = v.current.draft = e.value)
               onSubmit(e): state.send()
             button("发送"):
               key: "chat_send"
@@ -331,17 +366,15 @@ proc render*(state: Chat; ctx: BuildContext): Node =
           separator()
           switch("完整数据 / 虚拟列表", state.renderAll):
             key: "chat_full"
-            onChange(e):
-              state.renderAll = e.checked
-              state.offset = 0
+            onChange(e): state.edit(proc(v: var Chat) =
+              (v.renderAll = e.checked; v.offset = 0))
           checkbox("最新在上", state.newestFirst):
             key: "chat_newest"
-            onChange(e):
-              state.newestFirst = e.checked
-              inc state.epoch
+            onChange(e): state.edit(proc(v: var Chat) =
+              (v.newestFirst = e.checked; inc v.epoch))
           switch("免打扰", thread.muted):
             key: "chat_mute"
-            onChange(e): state.current.muted = e.checked
+            onChange(e): state.edit(proc(v: var Chat) = v.current.muted = e.checked)
           separator()
           label("分页模式构建 50 条气泡；完整数据模式仅按视口构建，长消息保持实际高度。")
           label("每个会话最多保留 1000 条消息，草稿独立保存。")

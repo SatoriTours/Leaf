@@ -73,21 +73,23 @@ leaf generate scaffold Metric count:int amount:float
 
 ## 路由与页面组
 
-`config/routes.nim` 是独立的人工配置入口，默认返回自动注册的路由。可在这里增加 Route，并在 `app/application.nim` 的页面定义中接入相应页面组。
+`config/routes.nim` 是独立的人工配置入口，默认返回自动注册的路由。可在这里增加 Route，并在 `app/application.nim` 的页面定义中接入相应 ComponentPageDefinition。
 
 Leaf 导出以下运行接口：
 
 ```nim
-PageGroup(render: proc(ctx: BuildContext, view: string): Node)
-PageDefinition(name: "home", views: @["index", "search"], create: factory)
+ComponentPageDefinition(name: "home", views: @["index", "search"],
+  build: proc(view: string): UiDescription = component(HomePage, viewIndex))
 Route(name: "home", path: "/", page: "home", view: "index")
 
-let router = newRouter(routes, pages)
-router.navigate("home")       # 也可使用路径，例如 "/search"
-let content = router.renderPage(ctx)
+let router = newComponentRouter(ctx, routes, pages)
+discard navigate(router, "home")       # 也可使用路径，例如 "/search"
+renderPage(ctx, router)
 ```
 
-路由在创建 Router 时检查重复名称、重复路径、缺失页面与无效 View。页面组工厂首次显示时调用一次，后续切换复用实例。路由切换和页面操作应在 Leaf 事件回调内进行，使 Runtime 在回调结束后发布新界面。
+页面动作（普通 home、model home 与生成的 resource 页）只通过 `State.update`/页面 `edit` 从 updater 的 current 构造隔离 candidate；`ctx.value` 在 render 中返回的快照只读，不会把被拒事件对捕获 ref 的修改带入下一次接受。数据库/服务副作用在一次普通 event 中执行一次，随后按结果 queue UI 字段，不放进可被重放的纯 updater。
+
+路由在创建 ComponentRouter 时检查重复名称、重复路径、缺失页面与无效 View；当前地址是组件拥有的 State，页面切换与同批 State/宿主/revision 一起提交。旧 PageGroup/PageDefinition 非事务页面运行模型已删除，历史文档仅作存档。
 
 当前路由匹配静态名称和路径；资源详情和编辑使用页面组状态与业务 id，不提供动态 URL 参数。
 
@@ -157,7 +159,7 @@ transaction:
   note.saveOrRaise()
 ```
 
-启动时打开并迁移数据库一次，在 `withDatabase` 内建立页面工厂。`createApplication(database = nil)` 保留测试注入接口；render 与 Application.executionScope 绑定同一连接，覆盖事件、延迟列表行和验证器。直接使用 Model 的后台任务须自行打开连接并进入同步 withDatabase，不能跨线程复用连接或跨 await 保留作用域。
+启动时打开并迁移数据库一次，在 `withDatabase` 内建立 ComponentRouter 与 ComponentPageDefinition。`createApplication(database = nil)` 保留测试注入接口；组件页面构建与 Application.executionScope 绑定同一连接，覆盖事件、延迟列表行和验证器。直接使用 Model 的后台任务须自行打开连接并进入同步 withDatabase，不能跨线程复用连接或跨 await 保留作用域。
 
 页面 Draft 是独立值类型，编辑先查询完整 Model，再赋值及 save。校验失败返回 false，保留输入并显示 errors.fullMessages；数据库失败抛异常，页面显示错误。取消编辑不改变已存数据。详情和编辑主键为 int64。
 

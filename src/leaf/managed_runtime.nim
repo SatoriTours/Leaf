@@ -2,7 +2,7 @@
 ## successful publication replaces entries and never retains a candidate chain.
 import ./task_worker
 import std/[tables,sets,options,algorithm]
-import ./[core,component_description,component_state,host_reconcile,backend,task_service,task_contracts]
+import ./[core,component_description,component_state,host_reconcile,backend,task_service,task_contracts,commit_map]
 export host_protocol.UpdateStats
 
 type
@@ -39,22 +39,35 @@ type
     rootDescription:UiDescription
     root,nextId,nextTypeId:uint64
     typeTokens:Table[string,uint64]
-    instances:Table[uint64,Instance]
-    index:Table[string,uint64]
-    keys:Table[string,HashSet[uint64]]
-    outlets:Table[uint64,uint64]
+    instances:CommitMap[uint64,Instance]
+    index:CommitMap[string,uint64]
+    keys:CommitMap[string,KeySummary]
+    outlets:CommitMap[uint64,uint64]
     invalid:HashSet[uint64]
     count,componentCount,bytes:int
     policy:HostStylePolicy
     totals:UpdateStats
     snapshot:Snapshot
     snapshotValid,forceRoot:bool
+  PreparedCommit=ref object
+    editEpoch:uint64
+    candidate:HostCandidate
+    instancePatch:PreparedMapPatch[uint64,Instance]
+    indexPatch:PreparedMapPatch[string,uint64]
+    keyPatch:PreparedMapPatch[string,KeySummary]
+    outletPatch:PreparedMapPatch[uint64,uint64]
+    stateRetire:seq[PreparedOwnerDisposal]
+    stateAttempt:StateAttempt
+    taskAttempt:TaskAttempt
+    published:bool
   ManagedDriver=ref object of RuntimeDriver
     data:ManagedStore
     edits:Table[uint64,Instance]
     changes:HostChanges
     attempt:StateAttempt
-    candidate:HostCandidate
+    hostPlan:HostCandidate
+    commit:PreparedCommit
+    editEpoch:uint64
     exported:Option[Snapshot]
     computed,dirty:HashSet[uint64]
     created:seq[uint64]
@@ -62,10 +75,57 @@ type
     count,componentCount,bytes:int
     measurements:UpdateStats
     globalRefresh:bool
-    preparedOutlets:Table[uint64,uint64]
+    outletRemovals:seq[uint64]
+    outletUpserts:seq[(uint64,uint64)]
     taskAttempt:TaskAttempt
     taskFrame:TaskIntentFrame
     metadataOnly:bool
+when defined(leafProtocolProbes):
+  var managedPublishAllocations*:int
+  var keyDeltaComparisons*:uint64
+
+  proc corruptPreparedEpochForTest*(driver:RuntimeDriver)=
+    ## Negative-test seam: mutate only the driver epoch after preparation.
+    if driver of ManagedDriver:
+      let d=ManagedDriver(driver)
+      if d.commit==nil:fail("no prepared commit")
+      inc d.editEpoch
+
+type KeyDelta=object
+  key:string
+  count:int
+  xorId:uint64
+
+const KeyDeltaIndexThreshold=64
+
+proc bumpKeyDelta(deltas:var seq[KeyDelta],index:var Table[string,int],
+    key:string,delta:int,id:uint64)=
+  ## Local scratch key summary delta. Small commits stay linear and allocation
+  ## free; a large delta builds a transient prepare-only index so a full keyed
+  ## mount is O(K), never O(K^2) over the accepted table.
+  var position= -1
+  if index.len>0:
+    position=index.getOrDefault(key,-1)
+  else:
+    for i in 0..<deltas.len:
+      when defined(leafProtocolProbes):inc keyDeltaComparisons
+      if deltas[i].key==key:position=i;break
+    if deltas.len>KeyDeltaIndexThreshold:
+      for i,entry in deltas:index[entry.key]=i
+  if position<0:
+    deltas.add(KeyDelta(key:key))
+    position=deltas.high
+  if index.len>0:index[key]=position
+  deltas[position].count+=delta
+  deltas[position].xorId=deltas[position].xorId xor id
+
+proc probeAllocCount():int=
+  when defined(nimAllocStats):
+    let stats=getAllocStats()
+    for name,value in fieldPairs(stats):
+      when name=="allocCount":result=value
+  else:0
+
 var nextManagedId:uint64
 proc current(d:ManagedDriver,id:uint64):Instance=
   if d.edits.hasKey(id):d.edits.getOrDefault(id) else:d.data.instances.getOrDefault(id)
@@ -407,11 +467,14 @@ proc materializeList(d:ManagedDriver,item:Instance,first,finish:int,protected:se
 when defined(leafProtocolProbes):
   var outletIndexLookups*:uint64
   var outletIndexEdits*:uint64
+proc prepareAccepted(d:ManagedDriver)
+
 proc prepareOutlets(d:ManagedDriver)=
   ## Incremental router-identity overlay. Only tokens touched by this candidate
   ## are checked, and only their final owner (or a removal encoded as 0) enters
   ## the delta; an unrelated local update scans or copies no index entries.
-  d.preparedOutlets.clear()
+  d.outletRemovals.setLen(0)
+  d.outletUpserts.setLen(0)
   var touched:HashSet[uint64]
   var candidateOwners:Table[uint64,uint64]
   for id,item in d.edits:
@@ -435,7 +498,8 @@ proc prepareOutlets(d:ManagedDriver)=
       if survivor!=nil and survivor.description.kind==DescriptionKind.pageOutlet and survivor.outlet.routerId==token:
         if owner!=0 and owner!=acceptedOwner:fail("duplicate page outlet route identity")
         if owner==0:owner=acceptedOwner
-    d.preparedOutlets[token]=owner
+    if owner==0:d.outletRemovals.add(token)
+    else:d.outletUpserts.add((token,owner))
     when defined(leafProtocolProbes):inc outletIndexEdits
 proc prepareLifecycle(d:ManagedDriver)=
   type OrderedTransition=object
@@ -510,17 +574,99 @@ proc prepareHost(d:ManagedDriver)=
   for boundary in boundaries.values:changes.boundaries.add(boundary)
   for handle in removed:
     if d.data.reconciler.record(handle).isSome:changes.removals.add(handle)
-  d.candidate=d.data.reconciler.planDelta(changes,d.data.owner.acceptedRevision+1)
-  d.data.reconciler.validate(d.candidate)
+  d.hostPlan=d.data.reconciler.planDelta(changes,d.data.owner.acceptedRevision+1)
+  d.data.reconciler.validate(d.hostPlan)
   d.data.states.validateAttempt(d.attempt)
+  d.prepareAccepted()
   d.exported=none(Snapshot)
+proc prepareAccepted(d:ManagedDriver)=
+  ## Prepare every accepted-map delta for this candidate. Allocations and any
+  ## capacity growth happen here; `publish` only moves prepared values.
+  let data=d.data
+  var instanceRemovals:seq[uint64]
+  var instanceUpserts:seq[(uint64,Instance)]
+  var indexRemovals:seq[string]
+  var indexUpserts:seq[(string,uint64)]
+  # Key summaries are touched by a handful of host edits per local commit; a
+  # linear scratch list stays allocation-light without a per-commit hash map.
+  # A large delta crosses the threshold and uses a transient local index.
+  var keyDeltas:seq[KeyDelta]
+  var keyIndex:Table[string,int]
+  var removedOwners:seq[uint64]
+  # Large candidates (initial mount or viewport churn) get an identity index;
+  # ordinary local commits keep the allocation-free linear check.
+  var createdSet:HashSet[uint64]
+  if d.created.len>32:
+    for id in d.created:createdSet.incl(id)
+  for id,item in d.edits:
+    let old=data.instances.getOrDefault(id)
+    if old!=nil and old.description.kind==DescriptionKind.host and old.active:
+      indexRemovals.add(old.path)
+      let key=old.description.key
+      if key.len>0:
+        bumpKeyDelta(keyDeltas,keyIndex,key,-1,id)
+    if item==nil:
+      instanceRemovals.add(id)
+      # Accepted component owners and components created then erased inside
+      # this same candidate own State that must leave the accepted store.
+      let createdNow = if createdSet.len>0: id in createdSet else: id in d.created
+      if (old!=nil and old.description.kind==DescriptionKind.component) or
+          (old==nil and createdNow):
+        removedOwners.add(id)
+    else:
+      instanceUpserts.add((id,item))
+      if item.active and item.description.kind==DescriptionKind.host:
+        let existing=data.index.getOrDefault(item.path)
+        if existing!=0 and existing!=id and not d.edits.hasKey(existing):
+          fail("duplicate accepted node path")
+        indexUpserts.add((item.path,id))
+        let key=item.description.key
+        if key.len>0:
+          bumpKeyDelta(keyDeltas,keyIndex,key,1,id)
+  var keyRemovals:seq[string]
+  var keyUpserts:seq[(string,KeySummary)]
+  for delta in keyDeltas:
+    let base=data.keys.getOrDefault(delta.key)
+    let finalCount=base.count+delta.count
+    if finalCount<0:fail("node key summary underflow")
+    if finalCount==0:keyRemovals.add(delta.key)
+    else:keyUpserts.add((delta.key,KeySummary(count:finalCount,
+      xorId:base.xorId xor delta.xorId)))
+  var retire:seq[PreparedOwnerDisposal]
+  if removedOwners.len>0:
+    retire.add(data.states.prepareDisposeOwners(removedOwners))
+  var outletRemovals=move(d.outletRemovals)
+  var outletUpserts=move(d.outletUpserts)
+  d.commit=PreparedCommit(editEpoch:d.editEpoch,candidate:d.hostPlan,
+    instancePatch:data.instances.preparePatch(instanceRemovals,instanceUpserts,
+      max(MaxNodes*2,data.instances.len)),
+    indexPatch:data.index.preparePatch(indexRemovals,indexUpserts,
+      max(MaxNodes*2,data.index.len)),
+    keyPatch:data.keys.preparePatch(keyRemovals,keyUpserts,
+      max(MaxNodes*2,data.keys.len)),
+    outletPatch:data.outlets.preparePatch(outletRemovals,outletUpserts,
+      max(MaxNodes,data.outlets.len)),
+    stateRetire:retire,stateAttempt:d.attempt,taskAttempt:d.taskAttempt)
+
+proc discardPreparedCommit(d:ManagedDriver) {.raises:[].}=
+  let commit=d.commit
+  if commit==nil:return
+  d.data.reconciler.discardCandidate(commit.candidate)
+  discardPrepared(commit.instancePatch)
+  discardPrepared(commit.indexPatch)
+  discardPrepared(commit.keyPatch)
+  discardPrepared(commit.outletPatch)
+  for plan in commit.stateRetire:discardDisposeOwner(plan)
+  if d.taskAttempt!=nil:d.data.tasks.rejectTasks(d.taskAttempt)
+  d.commit=nil
+
 method stage*(base:ManagedDriver,forceRoot:bool):RuntimeDriver=
   let data=base.data
   let forceRoot=forceRoot or data.forceRoot
   data.forceRoot=false
   let queued=data.states.pendingOwners()
   if not forceRoot and queued.len==0 and data.invalid.len==0 and not data.tasks.hasTaskIntents:return nil
-  let d=ManagedDriver(data:data,count:data.count,componentCount:data.componentCount,bytes:data.bytes,root:data.root,globalRefresh:forceRoot)
+  let d=ManagedDriver(data:data,count:data.count,componentCount:data.componentCount,bytes:data.bytes,root:data.root,globalRefresh:forceRoot,editEpoch:base.editEpoch)
   try:
     d.taskFrame=data.tasks.sealTaskIntentsInternal()
     d.attempt=data.states.beginAttempt()
@@ -554,13 +700,18 @@ method stage*(base:ManagedDriver,forceRoot:bool):RuntimeDriver=
     raise
 method stageViewport*(base:ManagedDriver,key:string,first,finish:int,protected:seq[int]):RuntimeDriver=
   var d=base
-  if d.candidate==nil:
+  if d.commit==nil:
     let staged=base.stage(false)
     if staged!=nil:d=ManagedDriver(staged)
     else:
-      d=ManagedDriver(data:base.data,count:base.data.count,componentCount:base.data.componentCount,bytes:base.data.bytes,root:base.data.root)
+      d=ManagedDriver(data:base.data,count:base.data.count,componentCount:base.data.componentCount,bytes:base.data.bytes,root:base.data.root,editEpoch:base.editEpoch)
       d.taskFrame=d.data.tasks.sealTaskIntentsInternal()
       d.attempt=d.data.states.beginAttempt()
+  else:
+    # A second viewport edit invalidates the previously sealed patch: discard
+    # it and prepare again from the same accepted maps.
+    d.discardPreparedCommit()
+    inc d.editEpoch
   try:
     var target:Instance
     for item in d.edits.values:
@@ -568,8 +719,10 @@ method stageViewport*(base:ManagedDriver,key:string,first,finish:int,protected:s
     if target==nil:
       var id=d.data.index.getOrDefault(key)
       if id==0:
-        if not d.data.keys.hasKey(key) or d.data.keys[key].len!=1:fail("unknown or ambiguous list")
-        for found in d.data.keys[key]:id=found
+        let summary=d.data.keys.getOrDefault(key)
+        if summary.count==0:fail("unknown list")
+        if not summary.isUnique:fail("ambiguous list")
+        id=summary.uniqueId
       target=d.current(id)
     if target==nil or target.description.hostNode.kind!=NodeKind.virtualList:fail("not a virtual list")
     target=target.copyInstance()
@@ -580,50 +733,79 @@ method stageViewport*(base:ManagedDriver,key:string,first,finish:int,protected:s
   except CatchableError:
     d.reject()
     raise
-proc removeIndex(data:ManagedStore,item:Instance) {.raises:[].}=
-  if item.description.kind!=DescriptionKind.host or not item.active:return
-  data.index.del(item.path)
-  let key=item.description.key
-  if key.len>0:
-    if data.keys.hasKey(key):
-      data.keys.mgetOrPut(key,default(HashSet[uint64])).excl(item.id)
-      if data.keys.mgetOrPut(key,default(HashSet[uint64])).len==0:data.keys.del(key)
 method publish*(d:ManagedDriver) {.raises:[].}=
-  if d.candidate==nil:return
+  let commit=d.commit
+  if commit==nil:return
   let data=d.data
-  for id,item in d.edits:
-    let old=data.instances.getOrDefault(id)
-    if old!=nil:data.removeIndex(old)
-    if item==nil:
-      data.instances.del(id);data.states.disposeOwner(id)
-    else:data.instances[id]=item
-  for id,item in d.edits:
-    if item!=nil and item.active and item.description.kind==DescriptionKind.host:
-      data.index[item.path]=id
-      let key=item.description.key
-      if key.len>0:data.keys.mgetOrPut(key,default(HashSet[uint64])).incl(id)
-  data.reconciler.publish(d.candidate)
-  data.states.publishAttempt(d.attempt)
-  data.tasks.publishTasks(d.taskAttempt)
-  # Apply only the prepared token delta; unrelated registrations are untouched.
-  for token,owner in d.preparedOutlets:
-    if owner==0:data.outlets.del(token)
-    else:data.outlets[token]=owner
+  when defined(leafProtocolProbes) and defined(nimAllocStats):
+    let before=probeAllocCount()
+  # Move-only publication of every prepared accepted patch. Replaced values
+  # are retired inside the patches and released by `finishCommit` once the
+  # whole Runtime/State/host/revision acceptance has completed. The epoch was
+  # validated before the external apply; a mismatch here is a fail-stop defect.
+  doAssert commit.editEpoch==d.editEpoch, "managed commit epoch mismatch"
+  data.instances.publishValidated(commit.instancePatch)
+  data.index.publishValidated(commit.indexPatch)
+  data.keys.publishValidated(commit.keyPatch)
+  data.reconciler.publish(commit.candidate)
+  data.states.publishAttempt(commit.stateAttempt)
+  for plan in commit.stateRetire:publishDisposeOwner(plan)
+  data.tasks.publishTasks(commit.taskAttempt)
+  data.outlets.publishValidated(commit.outletPatch)
+  commit.published=true
+  when defined(leafProtocolProbes) and defined(nimAllocStats):
+    managedPublishAllocations=probeAllocCount()-before
   data.root=d.root;data.count=d.count;data.componentCount=d.componentCount;data.bytes=d.bytes
   if not d.metadataOnly:
     data.snapshotValid=d.exported.isSome
     if d.exported.isSome:data.snapshot=d.exported.get
-  let h=d.candidate.stats
+  let h=commit.candidate.stats
   data.totals.componentRenders+=d.measurements.componentRenders
   data.totals.normalizedHosts+=d.measurements.normalizedHosts
   data.totals.visitedHosts+=h.visitedHosts
   data.totals.indexEdits+=h.indexEdits
   data.totals.ops+=h.ops
-  d.edits.clear();d.changes=default(HostChanges);d.candidate=nil;d.attempt=nil
+  d.edits.clear();d.changes=default(HostChanges);d.attempt=nil;d.hostPlan=nil
   d.created.setLen(0);d.computed.clear();d.dirty.clear()
   d.taskAttempt=nil
   d.taskFrame=nil
+  d.outletRemovals.setLen(0);d.outletUpserts.setLen(0)
+
+method validateCommit*(d:ManagedDriver)=
+  ## Apply-time validation: a sealed commit must still belong to this driver
+  ## epoch and every prepared accepted-map patch must match the live map.
+  let commit=d.commit
+  if commit==nil:return
+  if commit.editEpoch!=d.editEpoch:fail("stale prepared commit epoch")
+  let data=d.data
+  data.reconciler.validate(commit.candidate)
+  if commit.instancePatch!=nil:data.instances.validatePrepared(commit.instancePatch)
+  if commit.indexPatch!=nil:data.index.validatePrepared(commit.indexPatch)
+  if commit.keyPatch!=nil:data.keys.validatePrepared(commit.keyPatch)
+  if commit.outletPatch!=nil:data.outlets.validatePrepared(commit.outletPatch)
+  for plan in commit.stateRetire:validateDisposeOwner(plan)
+  if commit.stateAttempt!=nil:data.states.validateAttempt(commit.stateAttempt)
+  if commit.taskAttempt!=nil:data.tasks.validateTaskPatch(commit.taskAttempt)
+
+method finishCommit*(d:ManagedDriver) {.raises:[].}=
+  ## Whole commit accepted (revision/State/host/tasks). Still inside the
+  ## Runtime reentry guard, release retired values and finished attempts.
+  let commit=d.commit
+  if commit==nil or not commit.published:return
+  d.data.reconciler.finishPublish(commit.candidate)
+  finishPublished(commit.instancePatch)
+  finishPublished(commit.indexPatch)
+  finishPublished(commit.keyPatch)
+  finishPublished(commit.outletPatch)
+  for plan in commit.stateRetire:finishDisposeOwner(plan)
+  if commit.stateAttempt!=nil:d.data.states.finishAttempt(commit.stateAttempt)
+  if commit.taskAttempt!=nil:d.data.tasks.finishTasks(commit.taskAttempt)
+  commit.stateAttempt=nil
+  commit.taskAttempt=nil
+  d.commit=nil
+
 method reject*(d:ManagedDriver) {.raises:[].}=
+  d.discardPreparedCommit()
   d.data.tasks.rejectTaskIntentsInternal(d.taskFrame)
   d.taskFrame=nil
   d.data.tasks.rejectTasks(d.taskAttempt)
@@ -632,14 +814,15 @@ method reject*(d:ManagedDriver) {.raises:[].}=
   d.data.states.clearQueued()
   d.data.invalid.clear()
   for owner in d.created:d.data.states.disposeOwner(owner)
-  d.edits.clear();d.candidate=nil;d.attempt=nil;d.created.setLen(0)
-  d.preparedOutlets.clear()
+  d.edits.clear();d.attempt=nil;d.hostPlan=nil;d.created.setLen(0)
+  d.outletRemovals.setLen(0);d.outletUpserts.setLen(0)
 proc lookup(data:ManagedStore,key:string):Instance=
   var id=data.index.getOrDefault(key)
   if id==0:
-    if not data.keys.hasKey(key):fail("node key not found: " & key)
-    if data.keys[key].len!=1:fail("ambiguous key: " & key & "; use full node ID")
-    for found in data.keys[key]:id=found
+    let summary=data.keys.getOrDefault(key)
+    if summary.count==0:fail("node key not found: " & key)
+    if not summary.isUnique:fail("ambiguous key: " & key & "; use full node ID")
+    id=summary.uniqueId
   data.instances.getOrDefault(id)
 proc exportNode(d:ManagedDriver,id:uint64,rowIndex= -1):MountedNode=
   let item=d.current(id)
@@ -655,7 +838,7 @@ proc exportNode(d:ManagedDriver,id:uint64,rowIndex= -1):MountedNode=
     mountedDescription(item.description.hostNode,item.path,children,itemIndex=index)
 method exportSnapshot*(d:ManagedDriver):Snapshot=
   if d.metadataOnly and d.data.snapshotValid:return d.data.snapshot
-  if d.candidate!=nil:
+  if d.commit!=nil:
     let config=d.data.owner.applicationConfig
     if d.exported.isNone:
       inc d.data.totals.snapshotExports
@@ -685,8 +868,11 @@ method invokeAccepted*(d:ManagedDriver,key:string,event:Event):bool=
   handler(event)
   true
 method stats*(d:ManagedDriver):PerformanceStats=
+  ## mountedNodes keeps the public "host nodes in the accepted tree" meaning;
+  ## component instances are structural and reported through renders/bytes.
   PerformanceStats(renders:d.data.totals.componentRenders,builtNodes:d.data.totals.normalizedHosts,
-    mountedNodes:d.data.count,treeBytes:d.data.bytes+d.data.tasks.pendingTaskBytesInternal)
+    mountedNodes:d.data.count-d.data.componentCount,
+    treeBytes:d.data.bytes+d.data.tasks.pendingTaskBytesInternal)
 method configureTaskPumpDriverInternal*(d:ManagedDriver,supported:bool)=
   d.data.tasks.configureTaskServiceInternal(supported)
 method retireTaskPoolDriverInternal*(d:ManagedDriver)=
@@ -737,10 +923,13 @@ proc componentApplication*(root:UiDescription,title:string,width=640,height=480,
   if root==nil:fail("component application needs a root")
   newDriverApplication(title,width,height,proc(owner:Runtime):RuntimeDriver=
     inc nextManagedId
-    let data=ManagedStore(owner:owner,states:newStateStore(owner.runtimeIdentity),
+    let identity=owner.runtimeIdentity
+    let data=ManagedStore(owner:owner,states:newStateStore(identity),
       reconciler:newHostReconciler(nextManagedId),rootDescription:root,nextId:1,
-      instances:initTable[uint64,Instance](MaxNodes*4),index:initTable[string,uint64](MaxNodes*4),
-      keys:initTable[string,HashSet[uint64]](MaxNodes*4),outlets:initTable[uint64,uint64](MaxNodes*2))
+      instances:initCommitMap[uint64,Instance](identity),
+      index:initCommitMap[string,uint64](identity),
+      keys:initCommitMap[string,KeySummary](identity),
+      outlets:initCommitMap[uint64,uint64](identity))
     data.tasks=newTaskService(owner,data.states)
     ManagedDriver(data:data),executionScope)
 proc managed*(runtime:Runtime):bool=runtime.runtimeDriver of ManagedDriver
@@ -748,7 +937,11 @@ proc managedReconciler*(runtime:Runtime):HostReconciler=
   if not runtime.managed:fail("runtime is not managed")
   ManagedDriver(runtime.runtimeDriver).data.reconciler
 proc hostCandidate*(runtime:Runtime):HostCandidate=
-  if runtime.managed:ManagedDriver(runtime.runtimeDriver).candidate else:nil
+  if runtime.managed:
+    let d=ManagedDriver(runtime.runtimeDriver)
+    if d.commit!=nil:return d.commit.candidate
+    return d.hostPlan
+  nil
 proc updateStats*(runtime:Runtime):UpdateStats=
   if runtime.managed:ManagedDriver(runtime.runtimeDriver).data.totals else:default(UpdateStats)
 proc invalidateRoot*(runtime:Runtime)=

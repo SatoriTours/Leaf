@@ -1,6 +1,7 @@
 import ./cleanup_support
 import std/[unittest, os, osproc, tempfiles, json, strutils, times]
 import leaf
+import ../fixture_app
 import leaf/[diagnostics, build, doctor, project, gpui_build]
 import ../../examples/counter
 
@@ -36,10 +37,9 @@ suite "Nim diagnostics and build pipeline":
     let log = root / "failure.jsonl"
     let d = newDiagnostics(logFile = log, dumpFile = dump)
     defer: d.close()
-    let rt = newRuntime(Application(title: "Errors", width: 100, height: 100,
-      render: proc(ctx: BuildContext): Node =
-        if broken: raise newException(ValueError, "failed render")
-        text("retained")), diagnostics = d)
+    let rt = newRuntime(fixtureApplication(proc(): Node =
+      if broken: raise newException(ValueError, "failed render")
+      text("retained"), "Errors", 100, 100), diagnostics = d)
     let before = readFile(dump)
     broken = true
     expect ValueError: discard rt.refresh()
