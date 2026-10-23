@@ -1,4 +1,5 @@
 import ./cleanup_support
+import ./scaffold_headless_support
 import std/[unittest, os, json, monotimes, strutils, tempfiles, tables, strtabs, algorithm, times]
 import leaf/[project, package_files, process_io, build, scaffold, scaffold_files, scaffold_types, sqlite]
 import leaf_cli
@@ -48,23 +49,6 @@ proc runCliIn(root: string, args: seq[string]): int =
   try: return leaf_cli.main(args)
   finally: setCurrentDir(previous)
 
-proc writeHeadlessRows(app: string) =
-  # Native templates use lazy lists; this fixture supplies their small viewport.
-  writeFile(app / "tests/headless_rows.nim", """
-import leaf
-proc realizeRows*(rt: Runtime) =
-  var lists: seq[tuple[key: string, count: int]]
-  proc collect(node: MountedNode) =
-    if node.node.kind == virtualList:
-      lists.add((node.node.key, node.node.listSource.len))
-    for child in node.children: collect(child)
-  collect(rt.snapshot.root)
-  for list in lists:
-    discard rt.materialize(list.key, 0, list.count)
-proc dispatchFixture*(rt: Runtime, key: string, event: Event): bool =
-  result = rt.dispatch(key, event)
-  rt.realizeRows()
-""")
 
 suite "Application and resource scaffolding":
   when defined(macosx):

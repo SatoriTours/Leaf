@@ -1,4 +1,5 @@
 import ./cleanup_support
+import ./scaffold_headless_support
 import std/[unittest, os, json, tempfiles, strutils, monotimes, times]
 import leaf/[project, scaffold, core, build, process_io, orm_config]
 
@@ -79,6 +80,7 @@ suite "generated Android project entries":
     createDir(root)
     discard generateScaffold(ScaffoldOptions(mode: smApplication), root)
     discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Note", fields: @["title:string"]), root)
+    writeHeadlessRows(root)
     runGenerated(root, ResourcesProbe)
 
   test "init factory renders host resources and leaves the host owner usable":

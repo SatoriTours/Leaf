@@ -1,4 +1,5 @@
 import ./cleanup_support
+import ./scaffold_headless_support
 import std/[unittest, os, tempfiles, strtabs]
 import leaf/[scaffold, build, process_io]
 
@@ -12,17 +13,19 @@ suite "generated page rejection isolation":
     discard generateScaffold(ScaffoldOptions(mode: smApplication), app)
     discard generateScaffold(ScaffoldOptions(mode: smResource, target: "Note",
       fields: @["title:string"]), app)
+    writeHeadlessRows(app)
     let probe = app / "tests/rejection.nim"
     writeFile(probe, """
 import std/strutils
 import leaf
 import leaf/host_session
 import ../app/application
+import ./headless_rows
 import ../config/database
 let db = openApplicationDatabase(":memory:")
 let rt = newRuntime(createApplication(db))
-proc click(key: string) = doAssert rt.dispatch(key, Event(kind: click))
-proc change(key, value: string) = doAssert rt.dispatch(key, Event(kind: change, value: value))
+proc click(key: string) = doAssert rt.dispatchFixture(key, Event(kind: click))
+proc change(key, value: string) = doAssert rt.dispatchFixture(key, Event(kind: change, value: value))
 # Model home: a rejected draft cannot be submitted by the next accepted add.
 change("task_draft", "home baseline")
 var homeReject = false

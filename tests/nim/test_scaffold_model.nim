@@ -1,4 +1,5 @@
 import ./cleanup_support
+import ./scaffold_headless_support
 import std/[unittest, os, tempfiles, json, strutils, strtabs]
 import leaf/[scaffold, sqlite, model, build, process_io]
 
@@ -122,16 +123,18 @@ suite "model scaffold versions":
     declaration = declaration.replace("defineModel(Note,", "proc notify(record: Note, event: ModelEvent) =\n  raise newException(ValueError, \"notification unavailable\")\n\ndefineModel(Note,")
     declaration = declaration.replace("  beforeValidation normalize", "  beforeValidation normalize\n  afterCommit notify")
     writeFile(modelPath, declaration)
+    writeHeadlessRows(app)
     let testPath = app / "tests/notifications.nim"
     writeFile(testPath, """
 import std/strutils
 import leaf
 import ../app/application
+import ./headless_rows
 import ../config/database
 let db = openApplicationDatabase(":memory:")
 let rt = newRuntime(createApplication(db))
-proc click(key: string) = doAssert rt.dispatch(key, Event(kind: click))
-proc change(key, value: string) = doAssert rt.dispatch(key, Event(kind: change, value: value))
+proc click(key: string) = doAssert rt.dispatchFixture(key, Event(kind: click))
+proc change(key, value: string) = doAssert rt.dispatchFixture(key, Event(kind: change, value: value))
 click("nav_notes")
 click("notes_new")
 change("notes_field_title", "Committed note")
