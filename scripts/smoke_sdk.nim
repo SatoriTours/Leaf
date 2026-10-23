@@ -139,6 +139,13 @@ proc smokeSdk*(sdkPath: string, headlessOnly = false) =
   createDir(project)
   proc run(arguments: varargs[string]): string =
     checkedCommand(cli, @arguments, project, environment)
+  proc readList(directory, key: string, navigation: varargs[string]): string =
+    var arguments = @["--headless"] & @navigation
+    when defined(windows):
+      # Native scaffold rows are lazy. Select a bounded viewport before using
+      # the snapshot as the cross-process persistence oracle.
+      arguments.add(@["--list", key, "0", "1"])
+    checkedCommand(cli, arguments, directory, environment)
   stdout.write(run("--version"))
   let metadata = parseFile(sdk / "sdk.json")
   require(metadata["channel"].getStr in run("--version"), "SDK channel missing from version output")
@@ -166,11 +173,11 @@ proc smokeSdk*(sdkPath: string, headlessOnly = false) =
   require(fileExists(binary), "Application binary was not created")
   let taskText = "SDK 中文持久化"
   discard run("--headless", "--change", "task_draft", taskText, "--click", "task_add")
-  require(taskText in run("--headless"), "Task was not persisted across processes")
+  require(taskText in readList(project, "task_list"), "Task was not persisted across processes")
   let noteText = "SDK second model"
   discard run("--headless", "--click", "nav_notes", "--click", "notes_new",
     "--change", "notes_field_title", noteText, "--click", "notes_save")
-  require(noteText in run("--headless", "--click", "nav_notes"), "Note was not persisted")
+  require(noteText in readList(project, "notes_list", "--click", "nav_notes"), "Note was not persisted")
   for test in ["test_home", "test_notes"]:
     let fixture = isolatedFixtureCommand(sdk, project, test)
     discard checkedCommand(fixture.exe, fixture.args, project, environment)
@@ -186,7 +193,7 @@ proc smokeSdk*(sdkPath: string, headlessOnly = false) =
   createDir(otherProject)
   discard checkedCommand(cli, @["g", "scaffold"], otherProject, environment)
   discard checkedCommand(cli, @["--headless", "--change", "task_draft", "Independent application", "--click", "task_add"], otherProject, environment)
-  require("Independent application" in checkedCommand(cli, @["--headless"], otherProject, environment), "Second application did not persist")
+  require("Independent application" in readList(otherProject, "task_list"), "Second application did not persist")
   echo "SDK relocation + offline model CRUD and persistence passed"
 
 when isMainModule:
