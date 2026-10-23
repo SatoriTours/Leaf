@@ -1,5 +1,6 @@
 ## Environment inspection never initializes a display or requires a project.
 import std/[os, json, monotimes, times, options]
+import ./android_tools
 import ./[build, gpui_api, process_io, sdk, targets]
 
 proc version(exe: string, args: seq[string]): JsonNode =
@@ -23,6 +24,12 @@ proc doctorReport*(selection: Option[BuildSelection] = none(BuildSelection)): Js
   try: nim = compiler()
   except CatchableError: discard
   let selected = selection.get(resolveBuild(backendGpui))
+  if selected.target == "android":
+    result=androidDoctorReport()
+    result["nim"] = %nim
+    result["nim_version"] = version(nim,@["--version"])
+    if nim.len==0:result["host_available"] = %false
+    return
   if selected.backend == backendNative or selected.headlessOnly:
     let bundled = sdkGcc()
     let gcc = if bundled.len > 0: bundled else: findExe("gcc")

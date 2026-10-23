@@ -39,6 +39,12 @@ type
     lParam*: LPARAM
     time*: DWORD
     pt*: POINT
+  SCROLLINFO* = object
+    cbSize*: UINT
+    fMask*: UINT
+    nMin*, nMax*: int32
+    nPage*: UINT
+    nPos*, nTrackPos*: int32
   WNDCLASSEXW* = object
     cbSize*, style*: UINT
     lpfnWndProc*: WNDPROC
@@ -70,6 +76,21 @@ const
   WM_APP* = 0x8000'u32
   WM_HOST_TICK* = WM_APP + 17
   WM_HOST_TASK_TICK* = WM_APP + 18
+  WM_VSCROLL* = 0x0115'u32
+  WM_MOUSEWHEEL* = 0x020A'u32
+  WHEEL_DELTA* = 120'i32
+  SB_LINEUP* = 0
+  SB_LINEDOWN* = 1
+  SB_PAGEUP* = 2
+  SB_PAGEDOWN* = 3
+  SB_THUMBPOSITION* = 4
+  SB_THUMBTRACK* = 5
+  SB_TOP* = 6
+  SB_BOTTOM* = 7
+  SB_ENDSCROLL* = 8
+  SB_HORZ* = 0
+  SB_VERT* = 1
+  SB_CTL* = 2
   GWLP_USERDATA* = -21'i32
   PM_REMOVE* = 1'u32
   WS_OVERLAPPEDWINDOW* = 0x00CF0000'u32
@@ -159,6 +180,7 @@ const
   WM_SETTEXT* = 0x000C'u32
   WS_CHILD* = 0x40000000'u32
   WS_TABSTOP* = 0x00010000'u32
+  WS_VSCROLL* = 0x00200000'u32
   WS_CLIPCHILDREN* = 0x02000000'u32
   WS_CLIPSIBLINGS* = 0x04000000'u32
   WS_BORDER* = 0x00800000'u32
@@ -182,6 +204,15 @@ const
   PBM_SETMARQUEE* = 0x040A'u32
   SW_HIDE* = 0'i32
   GWL_STYLE* = -16'i32
+  GWL_ID* = -12'i32
+  SIF_RANGE* = 0x0001'u32
+  SIF_PAGE* = 0x0002'u32
+  SIF_POS* = 0x0004'u32
+  SIF_DISABLENOSCROLL* = 0x0008'u32
+  SIF_TRACKPOS* = 0x0010'u32
+  SIF_ALL* = 0x0017'u32
+  SPI_GETWHEELSCROLLLINES* = 0x0068'u32
+  WHEEL_PAGESCROLL* = 0xFFFFFFFF'i32
   SPI_GETNONCLIENTMETRICS* = 0x0029'u32
   DT_WORDBREAK* = 0x0010'u32
   DT_CALCRECT* = 0x0400'u32
@@ -197,6 +228,10 @@ proc EnableWindow*(window: HWND, enabled: BOOL): BOOL
 proc IsWindowEnabled*(window: HWND): BOOL
 proc IsWindowVisible*(window: HWND): BOOL
 proc GetParent*(window: HWND): HWND
+proc GetScrollInfo*(window: HWND, bar: int32, info: ptr SCROLLINFO): BOOL
+proc SetScrollInfo*(window: HWND, bar: int32, info: ptr SCROLLINFO, redraw: BOOL): int32
+proc GetFocus*(): HWND
+proc SetFocus*(window: HWND): HWND
 proc GetDlgCtrlID*(window: HWND): int32
 proc GetWindowRect*(window: HWND, rect: ptr RECT): BOOL
 proc EnumChildWindows*(parent: HWND, callback: WNDENUMPROC, data: LPARAM): BOOL

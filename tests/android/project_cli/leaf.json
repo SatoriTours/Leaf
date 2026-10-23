@@ -1,0 +1,15 @@
+{
+  "name": "Android 项目 中文😀",
+  "identifier": "dev.leaf.projectcli",
+  "version": "1.2.3",
+  "entry": "src/main.nim",
+  "include": [
+    "src",
+    "assets"
+  ],
+  "platforms": {
+    "android": {
+      "entry": "src/mobile.nim"
+    }
+  }
+}

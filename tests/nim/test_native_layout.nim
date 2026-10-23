@@ -262,8 +262,9 @@ suite "Win32 capability boundary":
     let caps = win32Capabilities()
     check cfInputReset in caps.controls
     check caps.kinds == {column, row, text, button, input, checkbox, toggle,
-      progress, tag, separator, spinner}
-    check NodeKind.virtualList notin caps.kinds
+      progress, tag, separator, spinner, virtualList, navigation}
+    check NodeKind.virtualList in caps.kinds
+    check NodeKind.navigation in caps.kinds
     check caps.layouts == {lfGap, lfPadding, lfWidth, lfHeight, lfFlexGrow,
       lfAlign, lfJustify, lfOverflow}
     check lfMinMax notin caps.layouts
@@ -275,11 +276,10 @@ suite "Win32 capability boundary":
     check caps.decorations == {}
     check caps.variants == {variantDefault}
 
-  test "win32 rejects unsupported required kinds and layout values":
+  test "win32 accepts native lists and rejects unsupported required layout values":
     let caps = win32Capabilities()
-    expect UiError:
-      discard checkCapabilities(mount(virtualList("l", @["a"],
-        proc(index: int): Node = text("r"))), caps, compatible)
+    check checkCapabilities(mount(virtualList("l", @["a"],
+      proc(index: int): Node = text("r"))), caps, compatible).len == 0
     expect UiError:
       discard checkCapabilities(mount(column(@[], styles = style({"min_width": "10"}))),
         caps, compatible)

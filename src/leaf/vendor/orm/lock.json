@@ -75,7 +75,16 @@
       "file": "src/db_connector/sqlite3.nim",
       "patch": "db_connector-library.patch",
       "original_sha256": "72b29e5ed0147c652e1307502cad7d3b83e9096dc1549a03e641f6e37fc3da94",
-      "patched_sha256": "b45bd03260d607b4c31da82167d3bf88efe4733246333a877f8f175659f22a3a"
+      "patched_sha256": "419902892c6e63f4b5193f1966dec2267078fb04604aa2cc4d368bbc7e6a6d22",
+      "patch_sha256": "e7d68e050a0e50b9443cce6f7e0c0dd59a15d640eba47f9eda4746e7bd4f0505"
+    },
+    {
+      "package": "lowdb",
+      "file": "src/lowdb/wrappers/sqlite3.nim",
+      "patch": "lowdb-sqlite-link.patch",
+      "original_sha256": "a29d194a4663de04dfc3774affd7398ec513880c5f049ccdc3eb73cfdc6481e8",
+      "patched_sha256": "fee336d61caacb3d5e2d5a5e8c2bc6fd2dd329698c00b979d41b6973734f5eed",
+      "patch_sha256": "e694ce30b6931d342481be179d60e57db8999cadd9cb82a0edd563f0a3a944ee"
     }
   ]
 }

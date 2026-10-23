@@ -2,7 +2,7 @@
 ## Session; all such work runs after native dispatch at an ordinary Nim boundary.
 import std/[tables, unicode, math, atomics]
 import ../../[core, backend, backend_session, native_layout, windows_dpi]
-import ./[api, calls, host_state, host_bridge]
+import ./[api, calls, host_state, host_bridge, navigation_input]
 export host_bridge
 
 type
@@ -241,11 +241,11 @@ proc windowProc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.
       of WM_SETTINGCHANGE, WM_THEMECHANGED:
         if host.lease != nil: host.bridge.invalidate(host.ctx, {fontChanged, themeChanged})
         host.wake()
-      of WM_COMMAND:
+      of WM_COMMAND, BackSysKeyDown, BackAppCommand:
         if host.lease != nil and host.session != nil and not host.close.pending and
             host.bridge.matchesSession(host.session) and host.bridge.capture(window, message, wp, lp):
           host.wake()
-          return 0
+          return if message == BackAppCommand: 1 else: 0
       of WM_HOST_TICK:
         host.close.posted = host.timer != 0
         host.needsTick = true

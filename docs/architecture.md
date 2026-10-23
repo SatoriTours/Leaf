@@ -106,7 +106,11 @@ GPUI 为组件边界持有 Entity，普通宿主叶节点直接从平铺表渲�
 
 ## 托管页面路由与保留生命周期
 
-`component_routing.nim` 在组件 initialize 中建立不可变地址配置和归属该组件的 `State[int]`；`renderPage` 依据 render 候选地址返回第三类描述 `DescriptionKind.pageOutlet`。出口实例保存页面名到根实例 id 的共享注册表以及当前活动子实例；注册表写入前复制，候选失败不改动接受态。`managed_runtime` 在 reconcile 中复用既有停用/恢复/递归擦除辅助：`retainState` 离开时停用页面子树并移出活动宿主与事件索引，返回时用原组件身份重建宿主；`disposeOnLeave` 离开被接受后递归擦除；整组保留页、暖行和嵌套 controller 在外部 router 卸载时一并释放。隐藏页只保留 Nim 模型与 State，不建立宿主。
+`component_routing.nim` 在组件 initialize 中建立不可变地址配置和归属该组件的 `State[NavigationState]`；`navigation_state.nim` 保存有界、独立快照的路由索引/条目身份历史，push/replace/pop 通过普通 updater 折叠，navigate 保持不增长历史的选择语义。`renderPage` 依据 render 候选地址返回第三类描述 `DescriptionKind.pageOutlet`。出口实例保存页面名到根实例 id 的共享注册表以及当前活动子实例；注册表写入前复制，候选失败不改动接受态。`managed_runtime` 在 reconcile 中复用既有停用/恢复/递归擦除辅助：`retainState` 离开时停用页面子树并移出活动宿主与事件索引，返回时用原组件身份重建宿主；`disposeOnLeave` 离开被接受后递归擦除；整组保留页、暖行和嵌套 controller 在外部 router 卸载时一并释放。隐藏页只保留 Nim 模型与 State，不建立宿主。
+
+返回请求账本与 accepted history 分开：它只保存有界、无闭包的 router/request/revision/from/to/depth 提案；取消及完成消费不会直接发布历史。确认成功入普通队列后消费外部 request，即使候选失败也拒绝旧完成重试；历史 revision 改变会失效旧提案。该账本使用 State 的 UI 线程与执行 Runtime 归属检查，但不是 State 值的一部分；应用不能借另一 Runtime 的执行 scope 修改它。原生 session/mount 门、容器与动画仍由后续平台接线完成。
+
+原生出口显式采用 `renderNavigation`，以 navigation typed sidecar 贯穿 Node、HostProps、HostRecord/HostOp、MountedEntity/UpdateOp 与 accepted replay；元数据单独变化也产生更新。共享图和原始 native consumer 均要求 navigation 元数据与节点类型一致，且恰有一个活动页。BackendSession 的原生返回账本只登记事实，确认按 requestId 在普通事件顺序中 claim，避免独立 drain 改变点击与返回的先后关系；清理、取消、失败恢复和生命周期门均不在 publish 中执行业务。Android ABI5/LAV5 在每项操作的 list/row 字段后添加 typed navigation sidecar，通过固定 96 字节 C back fact 记录 begin/cancel/confirm，JNI 不直接执行业务。LeafView 使用一个 FrameLayout 活动页容器，LeafActivity 在前台且 accepted depth>1 时注册默认优先级系统返回；多容器目标不明确时不拦截，根返回交给 Activity。请求计数归 retained LeafRuntime，跨 Activity 重建递增；事件仍共用原全局 sequence。API34 动画回调只传事实，不实现转场或动画完成提交。Win32 以同一 typed sidecar 创建活动页容器，并在普通 UI turn 采集 Alt+Left / WM_APPCOMMAND 返回事实；accepted 身份与重挂载失效门已接通。当前限定验收不覆盖物理键盘、自然 IME、多栈或动画。
 
 配置字节、registry 键、页面实例和列表暖行全部计入既有 `MaxNodes`/组件上限/`MaxTreeBytes`/`MaxDepth` 预算。router 的 `configurationBytes` 在组件初始化时通过 MountContext 记账并按 owner 保留一次，初始化帧在成功和异常退出时都会关闭，已关闭上下文不能再次计费；renderPage 的出口显式使用 0 以避免重复计费。registry 的字节量缓存在出口实例上，只在登记新增或删除时调整；已有 page 的根 id 替换只更新值，不增加条目费用。正常重访不扫描键。
 

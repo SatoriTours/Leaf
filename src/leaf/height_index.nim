@@ -23,6 +23,18 @@ proc initHeightIndex*(count: int, estimate: float64): HeightIndex =
     result.heights[i] = estimate
     result.sums[i + 1] = estimate * float64((i + 1) and -(i + 1))
 
+proc cloneHeightIndex*(index: HeightIndex): HeightIndex =
+  ## Explicit deep copy of both private sequences. A measurement candidate must
+  ## never share storage with the accepted index: mutating the copy leaves the
+  ## original heights/prefix/total untouched and vice versa. One O(count) copy
+  ## per affected list per attempt; never per row.
+  if index.heights.len == 0:
+    return HeightIndex()
+  result.heights = newSeq[float64](index.heights.len)
+  for i in 0 ..< index.heights.len: result.heights[i] = index.heights[i]
+  result.sums = newSeq[float64](index.sums.len)
+  for i in 0 ..< index.sums.len: result.sums[i] = index.sums[i]
+
 proc len*(index: HeightIndex): int = index.heights.len
 proc height*(index: HeightIndex, row: int): float64 = index.heights[row]
 

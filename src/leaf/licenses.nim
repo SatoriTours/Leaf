@@ -1,5 +1,5 @@
 ## Embedded license texts make the installed packager independent of its checkout.
-import std/[os, json, strutils]
+import std/[os, json]
 import ./checksum
 const
   LeafLicense = staticRead("../../LICENSE")
@@ -11,6 +11,8 @@ const
   NormLicense = staticRead("vendor/orm/norm/LICENSE")
   LowdbLicense = staticRead("vendor/orm/lowdb/LICENSE.MIT")
   ConnectorLicense = staticRead("vendor/orm/db_connector/LICENSE")
+  SqliteLicense = staticRead("vendor/sqlite/LICENSE.txt")
+  SqliteManifest = staticRead("vendor/sqlite/manifest.json")
   Provenance = staticRead("vendor/provenance.json")
 
 proc collectLicenses*(destination: string) =
@@ -25,7 +27,14 @@ proc collectLicenses*(destination: string) =
   writeFile(destination / "orm/lowdb-LICENSE.txt", LowdbLicense)
   writeFile(destination / "orm/db_connector-LICENSE.txt", ConnectorLicense)
   writeFile(destination / "orm/lock.json", OrmLock)
+  createDir(destination / "sqlite")
+  writeFile(destination / "sqlite/LICENSE.txt", SqliteLicense)
+  writeFile(destination / "sqlite/manifest.json", SqliteManifest)
   var inventory = parseJson(Provenance)
+  let sqlite = parseJson(SqliteManifest)
+  inventory["sqlite"] = %*{"version": sqlite["version"], "source": sqlite["source"],
+    "archive_sha256": sqlite["archiveSha256"], "license": sqlite["license"],
+    "license_file": "sqlite/LICENSE.txt"}
   inventory["orm"] = newJObject()
   for dependency in parseJson(OrmLock)["dependencies"]:
     let name = dependency["name"].getStr
@@ -53,3 +62,18 @@ proc verifyOrmSources*(sourceRoot: string) =
       let file = vendor / package / path
       if not fileExists(file) or sha256File(file) != expected:
         raise newException(ValueError, "ORM source checksum mismatch: " & package & "/" & path)
+  for patch in lock["patches"]:
+    let file = vendor / patch["patch"].getStr
+    if not fileExists(file) or sha256File(file) != patch["patch_sha256"].getStr:
+      raise newException(ValueError, "ORM patch checksum mismatch: " & patch["patch"].getStr)
+
+proc verifySqliteSources*(sourceRoot: string) =
+  ## The embedded manifest pins upstream bytes and the application build wrapper.
+  let vendor = sourceRoot / "leaf/vendor/sqlite"
+  if not fileExists(vendor / "manifest.json") or
+      readFile(vendor / "manifest.json") != SqliteManifest:
+    raise newException(ValueError, "SQLite source manifest differs from the packager")
+  for entry in parseJson(SqliteManifest)["files"]:
+    let file = vendor / entry["path"].getStr
+    if not fileExists(file) or sha256File(file) != entry["sha256"].getStr:
+      raise newException(ValueError, "SQLite source checksum mismatch: " & entry["path"].getStr)

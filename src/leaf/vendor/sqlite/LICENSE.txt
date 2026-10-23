@@ -1,0 +1,3 @@
+SQLite is in the public domain.
+Source and copyright notice: https://sqlite.org/copyright.html
+The upstream source files retain their original public-domain notices.

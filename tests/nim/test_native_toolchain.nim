@@ -24,7 +24,11 @@ suite "explicit backend and headless toolchain selection":
     check resolveBuild(backendNative, backend="gpui").backend == backendGpui
     check resolveBuild(backendGpui, backend="native").backend == backendNative
     expect UiError: discard resolveBuild(backendGpui, backend="unknown")
-    expect UiError: discard resolveBuild(backendGpui, target="android")
+    check resolveBuild(backendGpui, target="android").backend == backendNative
+    check resolveBuild(backendNative, target="android").target == "android"
+    expect UiError: discard resolveBuild(backendGpui, target="android", backend="gpui")
+    expect UiError: discard resolveBuild(backendNative, target="android", headlessOnly=true)
+    expect UiError: discard resolveBuild(backendGpui, target="unknown")
   test "native configuration is strict and native packaging rejects before staging":
     let root = createTempDir("leaf-native-config-", "")
     defer: removeDir(root)

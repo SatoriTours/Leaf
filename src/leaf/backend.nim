@@ -5,8 +5,11 @@
 ## turns the validated typed properties from `styles.nim` into the exact data a
 ## native backend needs, and declares which of those properties that backend
 ## can honour. Callbacks, Node references and native pointers never appear here.
-import std/[tables, hashes, options]
-import ./[core, styles]
+import std/[tables, hashes, options, sets, unicode]
+import ./[core, styles, list_protocol, navigation_protocol]
+# `HostListProps` is a pure owned value; the backend stores the same type the
+# host wire uses, without importing `host_protocol` (which would be a cycle).
+export list_protocol, navigation_protocol
 
 type
   CapabilityMode* = enum
@@ -16,6 +19,16 @@ type
 
   NodeHandle* = distinct uint64
     ## Opaque, checked entity identity. Never a Nim object address.
+
+  NativeRowBinding* = object
+    ## Typed identity of one row root that is a direct child of a virtual list.
+    ## A pure owned value: the root handle is the record/op/entity handle, and
+    ## `itemIndex` is the list item index, never an active sibling position.
+    ## `none` means "does not carry a direct list row", not "delete a subtree".
+    listHandle*: NodeHandle
+    sourceGeneration*: uint64
+    itemIndex*: int
+    itemKey*: string
 
   CapabilityIssue* = object
     nodeId*: string
@@ -58,6 +71,11 @@ type
     nodeId*: string
     kind*: NodeKind
     props*: NormalizedProps
+    navigation*: Option[HostNavigationProps]
+    list*: Option[HostListProps]
+      ## Complete typed list description; `none` for ordinary controls.
+    row*: Option[NativeRowBinding]
+      ## Set only on a list's direct row root.
     index*: int
 
   UpdateKind* = enum
@@ -75,6 +93,18 @@ type
     nodeId*: string
     nodeKind*: NodeKind
     props*: NormalizedProps
+    navigation*: Option[HostNavigationProps]
+    list*: Option[HostListProps]
+      ## create/update carry the accepted list facts (`none` for ordinary
+      ## controls); move/remove never use it.
+    row*: Option[NativeRowBinding]
+      ## create/update/move carry the row binding of a list row root (`none`
+      ## otherwise). Nim-only sidecar: the GPUI wire encoder ignores it.
+
+  RowSlotTable* = Table[NodeHandle, tuple[indexes: HashSet[int],
+    keys: HashSet[string]]]
+    ## Per-list row slot accounting shared by the host reconciler and the native
+    ## adapter, so both gates apply the same uniqueness rule.
 
   HostChildOrder* = object
     parent*:NodeHandle
@@ -153,12 +183,40 @@ proc cmp*(a, b: NodeHandle): int = cmp(uint64(a), uint64(b))
 proc `$`*(handle: NodeHandle): string = $uint64(handle)
 proc raw*(handle: NodeHandle): uint64 = uint64(handle)
 
+proc rowBindingReason*(binding: NativeRowBinding, meta: HostListProps,
+                       parent, root: NodeHandle): string =
+  ## "" when one row binding is internally consistent for `parent`/`root`.
+  ## Shared by every gate so the shape rules cannot drift.
+  if binding.listHandle == NoHandle: return "row binding has no list handle"
+  if root == NoHandle: return "row binding has no row root"
+  if parent != binding.listHandle:
+    return "row root is not a direct child of its list"
+  if meta.sourceGeneration != binding.sourceGeneration:
+    return "row binding is stale for its list source"
+  if binding.itemIndex < 0 or binding.itemIndex >= meta.itemCount:
+    return "row index is outside its list source"
+  if binding.itemKey.len > MaxStringBytes: return "row key exceeds 1 MiB"
+  if validateUtf8(binding.itemKey) != -1: return "row key is not valid UTF-8"
+  ""
+
+proc reserveRowSlot*(slots: var RowSlotTable, binding: NativeRowBinding): string =
+  ## Reserve one (index, key) pair inside its list. Returns "" when it is free,
+  ## otherwise the structured reason; shared by both candidate gates.
+  var entry = slots.mgetOrPut(binding.listHandle,
+    (initHashSet[int](), initHashSet[string]()))
+  if binding.itemIndex in entry.indexes: return "duplicate row index in one list"
+  if binding.itemKey in entry.keys: return "duplicate row key in one list"
+  entry.indexes.incl(binding.itemIndex)
+  entry.keys.incl(binding.itemKey)
+  slots[binding.listHandle] = entry
+  ""
+
 proc fullCapabilities*(): BackendCapabilities =
   ## Capabilities of a backend that supports every A1 property. Backends should
   ## start from this and remove what they cannot honour.
   BackendCapabilities(
     kinds: {column, row, text, button, input, checkbox, toggle, progress, tag,
-      separator, spinner, virtualList},
+      separator, spinner, virtualList, navigation},
     layouts: {lfGap, lfPadding, lfWidth, lfHeight, lfFlexGrow, lfAlign,
       lfJustify, lfOverflow, lfMinMax, lfFlexShrink},
     alignments: {alignStart, alignEnd, alignCenter, alignStretch},

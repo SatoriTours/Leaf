@@ -3,7 +3,7 @@
 ## its maps are prepared before apply, so accept only moves values into the
 ## pre-sized maps. A full metadata Table is an explicit compatibility cost for
 ## backends without acceptedDelta and is built during prepare, never accept.
-import std/[tables,sets,algorithm]
+import std/[tables,sets,algorithm,options]
 import ./[core,backend,host_session,commit_map]
 var nextNativeConsumer:uint64=1000
 when defined(leafProtocolProbes):
@@ -62,10 +62,24 @@ proc nativeHostConsumer*(backend:Backend,sessionId=0'u64,
     for op in wire.ops:
       case op.kind
       of HostOpKind.create,HostOpKind.update:
+        if (op.nodeKind == NodeKind.navigation) != op.props.navigation.isSome:
+          fail("navigation metadata must belong to a navigation host")
+        if op.props.navigation.isSome:
+          let reason = op.props.navigation.get.invalidReason(MaxNodes)
+          if reason.len != 0: fail(reason)
+        if op.nodeKind != NodeKind.navigation and
+            (op.props.eventMask and EventBackMask) != 0:
+          fail("back handler requires a navigation host")
+        if op.props.list.isSome:
+          let reason=invalidReason(op.props.list.get,MaxListItems)
+          if reason.len!=0:fail("host list metadata rejected: " & reason)
         pendingIssues.add(checkTypedCapabilities(op.nodeId,op.nodeKind,op.props.normalized,backend.capabilities,mode))
         var entity=entities.getOrDefault(op.handle)
         entity.handle=op.handle;entity.parent=op.parent;entity.nodeId=op.nodeId;entity.kind=op.nodeKind
         entity.props=effectiveProps(backend.capabilities,op.props.normalized)
+        entity.navigation=op.props.navigation
+        entity.list=op.props.list
+        entity.row=op.row
         edits[op.handle]=entity
         if op.kind==HostOpKind.create:created.incl(op.handle)
       of HostOpKind.setChildren:pendingOrders.add(HostChildOrder(parent:op.handle,children:op.children))
@@ -81,14 +95,17 @@ proc nativeHostConsumer*(backend:Backend,sessionId=0'u64,
       let old=entities.getOrDefault(handle)
       if handle in created:
         batch.ops.add(UpdateOp(kind:opCreate,handle:handle,parent:entity.parent,index:entity.index,
-          nodeId:entity.nodeId,nodeKind:entity.kind,props:entity.props))
+          nodeId:entity.nodeId,nodeKind:entity.kind,props:entity.props,list:entity.list,navigation:entity.navigation,
+          row:entity.row))
       else:
-        if old.props!=entity.props:
+        if old.props!=entity.props or old.list!=entity.list or old.row!=entity.row or old.navigation!=entity.navigation:
           batch.ops.add(UpdateOp(kind:opUpdate,handle:handle,parent:entity.parent,index:entity.index,
-            nodeId:entity.nodeId,nodeKind:entity.kind,props:entity.props))
+            nodeId:entity.nodeId,nodeKind:entity.kind,props:entity.props,list:entity.list,navigation:entity.navigation,
+            row:entity.row))
         if old.parent!=entity.parent or old.index!=entity.index:
           batch.ops.add(UpdateOp(kind:opMove,handle:handle,parent:entity.parent,index:entity.index,
-            nodeId:entity.nodeId,nodeKind:entity.kind,props:entity.props))
+            nodeId:entity.nodeId,nodeKind:entity.kind,props:entity.props,list:entity.list,navigation:entity.navigation,
+            row:entity.row))
     proc depth(op:UpdateOp):int=
       var parent=op.parent
       while parent!=NoHandle:
@@ -105,6 +122,103 @@ proc nativeHostConsumer*(backend:Backend,sessionId=0'u64,
       cmp(depth(UpdateOp(parent:entities.getOrDefault(b).parent)),depth(UpdateOp(parent:entities.getOrDefault(a).parent))))
     for handle in removed:batch.ops.add(UpdateOp(kind:opRemove,handle:handle))
     batch.finalOrders=pendingOrders
+    # Candidate-only row gate on `entities + edits - removals`. A raw wire is not
+    # trusted: the shared shape rules and per-list slots are applied to the whole
+    # candidate child set, not only to the edited rows.
+    var childOrder:Table[NodeHandle,seq[NodeHandle]]
+    for order in pendingOrders:childOrder[order.parent]=order.children
+    var acceptedChildren:Table[NodeHandle,seq[NodeHandle]]
+    var acceptedChildrenBuilt=false
+    proc acceptedChildrenOf(parent:NodeHandle):seq[NodeHandle]=
+      if not acceptedChildrenBuilt:
+        acceptedChildrenBuilt=true
+        var indexed:Table[NodeHandle,seq[tuple[index:int,handle:NodeHandle]]]
+        for handle,entity in entities.pairs:
+          if handle in removed: continue
+          indexed.mgetOrPut(entity.parent,@[]).add((entity.index,handle))
+        for parentHandle,siblings in indexed.mpairs:
+          siblings.sort(proc(a,b:tuple[index:int,handle:NodeHandle]):int=cmp(a.index,b.index))
+          for item in siblings:acceptedChildren.mgetOrPut(parentHandle,@[]).add(item.handle)
+      acceptedChildren.getOrDefault(parent)
+    proc candidateEntity(handle:NodeHandle):MountedEntity=
+      if handle==NoHandle or handle in removed:return
+      if edits.hasKey(handle):edits.getOrDefault(handle) else:entities.getOrDefault(handle)
+    proc candidateChildren(parent:NodeHandle):seq[NodeHandle]=
+      if childOrder.hasKey(parent):return childOrder[parent]
+      for handle in acceptedChildrenOf(parent):
+        let current=candidateEntity(handle)
+        if current.handle!=NoHandle and current.parent==parent:result.add(handle)
+    var touched:HashSet[NodeHandle]
+    for handle,entity in edits:
+      if entity.kind==virtualList:touched.incl(handle)
+      else:touched.incl(entity.parent)
+      if entity.row.isSome:touched.incl(entity.row.get.listHandle)
+      let accepted=entities.getOrDefault(handle)
+      if accepted.row.isSome:touched.incl(accepted.row.get.listHandle)
+    for parent in childOrder.keys:touched.incl(parent)
+    var navigationTouched = touched
+    for handle, entity in edits:
+      navigationTouched.incl(handle)
+      navigationTouched.incl(entity.parent)
+      let old = entities.getOrDefault(handle)
+      if old.handle != NoHandle: navigationTouched.incl(old.parent)
+    for handle in removed:
+      let old = entities.getOrDefault(handle)
+      if old.handle != NoHandle: navigationTouched.incl(old.parent)
+    for handle in navigationTouched:
+      let entity = candidateEntity(handle)
+      if entity.handle != NoHandle and entity.kind == NodeKind.navigation:
+        let children = candidateChildren(handle)
+        if children.len != 1:
+          fail("navigation host requires exactly one active page")
+        let child = candidateEntity(children[0])
+        if children[0] == handle or child.handle == NoHandle or child.parent != handle:
+          fail("navigation host active page has an invalid parent")
+    # 1. Every edited binding against the candidate list.
+    for handle,entity in edits:
+      if entity.row.isNone: continue
+      let binding=entity.row.get
+      let listEntity=candidateEntity(binding.listHandle)
+      if listEntity.handle==NoHandle or listEntity.kind!=virtualList:
+        fail("native row binding has no virtual list")
+      if listEntity.list.isNone: fail("native row binding list has no metadata")
+      let reason=rowBindingReason(binding,listEntity.list.get,entity.parent,handle)
+      if reason.len!=0: fail("native row binding rejected: " & reason)
+      var member=false
+      for child in candidateChildren(binding.listHandle):
+        if child==handle: member=true;break
+      if not member: fail("native row root is not in the list's final children")
+    # 2. Whole candidate child set of every affected list.
+    var slots:RowSlotTable
+    for listHandle in touched:
+      let listEntity=candidateEntity(listHandle)
+      if listEntity.handle==NoHandle: continue
+      if listEntity.kind!=virtualList: continue
+      if listEntity.list.isNone: continue
+      let meta=listEntity.list.get
+      let children=candidateChildren(listHandle)
+      var typedAfter=false
+      for child in children:
+        let childEntity=candidateEntity(child)
+        if childEntity.handle!=NoHandle and childEntity.row.isSome: typedAfter=true;break
+      for child in children:
+        let childEntity=candidateEntity(child)
+        if childEntity.handle==NoHandle: fail("native list has an unknown child")
+        let childRow=childEntity.row
+        if childRow.isNone:
+          if typedAfter: fail("native changed list child has no row binding")
+          continue
+        let binding=childRow.get
+        let reason=rowBindingReason(binding,meta,childEntity.parent,child)
+        if reason.len!=0: fail("native row binding rejected: " & reason)
+        let slotReason=reserveRowSlot(slots,binding)
+        if slotReason.len!=0: fail("native row binding rejected: " & slotReason)
+      if typedAfter: continue
+      for child in acceptedChildrenOf(listHandle):
+        let acceptedChild=entities.getOrDefault(child)
+        if acceptedChild.handle==NoHandle or acceptedChild.row.isNone: continue
+        for current in children:
+          if current==child: fail("native typed list kept an unbound row")
     # Prepare the accepted entity/id deltas here. `accept` moves these values
     # into pre-sized maps; it never grows a table or builds a sequence.
     var idRemovals:seq[string]

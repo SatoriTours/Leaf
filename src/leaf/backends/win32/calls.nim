@@ -50,6 +50,11 @@ type Win32Calls* = object
   themeMargins*: proc(theme: HTHEME, dc: HDC, part,state,property: int32, rect: ptr RECT, margins: ptr MARGINS): int32 {.closure, raises: [CatchableError].}
   rectRegion*: proc(left,top,right,bottom: int32): HRGN {.closure, raises: [CatchableError].}
   setRegion*: proc(window: HWND, region: HRGN, redraw: BOOL): int32 {.closure, raises: [CatchableError].}
+  scrollInfo*: proc(window: HWND, bar: int32, info: ptr SCROLLINFO): BOOL {.closure, raises: [CatchableError].}
+  setScrollInfo*: proc(window: HWND, bar: int32, info: ptr SCROLLINFO, redraw: BOOL): int32 {.closure, raises: [CatchableError].}
+  focusWindow*: proc(): HWND {.closure, raises: [CatchableError].}
+  setFocus*: proc(window: HWND): HWND {.closure, raises: [CatchableError].}
+  setCtrlId*: proc(window: HWND, value: int): int {.closure, raises: [CatchableError].}
 
 proc systemWin32Calls*(): Win32Calls =
   result.registerClass = proc(windowClass: ptr WNDCLASSEXW): ATOM = RegisterClassExW(windowClass)
@@ -100,3 +105,8 @@ proc systemWin32Calls*(): Win32Calls =
   result.themeMargins = proc(theme: HTHEME, dc: HDC, part,state,property: int32, rect: ptr RECT, margins: ptr MARGINS): int32 = GetThemeMargins(theme,dc,part,state,property,rect,margins)
   result.rectRegion = proc(left,top,right,bottom: int32): HRGN = CreateRectRgn(left,top,right,bottom)
   result.setRegion = proc(window: HWND, region: HRGN, redraw: BOOL): int32 = SetWindowRgn(window,region,redraw)
+  result.scrollInfo = proc(window: HWND, bar: int32, info: ptr SCROLLINFO): BOOL = GetScrollInfo(window,bar,info)
+  result.setScrollInfo = proc(window: HWND, bar: int32, info: ptr SCROLLINFO, redraw: BOOL): int32 = SetScrollInfo(window,bar,info,redraw)
+  result.focusWindow = proc(): HWND = GetFocus()
+  result.setFocus = proc(window: HWND): HWND = SetFocus(window)
+  result.setCtrlId = proc(window: HWND, value: int): int = SetWindowLongPtrW(window,GWL_ID,value)

@@ -2,11 +2,13 @@
 import std/[os, strutils, options]
 import ./[core, project, process_io, gpui_build, sdk]
 import ./orm_config
+import ./[android_build, android_job]
 when defined(windows): import ./[windows_paths, windows_manifest]
 
 const SourceRoot = currentSourcePath().parentDir.parentDir
 type BuildJob* = ref object
   binary*: string
+  android: AndroidJob
   process*: ManagedProcess
   bridge: string
 
@@ -35,6 +37,9 @@ proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedCon
                  selection: Option[BuildSelection] = none(BuildSelection)): BuildJob =
   let selected = selection.get(resolveBuild(project.backend))
   selected.validateHost()
+  if selected.target == "android":
+    let mobile=startAndroidBuild(project,libraryPath(),compiler(),output)
+    return BuildJob(binary:mobile.binary,android:mobile)
   let directory = if cacheDirectory.len == 0: project.root / "target" / "nim" else: absolutePath(cacheDirectory)
   createDir(directory)
   result = BuildJob(binary: if output.len == 0: directory / "app".addFileExt(ExeExt)
@@ -118,11 +123,15 @@ proc startHeadlessBuild*(project: Project, entry, output, cacheDirectory: string
   args.add(target)
   result.process = startManaged(executable, args, project.root)
 
-proc pollBuild*(job: BuildJob): bool = job.process.poll()
-proc code*(job: BuildJob): int = job.process.code
-proc output*(job: BuildJob): string = job.process.output.diagnosticText()
+proc pollBuild*(job: BuildJob): bool =
+  if job.android != nil: job.android.pollAndroid() else: job.process.poll()
+proc code*(job: BuildJob): int =
+  if job.android != nil: job.android.code else: job.process.code
+proc output*(job: BuildJob): string =
+  if job.android != nil: job.android.output.diagnosticText() else: job.process.output.diagnosticText()
 proc close*(job: BuildJob) =
-  if job != nil: job.process.close()
+  if job != nil:
+    if job.android != nil: job.android.close() else: job.process.close()
 
 proc build*(project: Project, output = "", selection: Option[BuildSelection] = none(BuildSelection)): string =
   beginInterruptHandling()

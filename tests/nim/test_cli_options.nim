@@ -13,7 +13,7 @@ suite "CLI option parsing":
     check parseCli(@["doctor", "--json", "--backend", "native"]).jsonOutput
     check parseCli(@["pack", "--target", "windows", "--backend", "native"]).backend == "native"
     for args in [@["build", "--backend", "unknown"], @["run", "app"],
-        @["build", "--target", "android"], @["doctor", "--backend"],
+        @["build", "--target", "unknown"], @["doctor", "--backend"],
         @["build", "--backend", "native", "--backend", "gpui"],
         @["run", "--output", "out"]]:
       expect UiError: discard parseCli(args)

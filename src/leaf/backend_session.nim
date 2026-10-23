@@ -4,14 +4,24 @@
 ## The session is the only place that coordinates the Runtime commit gate with
 ## a backend. It never renders business state, never runs a business callback
 ## before the backend confirms a batch, and never executes platform lifecycle.
-import std/[tables, sets, math, strutils, json]
-import ./[core, styles, backend, reconcile,managed_runtime,host_session,native_host_adapter]
+import std/[tables, sets, math, strutils, json, options]
+import ./[core, styles, backend, reconcile,managed_runtime,host_session,native_host_adapter,
+  native_navigation, navigation_protocol]
+
+const
+  MaxPendingRowRequests* = 256
+    ## Bound on the total owned viewport facts per session: the next-turn queue
+    ## plus the still-live in-flight facts of an active drain. Far above the
+    ## number of lists a UI can show at once, while still bounding ownership.
 
 type
   EventSource* = enum
     ## A genuine user input event, or a backend setter notification that must
     ## never be treated as user input.
     sourceUser, sourceSetter
+
+  DeliveryGate* = proc(): bool {.closure, raises: [].}
+    ## Optional host lifecycle guard, checked at each business delivery boundary.
 
   EventEnvelope* = object
     session*: uint64
@@ -22,6 +32,25 @@ type
     source*: EventSource
     event*: Event
     bindingGeneration*: uint64
+
+  RowViewportRequest* = object
+    ## One owned viewport fact recorded on the UI thread. It carries identity,
+    ## the list source token and the row ranges only: no Node, closure or
+    ## platform pointer ever crosses this seam, so only the owning session on
+    ## the current mount/source can execute it.
+    sessionId*: uint64
+    mountGeneration*: uint64
+    listHandle*: NodeHandle
+    sourceGeneration*: uint64
+    first*, finish*: int
+    protected*: seq[int]
+
+  RowFact = object
+    ## Internal recorded fact. `superseded` marks an in-flight fact that a newer
+    ## fact for the same list replaced: it keeps its drain slot (so the active
+    ## batch's indices stay valid) but is never executed.
+    request: RowViewportRequest
+    superseded: bool
 
   ViewportState = object
     keys: seq[string]
@@ -44,6 +73,8 @@ type
     lastQueued: uint64
     lastProcessed: uint64
     queue: seq[EventEnvelope]
+    navigation: NativeNavigation
+    when compileOption("threads"): uiThreadId: int
     entities: Table[NodeHandle, MountedEntity]
     byNodeId: Table[string, NodeHandle]
     viewports: Table[NodeHandle, ViewportState]
@@ -59,6 +90,13 @@ type
     frozen: bool
     closing: bool
     draining: bool
+    pendingRows: seq[RowFact]
+    claimedRows: seq[RowFact]
+    drainingRows: bool
+
+proc resetNavigation(session: BackendSession) =
+  session.navigation.close()
+  session.navigation = nil
 
 proc runtime*(session: BackendSession): Runtime = session.runtime
 proc sessionId*(session: BackendSession): uint64 = session.sessionId
@@ -171,6 +209,10 @@ proc recover(session: BackendSession,
   ## freezes business dispatch on the runtime. Returns "" on success,
   ## otherwise the failure detail.
   session.frozen = true
+  # Viewport facts captured against the failed/restored tree are obsolete;
+  # never let them reach the replacement mount.
+  session.pendingRows.setLen(0)
+  session.claimedRows.setLen(0)
   try:
     session.backend.restore(previous)
   except CatchableError as error:
@@ -178,6 +220,7 @@ proc recover(session: BackendSession,
     session.runtime.freezeEvents("backend restore failed: " & error.msg)
     return error.msg
   inc session.mountGeneration
+  session.resetNavigation()
   session.queue.setLen(0)
   session.lastQueued = 0
   session.lastProcessed = 0
@@ -359,6 +402,7 @@ proc attachBackendImpl(runtime: Runtime, backend: Backend, host: HostContext,
   var session = BackendSession(runtime: runtime, backend: backend, host: host,
     mode: mode, reconciler: newReconciler(), sessionId: host.sessionId,
     mountGeneration: host.mountGeneration)
+  when compileOption("threads"): session.uiThreadId = getThreadId()
   if runtime.managed:
     session.issues=runtime.useNativePolicy(backend.capabilities,mode)
     for issue in session.issues:session.seenIssues.incl(issue.nodeId & "\x1f" & issue.property)
@@ -377,10 +421,15 @@ proc attachBackendImpl(runtime: Runtime, backend: Backend, host: HostContext,
       let consumer=nativeHostConsumer(backend,session.sessionId,mode=mode,
         onRecover=proc()=
           inc session.mountGeneration
+          session.resetNavigation()
           session.queue.setLen(0);session.lastQueued=0;session.lastProcessed=0
+          session.pendingRows.setLen(0)
+          session.claimedRows.setLen(0)
           if backend.rebind!=nil:backend.rebind(session.sessionId,session.mountGeneration),
         onFault=proc(reason:string) {.raises:[].}=
           session.faulted=true
+          session.pendingRows.setLen(0)
+          session.claimedRows.setLen(0)
           runtime.freezeEvents("native restore failed: " & reason))
       consumer.prepareAcceptedMetadata=proc(issues:seq[CapabilityIssue])=
         session.prepareAcceptedIssues(issues)
@@ -450,9 +499,12 @@ proc requestClose*(session: BackendSession) =
   ## with their existing coordinators; no business or native callback runs.
   if session == nil or session.disposed: return
   session.closing = true
+  session.resetNavigation()
   session.queue.setLen(0)
   session.lastQueued = 0
   session.lastProcessed = 0
+  session.pendingRows.setLen(0)
+  session.claimedRows.setLen(0)
 
 proc dispose*(session: BackendSession) =
   ## Teardown. A request made while a Runtime update/commit is in progress is
@@ -488,7 +540,7 @@ proc enqueue*(session: BackendSession, envelope: EventEnvelope): bool =
   ## revision alone is not a reason to reject.
   if session == nil or session.disposed or session.faulted or session.closing:
     return false
-  if envelope.source == sourceSetter: return false
+  if envelope.source == sourceSetter or envelope.event.kind == EventKind.back: return false
   if envelope.session != session.sessionId: return false
   if envelope.mountGeneration != session.mountGeneration: return false
   if envelope.observedRevision > session.runtime.acceptedRevision: return false
@@ -505,6 +557,8 @@ proc faultBackendEffects*(session: BackendSession, backend: Backend, reason: str
   ## Ordinary Nim boundary for an owned backend's asynchronous native failure.
   if session == nil or not session.ownsBackend(backend): fail("foreign backend effect failure")
   session.faulted = true
+  session.pendingRows.setLen(0)
+  session.claimedRows.setLen(0)
   session.runtime.freezeEvents(reason)
 
 proc eventEligible(session: BackendSession): bool =
@@ -513,6 +567,70 @@ proc eventEligible(session: BackendSession): bool =
   ## the remaining captured batch ineligible instead of leaking it to business.
   not session.disposed and not session.faulted and not session.frozen and
     not session.closing
+
+proc navigationContext(session: BackendSession, handle: NodeHandle,
+    binding: uint64): Option[NavigationContext] =
+  if not session.hasAcceptedEntity(handle): return
+  let entity = session.acceptedEntity(handle)
+  if entity.kind != NodeKind.navigation or entity.navigation.isNone: return
+  # Navigation has no unbound legacy delivery mode. A backend that implements
+  # it must attest the current native binding, including before each callback.
+  if session.backend.bindingValid == nil or
+      not session.backend.bindingValid(handle, binding): return
+  result = some(NavigationContext(sessionId: session.sessionId,
+    mountGeneration: session.mountGeneration, handle: uint64(handle),
+    bindingGeneration: binding, acceptedRevision: session.runtime.acceptedRevision,
+    navigation: entity.navigation.get))
+
+proc dropNavigationEvents(session: BackendSession, handle: uint64,
+    requestId = 0'u64) =
+  var index = session.queue.len
+  while index > 0:
+    dec index
+    let envelope = session.queue[index]
+    if envelope.event.kind == EventKind.back and uint64(envelope.handle) == handle and
+        (requestId == 0 or envelope.event.navigationRequestId == requestId):
+      session.queue.delete(index)
+
+proc pruneNavigation(session: BackendSession) =
+  # Ordinary boundary only: no callbacks or allocations during publication.
+  for fact in session.navigation.facts():
+    let context = session.navigationContext(NodeHandle(fact.handle), fact.bindingGeneration)
+    if context.isNone or fact.backFactReason(context.get, MaxNodes).len != 0:
+      session.navigation.retire(fact.handle)
+      session.dropNavigationEvents(fact.handle)
+
+proc pendingNavigation*(session: BackendSession): int =
+  if session == nil: 0 else: session.navigation.pending
+
+proc queueNavigation*(session: BackendSession, fact: NavigationBackFact): bool =
+  ## Capture only; confirm is appended to the same ordered event stream as
+  ## clicks/input. A successful capture is not accepted navigation or a pop.
+  if session == nil or not session.eventEligible: return false
+  when compileOption("threads"):
+    if session.uiThreadId != getThreadId(): return false
+  if executionRuntimeIdentity() != 0 and
+      executionRuntimeIdentity() != session.runtime.runtimeIdentity: return false
+  if session.runtime.eventsFrozen: return false
+  if fact.sequence <= session.lastQueued: return false
+  let context = session.navigationContext(NodeHandle(fact.handle), fact.bindingGeneration)
+  if context.isNone or fact.backFactReason(context.get, MaxNodes).len != 0: return false
+  session.pruneNavigation()
+  if session.navigation == nil:
+    session.navigation = newNativeNavigation(session.sessionId, session.mountGeneration)
+  if not session.navigation.record(context.get, fact): return false
+  session.lastQueued = fact.sequence
+  if fact.phase == NavigationBackPhase.cancel:
+    # Cancelled ready requests must release their queued envelopes too. Without
+    # this, repeated confirm/cancel bypasses the bounded pending-fact ledger.
+    session.dropNavigationEvents(fact.handle, fact.requestId)
+  if fact.phase == NavigationBackPhase.confirm:
+    session.queue.add(EventEnvelope(session: fact.sessionId,
+      mountGeneration: fact.mountGeneration, handle: NodeHandle(fact.handle),
+      sequence: fact.sequence, observedRevision: fact.observedRevision,
+      bindingGeneration: fact.bindingGeneration, source: sourceUser,
+      event: Event(kind: EventKind.back, navigationRequestId: fact.requestId)))
+  true
 
 proc settleEvent(session: BackendSession, envelope: EventEnvelope) =
   ## UI metadata effect: settle the latest accepted props for a live entity
@@ -557,6 +675,13 @@ proc process(session: BackendSession, envelope: EventEnvelope) =
   if session.backend.bindingValid != nil and
       not session.backend.bindingValid(envelope.handle, envelope.bindingGeneration):
     return
+  if envelope.event.kind == EventKind.back:
+    # Claim by exact request id preserves ordering with ordinary events. A
+    # cancelled, stale or consumed fact cannot dispatch the business callback.
+    let fact = session.navigation.claim(envelope.event.navigationRequestId)
+    if fact.isNone: return
+    let context = session.navigationContext(envelope.handle, envelope.bindingGeneration)
+    if context.isNone or fact.get.backFactReason(context.get, MaxNodes).len != 0: return
   var mounted: MountedNode
   try:
     mounted = session.runtime.find(entity.nodeId)
@@ -570,7 +695,7 @@ proc process(session: BackendSession, envelope: EventEnvelope) =
       discard
   session.settleEvent(envelope)
 
-proc drainEvents*(session: BackendSession) =
+proc drainEvents*(session: BackendSession, canDeliver: DeliveryGate = nil) =
   ## Explicit host drain. A commit in progress (or a reentrant drain) returns
   ## without touching the queue or its sequence bookkeeping, so genuine user
   ## events queued during apply survive for a drain after publication. The
@@ -578,37 +703,214 @@ proc drainEvents*(session: BackendSession) =
   if session == nil or not session.eventEligible: return
   if session.draining: return
   if session.runtime != nil and session.runtime.installingUpdate: return
+  session.pruneNavigation()
   session.draining = true
   try:
     let pending = session.queue
     session.queue = @[]
-    for envelope in pending:
+    for index, envelope in pending:
       if not session.eventEligible: return
+      if canDeliver != nil and not canDeliver():
+        # Preserve order ahead of events captured during this drain. Closing
+        # still invalidates the batch through eventEligible above.
+        session.queue = pending[index .. ^1] & session.queue
+        return
       session.process(envelope)
+      session.pruneNavigation()
   finally:
     session.draining = false
 
-proc requestRows*(session: BackendSession, listHandle: NodeHandle,
-                  sourceGeneration: uint64, first, finish: int,
-                  protected: seq[int] = @[]): seq[MountedNode] =
-  ## Materialize a list viewport. The tracked viewport is replaced only after a
-  ## successful commit, so a rejected request cannot corrupt visible tracking.
-  if session == nil or session.disposed: fail("session is disposed")
-  if session.closing: fail("session is closing")
-  if session.faulted: fail("session is faulted")
-  if not session.hasAcceptedEntity(listHandle):
-    fail("unknown list handle: " & $listHandle)
-  let entity = session.acceptedEntity(listHandle)
-  if entity.kind != virtualList:
-    fail("handle is not a virtual list: " & entity.nodeId)
-  let target = session.runtime.find(entity.nodeId)
-  let source = target.node.listSource
-  if source == nil: fail("list has no source")
-  if source.generation != sourceGeneration:
-    fail("obsolete list source generation")
+proc applyRowViewport(session: BackendSession, entity: MountedEntity,
+                      source: ListSource, first, finish: int,
+                      protected: seq[int]): seq[MountedNode] =
+  ## Single materialization seam: stage the viewport through the Runtime commit
+  ## gate, then replace the tracked viewport only after the candidate published.
   result = session.runtime.materialize(entity.nodeId, first, finish, protected)
   var keys: seq[string]
   for index in first..<finish: keys.add(source.itemKey(index))
   for index in protected:
     if index >= 0 and index < source.len: keys.add(source.itemKey(index))
-  session.viewports[listHandle] = ViewportState(keys: keys)
+  session.viewports[entity.handle] = ViewportState(keys: keys)
+
+proc liveRowSource(session: BackendSession, listHandle: NodeHandle,
+                   entity: var MountedEntity): ListSource =
+  ## Accepted-only list lookup. Returns nil when the handle is gone, is no
+  ## longer a virtual list, or its node has disappeared from the accepted tree.
+  ## Never materializes rows and never consults a candidate.
+  if not session.hasAcceptedEntity(listHandle): return nil
+  entity = session.acceptedEntity(listHandle)
+  if entity.kind != virtualList: return nil
+  try:
+    result = session.runtime.find(entity.nodeId).node.listSource
+  except CatchableError:
+    return nil
+
+proc rangeValid(source: ListSource, first, finish: int,
+                protected: seq[int]): bool =
+  if source == nil: return false
+  if first < 0 or finish < first or finish > source.len: return false
+  for index in protected:
+    if index < 0 or index >= source.len: return false
+  true
+
+proc liveRowFacts(session: BackendSession): int =
+  ## Total owned facts: the next-turn queue plus the still-live in-flight facts
+  ## of an active drain. This is the quantity `MaxPendingRowRequests` bounds.
+  result = session.pendingRows.len
+  for fact in session.claimedRows:
+    if not fact.superseded: inc result
+
+proc offerRowRequest(session: BackendSession, request: RowViewportRequest): bool =
+  ## Bounded insertion with in-flight reservations. A newer fact for a list
+  ## replaces its queued fact, or retires its in-flight fact: either way the
+  ## total live fact count does not grow, so newest-wins never costs capacity.
+  ## A new list is refused with `false` once the total would pass
+  ## `MaxPendingRowRequests`; an already accepted fact is never evicted later
+  ## for capacity reasons.
+  let owned = RowViewportRequest(sessionId: request.sessionId,
+    mountGeneration: request.mountGeneration, listHandle: request.listHandle,
+    sourceGeneration: request.sourceGeneration, first: request.first,
+    finish: request.finish, protected: @(request.protected))
+  for index in 0 ..< session.pendingRows.len:
+    if session.pendingRows[index].request.listHandle == request.listHandle:
+      session.pendingRows[index] = RowFact(request: owned)
+      return true
+  for index in 0 ..< session.claimedRows.len:
+    if not session.claimedRows[index].superseded and
+        session.claimedRows[index].request.listHandle == request.listHandle:
+      session.claimedRows[index].superseded = true
+      session.pendingRows.add(RowFact(request: owned))
+      return true
+  if session.liveRowFacts() >= MaxPendingRowRequests: return false
+  session.pendingRows.add(RowFact(request: owned))
+  true
+
+proc requestRows*(session: BackendSession, listHandle: NodeHandle,
+                  sourceGeneration: uint64, first, finish: int,
+                  protected: seq[int] = @[]): seq[MountedNode] =
+  ## Explicit synchronous viewport request. Unchanged contract: it materializes
+  ## immediately and the tracked viewport is replaced only after a successful
+  ## commit, so a rejected request cannot corrupt visible tracking. New platform
+  ## factories use `queueRows`/`drainRowRequests` instead.
+  if session == nil or session.disposed: fail("session is disposed")
+  if session.closing: fail("session is closing")
+  if session.faulted: fail("session is faulted")
+  var entity: MountedEntity
+  let source = session.liveRowSource(listHandle, entity)
+  if entity.handle == NoHandle:
+    fail("unknown list handle: " & $listHandle)
+  if entity.kind != virtualList:
+    fail("handle is not a virtual list: " & entity.nodeId)
+  if source == nil: fail("list has no source")
+  if source.generation != sourceGeneration:
+    fail("obsolete list source generation")
+  result = session.applyRowViewport(entity, source, first, finish, protected)
+
+proc queueRows*(session: BackendSession, request: RowViewportRequest): bool =
+  ## UI-thread fact recording for the next safe turn. Never renders, materializes
+  ## or commits. Wrong session/mount, dead or non-list handles, obsolete sources
+  ## and out-of-range viewports are refused synchronously so nothing invalid is
+  ## ever retained. The newest request per list replaces the older viewport.
+  ## A `false` result is observable backpressure: the caller may re-queue the
+  ## same fact on a later turn. A `true` result is never revoked while the
+  ## session is usable: the fact is executed, replaced by a newer fact for that
+  ## same list, or dropped together with the whole queue when an unrecoverable
+  ## `Defect` escapes a row build and faults the session (see
+  ## `drainRowRequests`).
+  if session == nil or not session.eventEligible: return false
+  if request.sessionId != session.sessionId: return false
+  if request.mountGeneration != session.mountGeneration: return false
+  var entity: MountedEntity
+  let source = session.liveRowSource(request.listHandle, entity)
+  if source == nil: return false
+  if source.generation != request.sourceGeneration: return false
+  if not rangeValid(source, request.first, request.finish, request.protected):
+    return false
+  session.offerRowRequest(request)
+
+proc pendingRowRequests*(session: BackendSession): int =
+  ## Recorded but not yet executed facts, including the in-flight facts of an
+  ## active drain (so a reentrant read during a drain sees the reservations).
+  if session == nil: 0 else: session.liveRowFacts()
+
+proc rowRequestLive(session: BackendSession, request: RowViewportRequest,
+                    entity: var MountedEntity, source: var ListSource): bool =
+  ## Re-validate every temporal fact immediately before executing a recorded
+  ## fact: eligibility, owning session, mount, accepted list survival, source
+  ## token and ranges. A stale request is dropped, never executed.
+  if not session.eventEligible: return false
+  if request.sessionId != session.sessionId: return false
+  if request.mountGeneration != session.mountGeneration: return false
+  source = session.liveRowSource(request.listHandle, entity)
+  if source == nil: return false
+  if source.generation != request.sourceGeneration: return false
+  rangeValid(source, request.first, request.finish, request.protected)
+
+proc drainRowRequests*(session: BackendSession, canDeliver: DeliveryGate = nil): int =
+  ## Execute recorded viewports on an ordinary safe UI turn and return how many
+  ## were consumed. A commit/install in progress or a reentrant drain executes
+  ## nothing and keeps every request for a later turn; requests queued while the
+  ## batch is being processed are left to the next turn instead of spinning.
+  ##
+  ## The whole batch stays owned by the session while it runs (`claimedRows`),
+  ## so it still counts against the `MaxPendingRowRequests` bound and a newer
+  ## fact for a list can retire its in-flight fact instead of racing it. A
+  ## rejected row build propagates as `UiError` (accepted state and tracked
+  ## viewport stay as they were); the failed fact is dropped and never retried,
+  ## and every unattempted fact returns to the queue for a later turn. Returning
+  ## a fact therefore never loses it: no capacity is reclaimed during the drain,
+  ## so re-queueing cannot overflow.
+  ##
+  ## A non-catchable `Defect` from a row build is different: it leaves the
+  ## Runtime's attempt scope unusable, so no recorded fact could ever execute
+  ## again. The session is then marked `faulted` and its recorded facts are
+  ## dropped instead of being retained as dead reservations. That path is kept
+  ## allocation-free on purpose: growing a queue while a Defect unwinds crashes
+  ## the Windows debug build (D-W1, 0xC0000005 in `newSeqPayloadUninit`).
+  if session == nil or not session.eventEligible: return 0
+  if session.drainingRows: return 0
+  if session.runtime != nil and session.runtime.installingUpdate: return 0
+  if session.pendingRows.len == 0: return 0
+  session.claimedRows = session.pendingRows
+  session.pendingRows = @[]
+  session.drainingRows = true
+  var claimedIndex = 0
+  try:
+    while claimedIndex < session.claimedRows.len:
+      if canDeliver != nil and not canDeliver():
+        for remaining in claimedIndex ..< session.claimedRows.len:
+          let kept = session.claimedRows[remaining]
+          if not kept.superseded: session.pendingRows.add(kept)
+        session.claimedRows.setLen(0)
+        return
+      let fact = session.claimedRows[claimedIndex]
+      inc claimedIndex
+      # A newer fact for this list arrived during the drain; its slot is retired
+      # and the newer fact runs on the next turn.
+      if fact.superseded: continue
+      var entity: MountedEntity
+      var source: ListSource
+      if not session.rowRequestLive(fact.request, entity, source): continue
+      try:
+        discard session.applyRowViewport(entity, source, fact.request.first,
+          fact.request.finish, fact.request.protected)
+        inc result
+      except CatchableError:
+        # Keep every unattempted fact (superseded ones already have a newer
+        # replacement queued) and surface the failure; the failed fact itself is
+        # dropped so it is never retried in a loop.
+        for remaining in claimedIndex ..< session.claimedRows.len:
+          let kept = session.claimedRows[remaining]
+          if not kept.superseded: session.pendingRows.add(kept)
+        session.claimedRows.setLen(0)
+        raise
+    session.claimedRows.setLen(0)
+  except Defect:
+    # Unrecoverable attempt scope: drop the facts, do not allocate, and let the
+    # Defect surface unchanged to the caller.
+    session.faulted = true
+    session.pendingRows.setLen(0)
+    session.claimedRows.setLen(0)
+    raise
+  finally:
+    session.drainingRows = false

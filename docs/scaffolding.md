@@ -84,6 +84,8 @@ Route(name: "home", path: "/", page: "home", view: "index")
 
 let router = newComponentRouter(ctx, routes, pages)
 discard navigate(router, "home")       # 也可使用路径，例如 "/search"
+discard push(router, "/search")       # 显式保留返回历史
+discard pop(router)                   # 根处不变
 renderPage(ctx, router)
 ```
 
@@ -112,13 +114,13 @@ leaf g scaffold Contact name:string active:bool --dry-run
 
 默认 Model 使用 SQLite，类型声明与公共持久化层共同负责校验和参数化读写；已保存记录在退出或 watch 替换进程后保留。草稿、搜索条件和显示设置属于页面状态，重启后重置。schema 2 的 int64 id 使用 INTEGER PRIMARY KEY，删除后可能复用；schema 1 继续使用原 service 与 AUTOINCREMENT。
 
-`config/database.nim` 默认使用 `getDataDir() / <应用名> / application.sqlite3`，导入配置不会打开数据库。`createApplication()` 打开一份连接、执行迁移，再为页面创建、渲染和事件绑定连接作用域。连接由引用持有，释放时关闭；自建连接也可显式调用 `close()`。数据库父目录首次打开时自动创建。
+`config/database.nim` 默认使用 `getDataDir() / <应用名> / application.sqlite3`，导入配置不会打开数据库。`createApplication()` 打开一份连接、执行迁移，再为页面创建、渲染和事件绑定连接作用域。应用自建连接在根组件的 Runtime dispose 时显式关闭；调用者传入的连接属于借用，仍由调用者关闭。数据库父目录首次打开时自动创建。
 
 可以设置 `LEAF_DATABASE_PATH=/absolute/path/application.sqlite3` 覆盖路径；测试使用 `openApplicationDatabase(":memory:")` 获得隔离的 SQLite 数据库，再传给 `createApplication(connection)`。schema 1 也保留 service 构造函数。`--check` 也会初始化数据库，检查时请使用独立测试路径。
 
 `db/catalog.nim` 在编译时自动发现直接位于 `db/migrations/` 的 Nim 和兼容 SQL 迁移；新增迁移不修改共享注册表。应用启动按版本执行所有未应用项，每条迁移及其历史写入在同一事务提交。`leaf db status` 检查状态，`leaf db migrate --dry-run` 预览，`leaf db rollback --steps 1` 显式回滚；启动只执行正向迁移。已应用迁移被修改或缺失时拒绝执行，历史指纹包括源文件及反向定义。详见[数据库迁移](migrations.md)。
 
-Leaf 提供显式的 `leaf/sqlite` 模块，依赖目标系统 SQLite 动态库：Linux `libsqlite3.so.0`、macOS `libsqlite3.dylib`、Windows 系统 `winsqlite3.dll`。Windows 应用使用系统 SQLite。没有导入存储模块的原有应用不增加此依赖。
+Leaf 提供显式的 `leaf/sqlite` 模块。Linux 默认使用 `libsqlite3.so.0`、macOS 使用 `libsqlite3.dylib`、Windows 使用系统 `winsqlite3.dll`；Android 将一个 SQLite 引擎静态链接进应用，Leaf、Norm 与 lowdb 共用它。没有导入存储模块的原有应用不增加此依赖。
 
 需要外部接口或后台工作时，将业务 API 适配放入 `app/clients/`、后台工作放入 `app/jobs/`、定时规则放入 `config/schedules.nim`、维护命令放入 `lib/tasks/`。后台执行与 UI 回传仍需实现；后台工作应使用自己的数据库连接，不跨线程共享页面连接。
 
@@ -130,6 +132,20 @@ Leaf 提供显式的 `leaf/sqlite` 模块，依赖目标系统 SQLite 动态库�
 nim c -r --path:/path/to/leaf/src --nimcache:target/test-cache --out:target/test_home tests/test_home.nim
 nim c -r --path:/path/to/leaf/src --nimcache:target/test-cache --out:target/test_notes tests/test_notes.nim
 ```
+
+## Android 入口
+
+`leaf init` 生成共享应用工厂和 `src/mobile.nim`；完整脚手架使用根目录的 `mobile.nim`。`leaf.json` 中 `platforms.android.entry` 显式指向移动注册入口，桌面 `entry` 保留。新建项目的标识符会去除名称归一化产生的连字符，以满足 Kotlin 包名规则；这也影响其默认产物名。已有显式桌面配置不变。
+
+```sh
+leaf doctor --target android
+leaf run --target android --device SERIAL
+leaf pack --target android --output dist-android
+```
+
+Android 工厂接收 `HostResources`，从应用 assets 读取资源，并在应用私有数据目录打开 `application.sqlite3`。Activity 重建保留 Runtime 和连接；普通 detach 不关闭应用。正常 Runtime dispose 会关闭应用自有连接，强制停止进程不证明优雅关闭。调用者注入的连接和 HostResources 仍由调用者或宿主拥有。
+
+Android 与 Windows 原生模板使用变量行纵向列表；Android 行内按钮纵向排列，以适应窄屏。桌面 GPUI 模板保留原有滚动布局。Android 编译需要预先安装的 SDK、NDK、JDK 与离线 Gradle 依赖；生成器不会安装工具。当前 pack 交付 debug APK，不是商店发布。
 
 ## Model 与连接作用域
 

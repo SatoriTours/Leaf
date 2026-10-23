@@ -1,6 +1,6 @@
 ## Backend-neutral host identity and candidate overlays. Snapshot planning is a
 ## compatibility path; delta planning never materializes the accepted tree.
-import std/[tables, sets, options]
+import std/[tables, sets, options, unicode]
 import ./[core, backend, host_protocol, commit_map]
 export host_protocol
 
@@ -10,6 +10,8 @@ type
     nodeId*: string
     kind*: NodeKind
     props*: HostProps
+    row*: Option[NativeRowBinding]
+      ## Typed row sidecar for a list's direct row root (Nim-only).
     boundaryId*: uint64
   HostChildren* = object
     parent*: NodeHandle
@@ -59,6 +61,7 @@ proc probeAllocCount():int=
   else:0
 
 proc sealDelta(r: HostReconciler,c: HostCandidate)
+proc validateRowBindings(r: HostReconciler, c: HostCandidate)
 
 var nextOwner: uint64
 proc newHostReconciler*(sessionId: uint64): HostReconciler =
@@ -87,7 +90,9 @@ proc reserveHandle*(r: HostReconciler): NodeHandle =
 proc lookup(r: HostReconciler,c: HostCandidate,id: NodeHandle): StoredHost =
   if c.edits.hasKey(id): c.edits.getOrDefault(id) else: r.records.getOrDefault(id)
 proc bytes(record: HostRecord): int =
-  sizeof(HostRecord)+record.nodeId.len+record.props.text.len+record.props.placeholder.len
+  result=sizeof(HostRecord)+record.nodeId.len+record.props.text.len+
+    record.props.placeholder.len
+  if record.row.isSome:result+=record.row.get.itemKey.len
 proc validate*(r: HostReconciler,c: HostCandidate) =
   if c == nil or c.owner != r.owner: fail("foreign host candidate")
   if c.status != hostCandidateSealed: fail("host candidate is not sealed")
@@ -113,6 +118,14 @@ proc planDelta*(r: HostReconciler, changes: HostChanges, nextRevision: uint64): 
   for record in changes.upserts:
     if record.handle == NoHandle or record.handle in removed or c.edits.hasKey(record.handle):
       fail("duplicate host edit")
+    if (record.kind == NodeKind.navigation) != record.props.navigation.isSome:
+      fail("navigation metadata must belong to a navigation host")
+    if record.props.navigation.isSome:
+      let reason = record.props.navigation.get.invalidReason(MaxNodes)
+      if reason.len != 0: fail(reason)
+    if record.kind != NodeKind.navigation and
+        (record.props.eventMask and EventBackMask) != 0:
+      fail("back handler requires a navigation host")
     if record.nodeId in newIds: fail("duplicate host node id")
     newIds.incl(record.nodeId)
     let old=r.records.getOrDefault(record.handle)
@@ -124,14 +137,14 @@ proc planDelta*(r: HostReconciler, changes: HostChanges, nextRevision: uint64): 
       inc c.count;c.bytes+=record.bytes
       touched.incl(record.handle)
       c.wire.ops.add(HostOp(kind:HostOpKind.create,handle:record.handle,parent:record.parent,
-        nodeId:record.nodeId,nodeKind:record.kind,props:record.props))
+        nodeId:record.nodeId,nodeKind:record.kind,props:record.props,row:record.row))
     else:
       c.bytes+=record.bytes-old.record.bytes
       if record.parent != old.record.parent: touched.incl(record.handle)
       if old.record.parent == NoHandle: roots.excl(record.handle)
       if old.record != record:
         c.wire.ops.add(HostOp(kind:HostOpKind.update,handle:record.handle,parent:record.parent,
-          nodeId:record.nodeId,nodeKind:record.kind,props:record.props))
+          nodeId:record.nodeId,nodeKind:record.kind,props:record.props,row:record.row))
     if record.parent == NoHandle: roots.incl(record.handle)
     inc c.measurements.indexEdits
   var memberships: Table[NodeHandle,HashSet[NodeHandle]]
@@ -182,6 +195,17 @@ proc planDelta*(r: HostReconciler, changes: HostChanges, nextRevision: uint64): 
         for child in current.children:
           let item=r.lookup(c,child)
           if item == nil or item.record.parent != id: fail("unknown child or multiple parents")
+  var navigationTouched = touched
+  for id, stored in c.edits:
+    navigationTouched.incl(id)
+    if stored != nil: navigationTouched.incl(stored.record.parent)
+    let old = r.records.getOrDefault(id)
+    if old != nil: navigationTouched.incl(old.record.parent)
+  for id in navigationTouched:
+    let current = r.lookup(c, id)
+    if current != nil and current.record.kind == NodeKind.navigation and
+        current.children.len != 1:
+      fail("navigation host requires exactly one active page")
   for id, stored in c.edits:
     if stored == nil: continue
     var ancestor=id
@@ -237,7 +261,82 @@ proc planDelta*(r: HostReconciler, changes: HostChanges, nextRevision: uint64): 
     c.wire.ops.add(HostOp(kind:HostOpKind.window,window:changes.window.get))
   for id in changes.removals: c.wire.ops.add(HostOp(kind:HostOpKind.remove,handle:id))
   c.measurements.ops=uint64(c.wire.ops.len)
+  r.validateRowBindings(c)
   r.sealDelta(c)
+proc validateRowBindings(r: HostReconciler, c: HostCandidate) =
+  ## Candidate-only typed-row consistency over the *whole* candidate view, not
+  ## just `c.edits`: every affected list is checked through its final children,
+  ## so an edit cannot collide with an accepted, unedited peer and a typed list
+  ## cannot silently degrade. Runs before the candidate is sealed, while the
+  ## accepted maps are untouched and no backend has seen the batch.
+  if c == nil: return
+  var touched: HashSet[NodeHandle]
+  for id, stored in c.edits:
+    # Check the accepted binding before any `continue`: a pure Some->None edit
+    # (or a removal) leaves the list record, its metadata and its membership
+    # untouched, so only the accepted side names the list that must be re-gated.
+    let accepted = r.record(id)
+    if accepted.isSome and accepted.get.row.isSome:
+      touched.incl(accepted.get.row.get.listHandle)
+    if stored == nil: continue
+    if stored.record.kind == virtualList: touched.incl(id)
+    if stored.record.row.isSome: touched.incl(stored.record.row.get.listHandle)
+  for parent in c.orders.keys: touched.incl(parent)
+  # 1. Scalar consistency for every edited binding, including membership.
+  for id, stored in c.edits:
+    if stored == nil: continue
+    let record = stored.record
+    if record.row.isNone: continue
+    let binding = record.row.get
+    let listStored = r.lookup(c, binding.listHandle)
+    if listStored == nil: fail("row binding references an unknown list")
+    if listStored.record.kind != virtualList:
+      fail("row binding parent is not a virtual list")
+    let listProps = listStored.record.props.list
+    if listProps.isNone: fail("row binding list has no list metadata")
+    let reason = rowBindingReason(binding, listProps.get, record.parent, id)
+    if reason.len != 0: fail(reason)
+    var member = false
+    for child in listStored.children:
+      if child == id: member = true; break
+    if not member: fail("row root is not in the list's final children")
+  # 2. Full candidate children of every affected list: uniqueness and no mixed
+  #    bound/unbound rows; a typed list may only lose its rows by membership
+  #    removal, reparenting or removal of the list itself.
+  var slots: RowSlotTable
+  for listHandle in touched:
+    let listStored = r.lookup(c, listHandle)
+    if listStored == nil: continue
+    if listStored.record.kind != virtualList: continue
+    let listProps = listStored.record.props.list
+    if listProps.isNone: continue
+    let meta = listProps.get
+    var typedAfter = false
+    for child in listStored.children:
+      let childStored = r.lookup(c, child)
+      if childStored != nil and childStored.record.row.isSome:
+        typedAfter = true
+        break
+    for child in listStored.children:
+      let childStored = r.lookup(c, child)
+      if childStored == nil: fail("changed list has an unknown child")
+      let childRow = childStored.record.row
+      if childRow.isNone:
+        if typedAfter: fail("changed list child has no row binding")
+        continue
+      let binding = childRow.get
+      let reason = rowBindingReason(binding, meta, childStored.record.parent, child)
+      if reason.len != 0: fail(reason)
+      let slotReason = reserveRowSlot(slots, binding)
+      if slotReason.len != 0: fail(slotReason)
+    if typedAfter: continue
+    for child in r.children(listHandle):
+      let acceptedChild = r.record(child)
+      if acceptedChild.isNone or acceptedChild.get.row.isNone: continue
+      for current in listStored.children:
+        if current == child:
+          fail("typed list kept an unbound row " & $child)
+
 proc sealDelta(r: HostReconciler,c: HostCandidate) =
   ## Prepare the accepted-map delta. Every allocation, including the possible
   ## O(N) capacity rebuild, happens here; publication only moves values.
@@ -336,7 +435,7 @@ proc fullBatch*(r:HostReconciler,sessionId:uint64):HostBatch=
   for id,stored in r.records:
     let record=stored.record
     result.ops.add(HostOp(kind:HostOpKind.create,handle:id,parent:record.parent,
-      nodeId:record.nodeId,nodeKind:record.kind,props:record.props))
+      nodeId:record.nodeId,nodeKind:record.kind,props:record.props,row:record.row))
   for id,stored in r.records:
     result.ops.add(HostOp(kind:HostOpKind.setChildren,handle:id,children:stored.children))
   for boundary in r.boundaries.values:result.ops.add(HostOp(kind:HostOpKind.boundary,boundary:boundary))

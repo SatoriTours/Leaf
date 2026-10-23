@@ -10,25 +10,12 @@
 when defined(nimHasStyleChecks):
   {.push styleChecks: off.}
 
-when defined(windows):
-  when defined(nimOldDlls):
-    const DefaultLib = "sqlite3.dll"
-  elif defined(cpu64):
-    const DefaultLib = "sqlite3_64.dll"
-  else:
-    const DefaultLib = "sqlite3_32.dll"
-elif defined(macosx):
-  const
-    DefaultLib = "libsqlite3(|.0).dylib"
-else:
-  const
-    DefaultLib = "libsqlite3.so(|.0)"
+import leaf/sqlite_link
+const Lib = SqliteDynamicLibrary
 
-
-const leafOrmSqliteLibrary {.strdefine.} = DefaultLib
-const Lib = leafOrmSqliteLibrary
-
-when defined(staticSqlite):
+when BundledSqliteEnabled:
+  {.pragma: mylib.}
+elif defined(staticSqlite):
   {.pragma: mylib.}
   {.compile("sqlite3.c", "-O3").}
 else:

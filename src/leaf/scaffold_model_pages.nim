@@ -25,8 +25,41 @@ proc listCode(resource: ResourceSpec): string =
   result = "proc renderRecord(state: State, item: " & "record_model." & resource.model & "): Node =\n  let id = item.id\n  view:\n    column:\n      key: \"" & p & "_row_\" & $id\n      styles: {\"gap\": \"8\", \"padding\": \"12\"}\n"
   for field in resource.fields:
     result.add("      text " & (if field.kind == "string": "" else: "$") & "item." & field.name & ":\n        key: \"" & p & "_" & field.name & "_\" & $id\n")
-  result.add("      row:\n        styles: {\"gap\": \"8\"}\n        button \"View\":\n          key: \"" & p & "_show_\" & $id\n          onClick(e): state.show(id)\n        button \"Edit\":\n          key: \"" & p & "_edit_\" & $id\n          onClick(e): state.beginEdit(id)\n        button \"Delete\":\n          key: \"" & p & "_delete_\" & $id\n          onClick(e): state.remove(id)\n\n")
-  result.add("proc renderList(state: State): Node =\n  let items = record_model." & resource.model & ".all\n  view:\n    column:\n      styles: {\"gap\": \"12\", \"overflow\": \"scroll\", \"flex_grow\": \"1\"}\n      button \"New " & resource.model & "\":\n        key: \"" & p & "_new\"\n        onClick(e): state.beginNew()\n      text state.error:\n        key: \"" & p & "_error\"\n      if items.len == 0:\n        emptyState(\"No records yet\", \"" & p & "_empty\")\n      for item in items:\n        renderRecord(state, item)\n")
+  let actions = "      row:\n        styles: {\"gap\": \"8\"}\n        button \"View\":\n          key: \"" & p & "_show_\" & $id\n          onClick(e): state.show(id)\n        button \"Edit\":\n          key: \"" & p & "_edit_\" & $id\n          onClick(e): state.beginEdit(id)\n        button \"Delete\":\n          key: \"" & p & "_delete_\" & $id\n          onClick(e): state.remove(id)\n\n"
+  result.add("      when defined(android):\n")
+  for line in actions.replace("      row:", "      column:").splitLines():
+    if line.len > 0: result.add("  " & line & "\n")
+  result.add("      else:\n")
+  for line in actions.splitLines():
+    if line.len > 0: result.add("  " & line & "\n")
+
+  let desktopList = "proc renderList(state: State): Node =\n  let items = record_model." & resource.model & ".all\n  view:\n    column:\n      styles: {\"gap\": \"12\", \"overflow\": \"scroll\", \"flex_grow\": \"1\"}\n      button \"New " & resource.model & "\":\n        key: \"" & p & "_new\"\n        onClick(e): state.beginNew()\n      text state.error:\n        key: \"" & p & "_error\"\n      if items.len == 0:\n        emptyState(\"No records yet\", \"" & p & "_empty\")\n      for item in items:\n        renderRecord(state, item)\n"
+  let nativeList = """  when defined(android) or defined(windows):
+    var keys: seq[string]
+    for item in items: keys.add($item.id)
+    let rows = virtualList("@P@_list", keys,
+      proc(index: int): Node = renderRecord(state, items[index]),
+      rowHeight = 0, estimatedHeight = 120, overscan = 1,
+      styles = style({"flex_grow": "1", "width": "full"}))
+    view:
+      column:
+        styles: {"gap": "12", "flex_grow": "1"}
+        button "New @MODEL@":
+          key: "@P@_new"
+          onClick(e): state.beginNew()
+        text state.error:
+          key: "@P@_error"
+        if items.len == 0:
+          emptyState("No records yet", "@P@_empty")
+        else:
+          rows
+  else:
+""".replace("@P@", p).replace("@MODEL@", resource.model)
+  let bodyStart = desktopList.find("  view:")
+  result.add(desktopList[0 ..< bodyStart])
+  result.add(nativeList)
+  for line in desktopList[bodyStart .. ^1].splitLines():
+    if line.len > 0: result.add("  " & line & "\n")
 
 proc editorCode(resource: ResourceSpec): string =
   let p = resource.plural

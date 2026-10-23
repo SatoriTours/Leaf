@@ -19,6 +19,7 @@ type
     request*: MigrationRequest
     dryRun*, jsonOutput*: bool
     output*, binary*, target*, backend*, initDirectory*, migrationName*: string
+    device*: string
     runArgs*, sdkArgs*: seq[string]
     ## `db init` is not a migration direction, so it is tracked separately.
     databaseInit*: bool
@@ -124,8 +125,8 @@ proc parsePack(args: seq[string]): CliCommand =
       result.backend = args[i + 1]
     else: result.output = args[i + 1]
     i += 2
-  if result.target notin ["linux", "macos", "windows", "all"]:
-    fail("--target must be linux, macos, windows or all")
+  if result.target notin ["linux", "macos", "windows", "android", "all"]:
+    fail("--target must be linux, macos, windows, android or all")
   if result.target == "all" and result.binary.len > 0: fail("--binary requires a single target")
 
 proc parseBuildCommand(args: seq[string]): CliCommand =
@@ -144,21 +145,25 @@ proc parseBuildCommand(args: seq[string]): CliCommand =
       result.jsonOutput = true
       inc i
       continue
-    if flag notin ["--target", "--backend", "--output"] or
+    if flag notin ["--target", "--backend", "--output", "--device"] or
+        (flag == "--device" and command != "run") or
         (flag == "--output" and command != "build"):
       fail("unknown " & command & " option: " & flag)
     if i + 1 >= args.len or args[i + 1].len == 0 or args[i + 1].startsWith("--"):
       fail("missing value for " & flag)
     case flag
     of "--target":
-      if args[i + 1] notin ["windows", "linux", "macos"]:
+      if args[i + 1] notin ["windows", "linux", "macos", "android"]:
         fail("unsupported build target: " & args[i + 1])
       result.target = args[i + 1]
     of "--backend":
       discard parseBackend(args[i + 1])
       result.backend = args[i + 1]
+    of "--device":result.device = args[i + 1]
     else: result.output = args[i + 1]
     i += 2
+  if result.device.len > 0 and result.target != "android":fail("--device requires run --target android")
+  if result.target == "android" and result.backend == "gpui":fail("Android requires the native backend")
 
 proc parseDatabase(args: seq[string]): CliCommand =
   result.kind = ccDatabase

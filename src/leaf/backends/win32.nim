@@ -29,7 +29,7 @@ proc runNative*(app: Application, diagnostics: Diagnostics = nil,
     let session = native.attachWin32Backend(runtime)
     native.bindSession(session)
     window.bindSession(session, proc(): bool = activity.busy)
-    window.setSafeTick(proc() = session.drainEvents())
+    window.setSafeTick(proc() = native.safeListTurn())
     result = window.pump()
     status = some(result)
   except CatchableError as error:

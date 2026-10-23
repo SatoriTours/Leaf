@@ -46,7 +46,10 @@ suite "Portable Nim release projects":
     let directory = root / "123 Demo App"
     initProject(directory)
     let p = readProject(directory)
-    check p.slug == "app-123-demo-app"
+    # init now creates an Android entry too; its identifier must be Kotlin-safe.
+    check p.slug == "app123demoapp"
+    check p.android.enabled
+    check p.android.entryRelative == "src/mobile.nim"
     check "src" in p.includedPaths
   when defined(posix):
     test "entry aliases cannot escape through a parent directory":

@@ -23,7 +23,7 @@ proc main(): int =
       let name = path.extractFilename
       if databaseOnly and not (name.startsWith("test_migration_") or name in [
           "test_db_cli.nim", "test_cli_options.nim", "test_project_context.nim",
-          "test_sqlite.nim", "test_split_process.nim"]): continue
+          "test_sqlite.nim", "test_sqlite_engine.nim", "test_bundled_sqlite.nim", "test_sqlite_vendor.nim", "test_split_process.nim"]): continue
       if not modelOnly or name.startsWith("test_model_") or name in [
           "test_core.nim", "test_component_lists.nim", "test_sqlite.nim", "test_scaffold.nim", "test_scaffold_model.nim"]:
         tests.add(path)

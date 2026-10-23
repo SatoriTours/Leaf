@@ -3,6 +3,7 @@
 import std/[tables, sets, json, math, unicode, algorithm, options]
 import ./diagnostics
 import ./task_contracts
+import ./navigation_protocol
 
 const
   MaxNodes* = 10_000
@@ -15,9 +16,9 @@ type
   UiError* = object of CatchableError
   NodeKind* = enum
     column, row, text, button, input, checkbox, toggle, progress, tag,
-    separator, spinner, virtualList
+    separator, spinner, virtualList, navigation
   EventKind* = enum
-    click, change, submit
+    click, change, submit, back
   CompositionPhase* = enum
     ## Additive native IME/editing phase metadata. `compositionNone` is the
     ## default so existing events and JSON are unchanged.
@@ -28,6 +29,7 @@ type
     value*: string
     checked*: bool
     composition*: CompositionPhase
+    navigationRequestId*: uint64
   Callback* = proc(event: Event) {.closure.}
   Styles* = Table[string, string]
   Node* = ref object
@@ -37,6 +39,7 @@ type
     nodeStyles, nodeAttributes: Styles
     descendants: seq[Node]
     handlers: array[EventKind, Callback]
+    navigation: Option[HostNavigationProps]
     source: ListSource
   RowBuilder* = proc(index: int): Node {.closure.}
   ListSource* = ref object
@@ -172,6 +175,7 @@ proc styles*(node: Node): Styles = node.nodeStyles
 proc attributes*(node: Node): Styles = node.nodeAttributes
 proc children*(node: Node): seq[Node] = node.descendants
 proc listSource*(node: Node): ListSource = node.source
+proc navigationProps*(node: Node): Option[HostNavigationProps] = node.navigation
 proc handler*(node: Node, event: EventKind): Callback = node.handlers[event]
 
 proc node*(mounted: MountedNode): Node = mounted.description
@@ -196,21 +200,29 @@ proc ui*(kind: NodeKind, key = "", text = "", placeholder = "",
          children: seq[Node] = @[], styles: Styles = default(Styles),
          attributes: Styles = default(Styles), disabled = false,
          onClick: Callback = nil, onChange: Callback = nil,
-         onSubmit: Callback = nil): Node =
+         onSubmit: Callback = nil, onBack: Callback = nil,
+         navigation: Option[HostNavigationProps] = none(HostNavigationProps)): Node =
   for value in [key, text, placeholder]: validString(value)
   for pairs in [styles, attributes]:
     for name, value in pairs:
       validString(name)
       validString(value)
-  if kind notin {column, row, virtualList} and children.len != 0:
+  if kind notin {column, row, virtualList, NodeKind.navigation} and children.len != 0:
     fail("leaf controls cannot have children")
   if onClick != nil and kind != button: fail("click requires a button")
   if onChange != nil and kind notin {input, checkbox, toggle}:
     fail("change requires an input, checkbox or switch")
   if onSubmit != nil and kind != input: fail("submit requires an input")
+  if onBack != nil and kind != NodeKind.navigation: fail("back requires a navigation host")
+  if (kind == NodeKind.navigation) != navigation.isSome:
+    fail("navigation metadata must belong to a navigation host")
+  if navigation.isSome:
+    let reason = navigation.get.invalidReason(MaxNodes)
+    if reason.len != 0: fail(reason)
   Node(nodeKind: kind, nodeKey: key, label: text, hint: placeholder,
     descendants: children, nodeStyles: styles, nodeAttributes: attributes,
-    inactive: disabled, handlers: [onClick, onChange, onSubmit])
+    inactive: disabled, handlers: [onClick, onChange, onSubmit, onBack],
+    navigation: navigation)
 
 proc virtualList*(key: string, keys: seq[string], builder: RowBuilder,
                   rowHeight = 0.0, estimatedHeight = 100.0, overscan = 2,
@@ -853,7 +865,9 @@ proc toJson*(root: MountedNode): JsonNode =
   for key, value in n.nodeStyles: styles[key] = %value
   for key, value in n.nodeAttributes: attributes[key] = %value
   var events = newJObject()
-  for event in EventKind: events[$event] = %(n.handlers[event] != nil)
+  for event in EventKind:
+    if event != back or n.handlers[event] != nil:
+      events[$event] = %(n.handlers[event] != nil)
   result = %*{"kind": n.nodeKind.kindName, "id": root.identity,
     "text": n.label, "placeholder": n.hint, "disabled": n.inactive,
     "styles": styles, "attributes": attributes, "events": events,

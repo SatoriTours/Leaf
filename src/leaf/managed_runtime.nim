@@ -556,6 +556,72 @@ proc prepareLifecycle(d:ManagedDriver)=
   if d.taskAttempt.preparedTaskBytesInternal > MaxTreeBytes-d.bytes:
     fail("managed description and pending lifecycle events exceed 16 MiB")
 
+proc collectRowLists(d:ManagedDriver): HashSet[uint64] =
+  ## Instance ids of every active virtual list on an edited instance's ancestor
+  ## chain (candidate view; a removed edit falls back to the accepted instance).
+  ## Only changed paths are walked: no whole-store scan, no snapshot export.
+  for id in d.edits.keys:
+    var item = d.current(id)
+    if item == nil: item = d.data.instances.getOrDefault(id)
+    var depth = 0
+    while item != nil:
+      if item.active and item.description.kind == DescriptionKind.host and
+          item.description.hostNode.kind == NodeKind.virtualList:
+        result.incl(item.id)
+      if item.parent == 0: break
+      inc depth
+      if depth > MaxDepth: fail("row binding ancestor depth exceeded")
+      item = d.current(item.parent)
+
+proc prepareRowBindings(d:ManagedDriver,
+                        upserts: var Table[NodeHandle,HostRecord]) =
+  ## Fill the typed row sidecar for every list row root this candidate changes.
+  ## Bindings come from the candidate active children, the real host root and
+  ## the candidate ListSource: never from node ids, an active sibling index or a
+  ## Runtime snapshot. Local render output defaults to `row = none`, so unchanged
+  ## roots keep their accepted binding and only real differences touch records.
+  let lists = d.collectRowLists()
+  if lists.len == 0: return
+  var bindings: Table[NodeHandle,NativeRowBinding]
+  var attached: Table[NodeHandle,HashSet[NodeHandle]]
+  for listId in lists:
+    let listItem = d.current(listId)
+    if listItem == nil or not listItem.active: continue
+    let listHandle = listItem.handle
+    if listHandle == NoHandle: continue
+    let source = listItem.description.hostNode.listSource
+    if source == nil: fail("virtual list has no source")
+    var roots: HashSet[NodeHandle]
+    for childId in listItem.children:
+      let rowItem = d.current(childId)
+      if rowItem == nil or not rowItem.active: continue
+      let root = d.hostRoot(childId)
+      if root == NoHandle: continue
+      let itemIndex = rowItem.rowIndex
+      if itemIndex < 0 or itemIndex >= source.len:
+        fail("row index outside the list source")
+      if bindings.hasKey(root): fail("duplicate row root binding")
+      bindings[root] = NativeRowBinding(listHandle: listHandle,
+        sourceGeneration: source.generation, itemIndex: itemIndex,
+        itemKey: source.itemKey(itemIndex))
+      roots.incl(root)
+    attached[listHandle] = roots
+  for handle, record in upserts.mpairs:
+    if bindings.hasKey(handle):
+      record.row = some(bindings[handle])
+    elif record.row.isSome and attached.hasKey(record.row.get.listHandle) and
+        handle notin attached[record.row.get.listHandle]:
+      # Left the list in this candidate: never publish a stale row binding.
+      record.row = none(NativeRowBinding)
+  for handle, binding in bindings:
+    if upserts.hasKey(handle): continue
+    let accepted = d.data.reconciler.record(handle)
+    if accepted.isNone: fail("row root has no accepted host record")
+    if accepted.get.row == some(binding): continue
+    var record = accepted.get
+    record.row = some(binding)
+    upserts[handle] = record
+
 proc prepareHost(d:ManagedDriver)=
   d.prepareOutlets()
   d.prepareLifecycle()
@@ -569,11 +635,12 @@ proc prepareHost(d:ManagedDriver)=
   for boundary in d.changes.boundaries:boundaries[boundary.id]=boundary
   for handle in d.changes.removals:
     removed.incl(handle);upserts.del(handle);orders.del(handle)
-  for record in upserts.values:changes.upserts.add(record)
   for order in orders.values:changes.children.add(order)
   for boundary in boundaries.values:changes.boundaries.add(boundary)
   for handle in removed:
     if d.data.reconciler.record(handle).isSome:changes.removals.add(handle)
+  d.prepareRowBindings(upserts)
+  for record in upserts.values:changes.upserts.add(record)
   d.hostPlan=d.data.reconciler.planDelta(changes,d.data.owner.acceptedRevision+1)
   d.data.reconciler.validate(d.hostPlan)
   d.data.states.validateAttempt(d.attempt)

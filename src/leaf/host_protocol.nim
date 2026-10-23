@@ -1,28 +1,26 @@
 ## Backend-neutral, owned host data. No callbacks or platform objects cross
 ## this boundary; platform-specific interpretation remains in the adapter.
 import std/[options, tables, strutils, math]
-import ./[core, styles, backend]
+import ./[core, styles, backend, list_protocol, navigation_protocol]
 export backend.NodeHandle, backend.NoHandle
+# The pure list types live in `list_protocol`; re-exported here so existing
+# `host_protocol` call sites, field names and enum meanings stay unchanged.
+export list_protocol, navigation_protocol
 
 const
   EventClickMask* = 1'u32
   EventChangeMask* = 2'u32
   EventSubmitMask* = 4'u32
+  EventBackMask* = 8'u32
 
 type
   HostStylePolicy* = enum gpuiCompatible, nativeStrict
-  HostHeightMode* {.pure.} = enum uniform, variable
-  HostListProps* = object
-    sourceGeneration*: uint64
-    itemCount*: int
-    heightMode*: HostHeightMode
-    rowHeight*, estimate*: float64
-    overscan*: int
   HostProps* = object
     normalized*: NormalizedProps
     text*, placeholder*: string
     eventMask*: uint32
     list*: Option[HostListProps]
+    navigation*: Option[HostNavigationProps]
   HostBoundary* = object
     id*: uint64
     root*: NodeHandle
@@ -39,6 +37,9 @@ type
     nodeId*: string
     nodeKind*: NodeKind
     props*: HostProps
+    row*: Option[NativeRowBinding]
+      ## Nim-only typed row sidecar carried by create/update; never encoded by
+      ## the GPUI ABI (no HostOpKind, no C header, no Rust change).
     children*: seq[NodeHandle]
     boundary*: HostBoundary
     window*: HostWindow
@@ -76,7 +77,8 @@ proc compatibleNode(node: Node): Node =
   ui(node.kind, key=node.key, text=node.text, placeholder=node.placeholder,
     disabled=node.disabled, styles=node.styles, attributes=attrs,
     onClick=node.handler(click), onChange=node.handler(change),
-    onSubmit=node.handler(submit))
+    onSubmit=node.handler(submit), onBack=node.handler(back),
+    navigation=node.navigationProps)
 
 proc normalizeHostProps*(node: Node, policy: HostStylePolicy): HostProps =
   if node == nil: fail("nil host description")
@@ -86,6 +88,8 @@ proc normalizeHostProps*(node: Node, policy: HostStylePolicy): HostProps =
   if node.handler(click) != nil: result.eventMask = result.eventMask or EventClickMask
   if node.handler(change) != nil: result.eventMask = result.eventMask or EventChangeMask
   if node.handler(submit) != nil: result.eventMask = result.eventMask or EventSubmitMask
+  if node.handler(back) != nil: result.eventMask = result.eventMask or EventBackMask
+  result.navigation = node.navigationProps
   let source = node.listSource
   if source != nil:
     result.list = some(HostListProps(sourceGeneration: source.generation,

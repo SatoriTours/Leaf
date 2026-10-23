@@ -7,12 +7,21 @@ when defined(windows): import ./windows_paths
 const
   MainTemplate = staticRead("templates/main.nim")
   AppTemplate = staticRead("templates/app.nim")
+  MobileTemplate = staticRead("templates/mobile.nim")
+  LegacyMainTemplate = staticRead("templates/legacy_init/main.nim")
+  LegacyAppTemplate = staticRead("templates/legacy_init/app.nim")
 
 type
   PlatformConfig* = object
     binary*, icon*: string
+  AndroidProjectConfig* = object
+    enabled*: bool
+    entry*, entryRelative*: string
+    minSdk*, targetSdk*, versionCode*: int
+    abis*: seq[string]
   Project* = object
     root*, entry*, entryRelative*, name*, identifier*, version*, configFile*: string
+    android*: AndroidProjectConfig
     backend*: BackendChoice
     includedPaths*: seq[string]
     platforms*: Table[string, PlatformConfig]
@@ -59,6 +68,54 @@ proc resolve*(root, relative: string, mustExist = true): string =
     let canonicalPath = realPath(result)
     if not within(canonicalRoot, canonicalPath): fail("project symlink escapes root: " & relative)
     result = canonicalPath
+
+proc readAndroid(project: Project, settings: JsonNode): AndroidProjectConfig =
+  if settings.kind != JObject: fail("Android settings must be an object")
+  for field in settings.keys:
+    if field notin ["entry", "minSdk", "targetSdk", "versionCode", "abis"]:
+      fail("unknown Android field: " & field)
+  if "entry" notin settings or settings["entry"].kind != JString:
+    fail("Android requires an explicit Nim entry")
+  result = AndroidProjectConfig(enabled: true, entryRelative: settings["entry"].getStr,
+    minSdk: 26, targetSdk: 36, versionCode: 1, abis: @["arm64-v8a", "x86_64"])
+  if not result.entryRelative.endsWith(".nim"): fail("Android entry must end in .nim")
+  result.entry = resolve(project.root, result.entryRelative)
+  if not fileExists(result.entry): fail("Android entry must be a regular file")
+  var included = false
+  for item in project.includedPaths:
+    if result.entryRelative == item or result.entryRelative.startsWith(item & "/"):
+      included = true
+  if not included: fail("Android entry is missing from include")
+  for field in ["minSdk", "targetSdk", "versionCode"]:
+    if field notin settings: continue
+    let value = settings[field]
+    let maximum = if field == "versionCode": 2_100_000_000'i64 else: 1000'i64
+    let minimum = if field == "versionCode": 1'i64 else: 26'i64
+    if value.kind != JInt or value.getBiggestInt < minimum or value.getBiggestInt > maximum:
+      fail("invalid Android " & field)
+    case field
+    of "minSdk": result.minSdk = int(value.getBiggestInt)
+    of "targetSdk": result.targetSdk = int(value.getBiggestInt)
+    else: result.versionCode = int(value.getBiggestInt)
+  if result.targetSdk < result.minSdk: fail("Android targetSdk must be >= minSdk")
+  if "abis" in settings:
+    if settings["abis"].kind != JArray or settings["abis"].len == 0:
+      fail("Android abis must be a nonempty array")
+    result.abis = @[]
+    for abi in settings["abis"]:
+      if abi.kind != JString or abi.getStr notin ["arm64-v8a", "x86_64"] or abi.getStr in result.abis:
+        fail("unknown or repeated Android ABI")
+      result.abis.add(abi.getStr)
+  # Package names become source-level Kotlin and Java identifiers.
+  for part in project.identifier.split('.'):
+    if '-' in part or part in ["abstract", "as", "assert", "boolean", "break", "byte", "case", "catch",
+        "char", "class", "const", "continue", "default", "do", "double", "else", "enum", "extends",
+        "false", "final", "finally", "float", "for", "fun", "goto", "if", "implements", "import",
+        "in", "instanceof", "int", "interface", "is", "long", "native", "new", "null", "object",
+        "package", "private", "protected", "public", "return", "short", "static", "strictfp",
+        "super", "switch", "synchronized", "this", "throw", "throws", "transient", "true", "try",
+        "typealias", "typeof", "val", "var", "void", "volatile", "when", "while"]:
+      fail("Android identifier is not a Kotlin-safe package name")
 
 proc readProject*(path: string): Project =
   let absolute = absolutePath(path)
@@ -118,7 +175,10 @@ proc readProject*(path: string): Project =
   if "platforms" in config:
     if config["platforms"].kind != JObject: fail("platforms must be an object")
     for target, settings in config["platforms"]:
-      if target notin ["linux", "macos", "windows"]: fail("unknown platform: " & target)
+      if target notin ["linux", "macos", "windows", "android"]: fail("unknown platform: " & target)
+      if target == "android":
+        result.android = readAndroid(result, settings)
+        continue
       if settings.kind != JObject: fail("platform settings must be an object")
       var platform: PlatformConfig
       for field, value in settings:
@@ -153,29 +213,37 @@ proc newProjectConfig*(name, entry: string, included: seq[string]): JsonNode =
   %*{"name": name, "identifier": "org.example." & slug,
     "version": "0.1.0", "entry": entry, "include": included}
 
+proc mobileProjectConfig*(name, entry, mobileEntry: string, included: seq[string]): JsonNode =
+  ## New templates share one Android-safe identifier across desktop and mobile.
+  result = newProjectConfig(name, entry, included)
+  result["identifier"] = %result["identifier"].getStr.replace("-", "")
+  result["platforms"] = %*{"android": {"entry": mobileEntry}}
+
 proc matchesMinimalTemplate*(root: string): bool =
-  ## True only when the four minimal `init` artifacts are byte-identical to the
-  ## current template, so an untouched init can be safely upgraded in place.
-  if not fileExists(root / "leaf.json") or
-      readFile(root / "leaf.json") !=
-        pretty(newProjectConfig(absolutePath(root).extractFilename, "src/main.nim",
-          @["src", "assets"])) & "\n":
-    return false
-  if not fileExists(root / "assets" / "message.txt") or
-      readFile(root / "assets" / "message.txt") != "多文件应用 · 资源随发布包迁移\n":
-    return false
-  if not fileExists(root / "src" / "main.nim") or readFile(root / "src" / "main.nim") != MainTemplate:
-    return false
-  if not fileExists(root / "src" / "app.nim") or readFile(root / "src" / "app.nim") != AppTemplate:
-    return false
-  true
+  ## Recognize complete, byte-exact old or new init templates for safe upgrades.
+  let name = absolutePath(root).extractFilename
+  for relative in ["leaf.json", "assets/message.txt", "src/main.nim", "src/app.nim"]:
+    if not fileExists(root / relative): return false
+  if readFile(root / "assets/message.txt") != "多文件应用 · 资源随发布包迁移\n": return false
+  let legacy = readFile(root / "leaf.json") ==
+    pretty(newProjectConfig(name, "src/main.nim", @["src", "assets"])) & "\n" and
+    readFile(root / "src/main.nim") == LegacyMainTemplate and
+    readFile(root / "src/app.nim") == LegacyAppTemplate
+  if legacy: return true
+  readFile(root / "leaf.json") ==
+    pretty(mobileProjectConfig(name, "src/main.nim", "src/mobile.nim", @["src", "assets"])) & "\n" and
+    readFile(root / "src/main.nim") == MainTemplate and
+    readFile(root / "src/app.nim") == AppTemplate and
+    fileExists(root / "src/mobile.nim") and readFile(root / "src/mobile.nim") == MobileTemplate
 
 proc initProject*(path: string) =
   if fileExists(path) or dirExists(path): fail("refusing to overwrite existing project: " & path)
-  let config = newProjectConfig(path.normalizedPath.extractFilename, "src/main.nim", @["src", "assets"])
+  let config = mobileProjectConfig(path.normalizedPath.extractFilename,
+    "src/main.nim", "src/mobile.nim", @["src", "assets"])
   createDir(path / "src")
   createDir(path / "assets")
   writeFile(path / "leaf.json", pretty(config) & "\n")
   writeFile(path / "assets" / "message.txt", "多文件应用 · 资源随发布包迁移\n")
   writeFile(path / "src" / "main.nim", MainTemplate)
   writeFile(path / "src" / "app.nim", AppTemplate)
+  writeFile(path / "src" / "mobile.nim", MobileTemplate)

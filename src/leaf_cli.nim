@@ -2,6 +2,7 @@
 ## Commands always operate on the current directory's nearest Leaf project;
 ## the old PROJECT position argument and `--project` selector are gone.
 import std/[os, json, strtabs, options]
+import leaf/android_run
 import leaf/[cli_options, core, project, project_context, build, doctor,
   developer_options, diagnostics, watch, process_io, pack, scaffold, sdk, db_cli,
   migrations, targets]
@@ -16,7 +17,7 @@ const HelpText = """Leaf Nim developer tools
   leaf generate ...                Alias for leaf g ...
   leaf build [--output EXE] [--target TARGET] [--backend native|gpui]
                                    Compile the current project
-  leaf run [--target TARGET] [--backend native|gpui]
+  leaf run [--target TARGET] [--backend native|gpui] [--device SERIAL]
                                    Compile and open the current project
   leaf pack --target TARGET [--binary EXE] [--output DIR] [--backend native|gpui]
   leaf doctor [--json] [--target TARGET] [--backend native|gpui]
@@ -38,7 +39,7 @@ const HelpText = """Leaf Nim developer tools
 
 Commands operate on the nearest project containing leaf.json; run them from the
 project directory or one of its subdirectories. Applications are native
-executables. Release TARGET: linux, macos, windows or all.
+executables. TARGET: linux, macos, windows, android; all packages desktop targets.
 """
 
 proc execute(exe: string, args: seq[string], workingDir: string): int =
@@ -54,11 +55,12 @@ proc execute(exe: string, args: seq[string], workingDir: string): int =
     sleep(10)
   process.code
 
-proc launch(project: Project, runArgs: seq[string], target = "", backend = ""): int =
+proc launch(project: Project, runArgs: seq[string], target = "", backend = "", device = ""): int =
   let options = parseDeveloperOptions(runArgs, project.root)
   let headless = "--headless" in options.remaining or "--check" in options.remaining
   let binary = build(project, selection = some(resolveBuild(project.backend,
     target, backend, headlessOnly = headless)))
+  if target == "android":return runAndroid(project,binary,device)
   result = execute(binary, options.launchArgs(), project.root)
 
 proc main*(args: seq[string]): int =
@@ -126,8 +128,8 @@ proc main*(args: seq[string]): int =
         if found.isNone:
           stdout.write(HelpText)
           return 0
-        return launch(found.get(), command.runArgs, command.target, command.backend)
-      return launch(requireCurrentProject(), command.runArgs, command.target, command.backend)
+        return launch(found.get(), command.runArgs, command.target, command.backend, command.device)
+      return launch(requireCurrentProject(), command.runArgs, command.target, command.backend, command.device)
   except ProcessInterruptedError:
     result = 130
   except CatchableError as error:

@@ -57,14 +57,19 @@ proc applyImpl(recording: RecordingBackend, batch: UpdateBatch) =
       case op.kind
       of opCreate:
         recording.entities[op.handle]=MountedEntity(handle:op.handle,parent:op.parent,index:op.index,
-          nodeId:op.nodeId,kind:op.nodeKind,props:op.props)
+          nodeId:op.nodeId,kind:op.nodeKind,props:op.props,list:op.list,row:op.row,navigation:op.navigation)
         inc recording.creates
       of opUpdate:
-        recording.entities[op.handle].props=op.props;inc recording.updates
+        recording.entities[op.handle].props=op.props
+        recording.entities[op.handle].navigation=op.navigation
+        recording.entities[op.handle].list=op.list
+        recording.entities[op.handle].row=op.row
+        inc recording.updates
         if recording.onSetter!=nil:recording.onSetter(op.handle)
       of opMove:
         recording.entities[op.handle].parent=op.parent
-        recording.entities[op.handle].index=op.index;inc recording.moves
+        recording.entities[op.handle].index=op.index
+        recording.entities[op.handle].row=op.row;inc recording.moves
       of opRemove:
         recording.entities.del(op.handle);recording.children.del(op.handle)
         recording.inputState.del(op.handle);inc recording.removes
@@ -78,13 +83,14 @@ proc applyImpl(recording: RecordingBackend, batch: UpdateBatch) =
         raise newException(UiError, "duplicate entity handle")
       recording.entities[op.handle] = MountedEntity(handle: op.handle,
         parent: op.parent, nodeId: op.nodeId, kind: op.nodeKind,
-        props: op.props, index: op.index)
+        props: op.props, list: op.list, row: op.row, index: op.index, navigation: op.navigation)
       recording.children.mgetOrPut(op.parent, @[]).insert(op.handle, op.index)
       inc recording.creates
     of opUpdate:
       if not recording.entities.hasKey(op.handle):
         raise newException(UiError, "update handle is not mounted")
       recording.entities[op.handle].props = op.props
+      recording.entities[op.handle].navigation = op.navigation
       inc recording.updates
       if recording.onSetter != nil: recording.onSetter(op.handle)
     of opMove:

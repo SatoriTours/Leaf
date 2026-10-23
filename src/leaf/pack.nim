@@ -1,5 +1,6 @@
 ## Compile and stage whole release batches before a no-overwrite hardlink commit.
-import std/[os, tempfiles, json, tables, strutils, algorithm, strtabs, monotimes, times]
+import std/[os, tempfiles, json, tables, strutils, algorithm, strtabs, monotimes, times, options]
+import ./[targets, android_build, android_tools, android_job, android_apk]
 import ./[core, project, native_binary, package_files, licenses, archives, checksum, build, process_io, gpui_build]
 
 proc nativeTarget*(): string =
@@ -65,7 +66,54 @@ proc checkApplication(binary, cwd: string) =
     sleep(10)
   if process.code != 0: fail("packaged application --check failed (exit " & $process.code & ")\n" & process.output.diagnosticText())
 
+proc packAndroid(project:Project,output,binaryOverride,backend:string):seq[string] =
+  discard resolveBuild(project.backend,"android",backend)
+  if not project.android.enabled:fail("leaf.json requires platforms.android.entry")
+  beginInterruptHandling()
+  defer:endInterruptHandling()
+  validateOutput(project,output)
+  let destination=absolutePath(output)
+  createDir(destination)
+  let stage=createTempDir(".leaf-pack-","",destination)
+  defer:removeDir(stage)
+  let name=project.slug & "-" & project.version & "-android.apk"
+  let noticeName=project.slug & "-" & project.version & "-android-licenses.zip"
+  var publications:seq[(string,string)]
+  for artifact in [name,noticeName]:
+    for suffix in ["",".sha256"]:
+      let path=destination / (artifact & suffix)
+      if fileExists(path) or dirExists(path) or symlinkExists(path):
+        fail("refusing to overwrite release artifact: " & path)
+      publications.add((stage / (artifact & suffix),path))
+  var binary=binaryOverride
+  if binary.len==0:
+    let selected=resolveBuild(project.backend,"android",backend)
+    binary=build(project,stage / "application.apk",some(selected))
+  else:
+    if not isAbsolute(binary):binary=project.root / binary
+    binary=checkBinarySource(project,binary)
+  # Inspect a private copy; publish exactly those verified bytes.
+  let artifact=stage / name
+  copyRegular(binary,artifact)
+  let tools=discoverAndroidTools(project.android.targetSdk)
+  let noticeDirectory=stage / "notices"
+  var assets=androidInputs(project)
+  assets.add(androidNotices(project,noticeDirectory))
+  let job=startAndroidSteps(androidVerificationSteps(project,tools,artifact,stage,assets),directory=stage)
+  try:
+    while not job.pollAndroid():
+      checkCancelled()
+      sleep(10)
+    if job.code!=0:fail("Android APK validation failed (exit " & $job.code & ")\n" & job.output)
+  finally:job.close()
+  writeZip(archiveFiles(noticeDirectory / "assets/leaf/licenses",""),stage / noticeName)
+  for item in [name,noticeName]:
+    writeFile(stage / (item & ".sha256"),sha256File(stage / item) & "  " & item & "\n")
+  publishArtifacts(publications)
+  @[destination / name,destination / noticeName]
+
 proc pack*(project: Project, target, output: string, binaryOverride = "", backend = ""): seq[string] =
+  if target=="android":return packAndroid(project,output,binaryOverride,backend)
   let selected = if backend.len == 0: project.backend else: parseBackend(backend)
   if selected == backendNative: fail("A3 native packaging not implemented")
   let targets = if target == "all": @["linux", "macos", "windows"] else: @[target]

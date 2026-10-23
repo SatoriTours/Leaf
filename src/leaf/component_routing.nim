@@ -1,12 +1,21 @@
 ## Immutable component route configuration with transactional navigation State.
 ## A router is created during a component's initialization and owns one
-## State[int] holding the accepted route index; navigation joins the ordinary
-## State queue so the address is accepted together with the rest of the batch.
-import std/[tables, sets, strutils, unicode]
+## State[NavigationState] holding the accepted history; navigation joins the
+## ordinary State queue and is accepted together with the rest of the batch.
+import std/[tables, sets, strutils, unicode, options]
 import ./[core, component_state, component_description]
 import ./routing
+import ./navigation_state
+export navigation_state.NavigationBackProposal
 
 type
+  NavigationRequests = ref object
+    ## Request lifecycle is separate from accepted history: cancelling a
+    ## gesture, or consuming a completion whose candidate later fails, must
+    ## fence late callbacks without publishing a different page/history.
+    offered, revision: uint64
+    pending: Table[uint64, NavigationBackProposal]
+
   ComponentPageDefinition* = object
     name*: string
     views*: seq[string]
@@ -17,9 +26,10 @@ type
     registered: seq[Route]
     definitions: Table[string, ComponentPageDefinition]
     names, paths: Table[string, int]
-    route: State[int]
+    route: State[NavigationState]
     token: uint64
     configurationBytes: int
+    requests: NavigationRequests
 
 const RouterMetadataBytes = 64
 
@@ -126,30 +136,112 @@ proc newComponentRouter*(ctx: MountContext, routes: seq[Route],
   result.paths = configuration.paths
   result.configurationBytes = configuration.bytes
   result.token = routerToken()
-  result.route = ctx.state(configuration.initialIndex,
-    equal = proc(a, b: int): bool = a == b)
+  result.requests = NavigationRequests()
+  result.route = ctx.state(initialNavigation(result.token,
+    configuration.registered.len, configuration.initialIndex),
+    equal = proc(a, b: NavigationState): bool = a == b,
+    snapshot = snapshotNavigation)
 
 proc routes*(router: ComponentRouter): seq[Route] = router.registered
 
-proc navigate*(router: ComponentRouter, target: string): StateWriteResult =
-  ## Unknown addresses are refused before queuing; a disposed router reports
-  ## disposed without touching released pages.
-  if not stateAlive(router.route): return StateWriteResult.disposed
-  var index: int
-  if target in router.names: index = router.names[target]
-  elif target in router.paths: index = router.paths[target]
+proc routeIndex(router: ComponentRouter, target: string): int =
+  if target in router.names: result = router.names[target]
+  elif target in router.paths: result = router.paths[target]
   else: fail("unknown route: " & target)
-  result = router.route.queueSet(index)
+
+proc navigate*(router: ComponentRouter, target: string): StateWriteResult =
+  ## Select the current address without appending a history entry. Unknown
+  ## addresses are refused before queuing; disposed routers stay terminal.
+  if not stateAlive(router.route): return StateWriteResult.disposed
+  let index = router.routeIndex(target)
+  router.route.queueUpdate(proc(value: NavigationState): NavigationState =
+    value.selectRoute(index))
+
+proc push*(router: ComponentRouter, target: string): StateWriteResult =
+  if not stateAlive(router.route): return StateWriteResult.disposed
+  let index = router.routeIndex(target)
+  router.route.queueUpdate(proc(value: NavigationState): NavigationState =
+    value.pushRoute(index))
+
+proc replace*(router: ComponentRouter, target: string): StateWriteResult =
+  if not stateAlive(router.route): return StateWriteResult.disposed
+  let index = router.routeIndex(target)
+  router.route.queueUpdate(proc(value: NavigationState): NavigationState =
+    value.replaceRoute(index))
+
+proc pop*(router: ComponentRouter): StateWriteResult =
+  if not stateAlive(router.route): return StateWriteResult.disposed
+  router.route.queueUpdate(proc(value: NavigationState): NavigationState =
+    value.popRoute())
+
+proc history*(router: ComponentRouter): seq[Route] =
+  ## Export accepted addresses in root-to-current order. Entries/closures remain
+  ## owned by the immutable controller configuration and State snapshot policy.
+  for entry in router.route.readAccepted().entries:
+    result.add(router.registered[entry.routeIndex])
+
+proc history*(ctx: ComponentContext, router: ComponentRouter): seq[Route] =
+  if ctx == nil: fail("navigation history requires a component context")
+  if not ctx.ownsState(router.route): fail("router State is not owned by this component")
+  for entry in ctx.value(router.route).entries:
+    result.add(router.registered[entry.routeIndex])
+
+proc canPop*(router: ComponentRouter): bool = router.route.readAccepted().depth > 1
+
+proc syncRequests(router: ComponentRouter, history: NavigationState) =
+  if router.requests.revision != history.revision:
+    router.requests.pending.clear()
+    router.requests.revision = history.revision
+
+proc backProposal*(router: ComponentRouter, requestId: uint64): NavigationBackProposal =
+  ## Register a request without writing accepted history. The platform supplies
+  ## monotonic ids within this router and must also check its session/mount.
+  if not stateAlive(router.route): return
+  router.route.requireStateExecution()
+  if requestId == 0: fail("navigation back request identity must be nonzero")
+  let history = router.route.readAccepted()
+  router.syncRequests(history)
+  if requestId <= router.requests.offered: return
+  result = history.proposeBack(requestId)
+  if result.requestId == 0: return
+  if router.requests.pending.len >= MaxNodes:
+    fail("pending navigation requests exceed 10000 entries")
+  router.requests.pending[requestId] = result
+  router.requests.offered = requestId
+
+proc cancelBack*(router: ComponentRouter, requestId: uint64): bool =
+  ## Cancellation is valid until confirmBack queues the ordinary State update.
+  ## It never changes the accepted history or causes a page render.
+  if not stateAlive(router.route): return false
+  router.route.requireStateExecution()
+  router.syncRequests(router.route.readAccepted())
+  if requestId notin router.requests.pending: return false
+  router.requests.pending.del(requestId)
+  true
+
+proc confirmBack*(router: ComponentRouter,
+    proposal: NavigationBackProposal): bool =
+  ## Consume the registered completion only after queueing succeeds. The same
+  ## completion cannot retry a failed batch; the host must issue a new request.
+  if not stateAlive(router.route): return false
+  router.route.requireStateExecution()
+  router.syncRequests(router.route.readAccepted())
+  if proposal.requestId == 0 or
+      router.requests.pending.getOrDefault(proposal.requestId) != proposal:
+    return false
+  result = router.route.queueUpdate(proc(value: NavigationState): NavigationState =
+    value.acceptBack(proposal)) == StateWriteResult.queued
+  if result: router.requests.pending.del(proposal.requestId)
 
 proc currentRoute*(router: ComponentRouter): Route =
   ## The last accepted address; queued candidates are not exposed here.
-  router.registered[router.route.readAccepted()]
+  router.registered[router.route.readAccepted().current.routeIndex]
 
 proc currentRoute*(ctx: ComponentContext, router: ComponentRouter): Route =
   ## The current candidate address during render; owner and Runtime are checked.
   if ctx == nil: fail("current route requires a component context")
   if not ctx.ownsState(router.route): fail("router State is not owned by this component")
-  router.registered[ctx.value(router.route)]
+  router.registered[ctx.value(router.route).current.routeIndex]
 
 proc renderPage*(ctx: ComponentContext, router: ComponentRouter,
     key = "page-outlet"): UiDescription =
@@ -165,3 +257,15 @@ proc renderPage*(ctx: ComponentContext, router: ComponentRouter,
   pageOutlet(PageOutletSpec(routerId: router.token, page: route.page, view: view,
     retention: definition.retention, configurationBytes: 0,
     build: proc(): UiDescription = build(view)), key)
+
+proc renderNavigation*(ctx: ComponentContext, router: ComponentRouter,
+    key = "navigation"): UiDescription =
+  ## Opt in to a typed native container. The ordinary outlet remains lazy and
+  ## retains page State; the native adapter must explicitly support this kind.
+  let page = renderPage(ctx, router)
+  let metadata = ctx.value(router.route).hostNavigationProps()
+  hostShell(ui(NodeKind.navigation, key = key, navigation = some(metadata),
+    onBack = proc(event: Event) =
+      if event.navigationRequestId == 0: return
+      let proposal = router.backProposal(event.navigationRequestId)
+      discard router.confirmBack(proposal)), @[page])

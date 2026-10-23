@@ -1,0 +1,39 @@
+{
+  "version": "3.54.1",
+  "source": "https://sqlite.org/2026/sqlite-amalgamation-3540100.zip",
+  "files": [
+    {
+      "path": "sqlite3.c",
+      "bytes": 9582521,
+      "sha256": "0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52"
+    },
+    {
+      "path": "sqlite3.h",
+      "bytes": 695729,
+      "sha256": "d6c84557261893439b341d2e6c35187ae3ea24fbfd843ad94616f72d89242b8c"
+    },
+    {
+      "path": "sqlite3ext.h",
+      "bytes": 39547,
+      "sha256": "48963abfefb41ac329ef9d706acb5eadba952a99a748285c9ded6b5e0942721b"
+    },
+    {
+      "path": "leaf_sqlite.c",
+      "bytes": 269,
+      "sha256": "d313640a6e26b014c1b2b8e67608c4ef6eeeb579f84a0f01b176f8b51a7fb423"
+    },
+    {
+      "path": "LICENSE.txt",
+      "bytes": 166,
+      "sha256": "c5f3b11647b079db8510a74eaaf844b61684d19c8fee6eb3a25f69c4181f86bb"
+    }
+  ],
+  "archiveSha256": "0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9",
+  "license": "Public domain",
+  "build": {
+    "source": "leaf_sqlite.c",
+    "threadsafe": 1,
+    "omitLoadExtension": true,
+    "visibility": "hidden SQLite API symbols"
+  }
+}

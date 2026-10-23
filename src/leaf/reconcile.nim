@@ -74,7 +74,7 @@ proc plan*(r: Reconciler, snapshot: Snapshot, revision: uint64,
     let entity = MountedEntity(handle: handle, parent: parent,
       nodeId: mounted.id, kind: node.kind,
       props: (if adapter != nil: adapter(node) else: normalizeProps(node)),
-      index: index)
+      index: index, navigation: node.navigationProps)
     entities[handle] = entity
     byNodeId[mounted.id] = handle
     children.mgetOrPut(parent, @[]).add(handle)
@@ -84,7 +84,7 @@ proc plan*(r: Reconciler, snapshot: Snapshot, revision: uint64,
       created.incl(handle)
       createOps.add(UpdateOp(kind: opCreate, handle: handle, parent: parent,
         index: index, nodeId: mounted.id, nodeKind: node.kind,
-        props: entity.props))
+        props: entity.props, navigation: entity.navigation))
     for childIndex, child in mounted.children:
       discard visit(child, handle, childIndex, nodeReused)
     handle
@@ -148,10 +148,10 @@ proc plan*(r: Reconciler, snapshot: Snapshot, revision: uint64,
   var updateOps: seq[UpdateOp]
   for handle in reused:
     let next = entities[handle]
-    if next.props != r.entities[handle].props:
+    if next.props != r.entities[handle].props or next.navigation != r.entities[handle].navigation:
       updateOps.add(UpdateOp(kind: opUpdate, handle: handle, parent: next.parent,
         index: next.index, nodeId: next.nodeId, nodeKind: next.kind,
-        props: next.props))
+        props: next.props, navigation: next.navigation))
 
   result.baseRevision = r.revision
   result.baseGeneration = r.generation

@@ -237,7 +237,7 @@ proc contentIntrinsic(ctx: var LayoutContext, entity: MountedEntity,
   if ctx.cache.hasKey(key): return ctx.cache[key]
   if entity.handle in ctx.visiting: fail("layout cycle detected")
   ctx.visiting.incl(entity.handle)
-  if entity.kind in {NodeKind.column, NodeKind.row}:
+  if entity.kind in {NodeKind.column, NodeKind.row, NodeKind.navigation}:
     let horizontal = entity.kind == NodeKind.row
     let pad = entity.props.layout.padding.get(0.0)
     let contentSize = DipSize(width: nonNegative(effective.width - 2.0 * pad),
@@ -259,7 +259,7 @@ proc contentIntrinsic(ctx: var LayoutContext, entity: MountedEntity,
 proc arrange(ctx: var LayoutContext, entity: MountedEntity, rect, clip: DipRect,
              result: var seq[LayoutBox]) =
   result.add LayoutBox(handle: entity.handle, rect: rect, clip: clip)
-  if entity.kind notin {NodeKind.column, NodeKind.row}: return
+  if entity.kind notin {NodeKind.column, NodeKind.row, NodeKind.navigation}: return
   let horizontal = entity.kind == NodeKind.row
   let props = entity.props.layout
   let pad = props.padding.get(0.0)
@@ -324,6 +324,16 @@ proc resolveRoot(dim: Option[Dimension], available: float64): float64 =
   if dim.isNone: return available
   if dim.get.kind == dkFixed: dim.get.value else: available
 
+proc buildChildren(ctx: var LayoutContext,
+                   entities: Table[NodeHandle, MountedEntity]) =
+  ## One sibling index for a whole layout pass: never rebuilt per row.
+  for entity in entities.values:
+    ctx.children.mgetOrPut(entity.parent, @[]).add(entity)
+  var parents: seq[NodeHandle]
+  for parent in ctx.children.keys: parents.add(parent)
+  for parent in parents:
+    ctx.children[parent].sort(proc(a, b: MountedEntity): int = cmp(a.index, b.index))
+
 proc layoutTree*(entities: Table[NodeHandle, MountedEntity], content: DipSize,
                  measure: MeasureProc): seq[LayoutBox] =
   ## Lay out the accepted entity tree inside a finite content area. Returns a
@@ -341,12 +351,7 @@ proc layoutTree*(entities: Table[NodeHandle, MountedEntity], content: DipSize,
   if not found: fail("layout requires a root entity")
 
   var ctx = LayoutContext(measure: measure)
-  for entity in entities.values:
-    ctx.children.mgetOrPut(entity.parent, @[]).add(entity)
-  var parents: seq[NodeHandle]
-  for parent in ctx.children.keys: parents.add(parent)
-  for parent in parents:
-    ctx.children[parent].sort(proc(a, b: MountedEntity): int = cmp(a.index, b.index))
+  ctx.buildChildren(entities)
 
   let rootRect = DipRect(x: 0, y: 0,
     width: nonNegative(resolveRoot(root.props.layout.width, contentSize.width)),
@@ -356,6 +361,81 @@ proc layoutTree*(entities: Table[NodeHandle, MountedEntity], content: DipSize,
   var boxes: seq[LayoutBox]
   arrange(ctx, root, rootRect, rootClip, boxes)
   boxes
+
+type
+  LayoutScope* = object
+    ## Reusable layout context for repeated subtree calls (for example one
+    ## native row per list viewport). The sibling index, the handle index and
+    ## the measurement cache are built once, so laying out many rows never
+    ## rebuilds or rescans the whole entity table. Callers own the scope; a
+    ## changed entity table needs a new one. This is an internal reuse seam, not
+    ## a second layout engine.
+    ctx: LayoutContext
+    byHandle: Table[NodeHandle, MountedEntity]
+
+proc initLayoutScope*(entities: Table[NodeHandle, MountedEntity],
+                      measure: MeasureProc): LayoutScope =
+  if measure == nil: fail("layout scope requires a measure proc")
+  result.ctx.measure = measure
+  result.ctx.buildChildren(entities)
+  for entity in entities.values: result.byHandle[entity.handle] = entity
+
+proc findEntity(scope: LayoutScope, root: NodeHandle): MountedEntity =
+  ## O(1) lookup in the scope's own handle index; no per-row rescan.
+  if root == NoHandle: return
+  scope.byHandle.getOrDefault(root)
+
+proc measureSubtree*(scope: var LayoutScope, root: NodeHandle,
+                     available: DipSize): DipSize =
+  ## Preferred size of one accepted subtree inside a finite local constraint.
+  ## The root does not have to be the table root and its parent is irrelevant.
+  let node = scope.findEntity(root)
+  if node.handle == NoHandle: fail("layout subtree root is not in the table")
+  let size = DipSize(width: nonNegative(available.width),
+    height: nonNegative(available.height))
+  result = contentIntrinsic(scope.ctx, node, size)
+  # A subtree root has no parent to apply its declared fixed extents, so honour
+  # them here exactly like `layoutTree` does for the table root.
+  let width = node.props.layout.width
+  if width.isSome and width.get.kind == dkFixed:
+    result.width = nonNegative(width.get.value)
+  let height = node.props.layout.height
+  if height.isSome and height.get.kind == dkFixed:
+    result.height = nonNegative(height.get.value)
+
+proc validateRect(rect: DipRect, what: string) =
+  ## Subtree geometry inputs must be finite and non-negative; finite negative
+  ## offsets stay legal because scrolled-out boxes are clipped, not rejected.
+  for value in [rect.x, rect.y, rect.width, rect.height]:
+    if classify(value) in {fcNan, fcInf, fcNegInf}:
+      fail(what & " is not finite")
+  if rect.width < 0.0 or rect.height < 0.0:
+    fail(what & " extent is negative")
+
+proc layoutSubtree*(scope: var LayoutScope, root: NodeHandle, rect,
+                    clip: DipRect): seq[LayoutBox] =
+  ## Lay out one accepted subtree into `rect`, clipped by `clip`. The root needs
+  ## no parentless identity, so a list row or a nested list can be laid out as
+  ## its own finite viewport without re-rooting the accepted tree.
+  validateRect(rect, "layout rect")
+  validateRect(clip, "layout clip")
+  let node = scope.findEntity(root)
+  if node.handle == NoHandle: fail("layout subtree root is not in the table")
+  var boxes: seq[LayoutBox]
+  arrange(scope.ctx, node, rect, clip, boxes)
+  boxes
+
+proc measureSubtree*(entities: Table[NodeHandle, MountedEntity], root: NodeHandle,
+                     available: DipSize, measure: MeasureProc): DipSize =
+  ## Convenience wrapper: builds one scope for a single subtree measurement.
+  var scope = initLayoutScope(entities, measure)
+  scope.measureSubtree(root, available)
+
+proc layoutSubtree*(entities: Table[NodeHandle, MountedEntity], root: NodeHandle,
+                    rect, clip: DipRect, measure: MeasureProc): seq[LayoutBox] =
+  ## Convenience wrapper: builds one scope for a single subtree layout.
+  var scope = initLayoutScope(entities, measure)
+  scope.layoutSubtree(root, rect, clip)
 
 proc dipToPixel(value: float64, dpi: int): int =
   if classify(value) in {fcNan, fcInf, fcNegInf}: fail("non-finite pixel edge")

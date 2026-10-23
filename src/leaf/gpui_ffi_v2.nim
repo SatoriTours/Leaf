@@ -282,6 +282,10 @@ proc encodeBatch*(batch: HostBatch): OwnedFfiBatch =
   # Reject the aggregate child pool before reserving or copying its memory.
   var reserved = uint64(sizeof(LeafBatch)) + uint64(batch.ops.len) * uint64(sizeof(LeafOp))
   for op in batch.ops:
+    if op.kind in {HostOpKind.create, HostOpKind.update} and
+        (op.nodeKind == NodeKind.navigation or op.props.navigation.isSome or
+         (op.props.eventMask and EventBackMask) != 0):
+      fail("GPUI ABI 2 does not support native navigation")
     if op.kind == HostOpKind.setChildren:
       let bytes = uint64(op.children.len) * uint64(sizeof(uint64))
       if bytes > LEAF_V2_MAX_WIRE_BYTES - reserved:

@@ -63,7 +63,7 @@ type
     progress*: Option[float64]
     variant*: Option[ControlVariant]
     resetToken*: Option[uint64]
-    hasClick*, hasChange*, hasSubmit*: bool
+    hasClick*, hasChange*, hasSubmit*, hasBack*: bool
 
   AccessibilityProps* = object
     label*, hint*, value*: Option[string]
@@ -271,6 +271,7 @@ proc controlFrom(node: Node): ControlProps =
   result.hasClick = node.handler(click) != nil
   result.hasChange = node.handler(change) != nil
   result.hasSubmit = node.handler(submit) != nil
+  result.hasBack = node.handler(back) != nil
   case node.kind
   of NodeKind.button:
     result.label = some(node.text)

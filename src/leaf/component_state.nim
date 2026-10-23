@@ -167,6 +167,13 @@ proc stateAlive*[T](state:State[T]):bool=
   ## Internal validity query: the handle still names a live slot in its store.
   if state.store==nil:return false
   state.cellFor()!=nil
+proc requireStateExecution*[T](state:State[T])=
+  ## Internal guard for auxiliary controller facts that do not queue State.
+  ## They may arrive during a commit, but cannot act for a foreign Runtime.
+  if state.store==nil:fail("missing State runtime")
+  state.store.uiThread()
+  if executionRuntimeIdentity()!=0 and executionRuntimeIdentity()!=state.store.runtimeId:
+    fail("State belongs to another executing Runtime")
 proc stateOwnerMatches*[T](state:State[T],store:StateStore,owner:uint64):bool=
   ## Internal ownership query for runtime and context validation only.
   if store==nil or owner==0 or state.store==nil:return false

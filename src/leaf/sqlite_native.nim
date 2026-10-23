@@ -1,10 +1,6 @@
 ## Small binding to SQLite's stable C API; no compiler headers are required.
-when defined(windows):
-  const SQLiteLibrary = "winsqlite3.dll"
-elif defined(macosx):
-  const SQLiteLibrary = "libsqlite3.dylib"
-else:
-  const SQLiteLibrary = "libsqlite3.so(|.0)"
+import ./sqlite_link
+const SQLiteLibrary = SqliteDynamicLibrary
 
 type
   SqliteConnection* = object
@@ -12,7 +8,9 @@ type
   Authorizer* = proc(context: pointer, action: cint, first, second, database, trigger: cstring): cint {.cdecl.}
   ProgressHandler* = proc(context: pointer): cint {.cdecl.}
 
-{.push cdecl, dynlib: SQLiteLibrary.}
+{.push cdecl.}
+when not BundledSqliteEnabled:
+  {.push dynlib: SQLiteLibrary.}
 proc openConnection*(path: cstring, db: ptr ptr SqliteConnection, flags: cint, vfs: cstring): cint {.importc: "sqlite3_open_v2".}
 proc closeConnection*(db: ptr SqliteConnection): cint {.importc: "sqlite3_close_v2".}
 proc errorMessage*(db: ptr SqliteConnection): cstring {.importc: "sqlite3_errmsg".}
@@ -41,4 +39,5 @@ proc databaseFilename*(db: ptr SqliteConnection, name: cstring): cstring {.impor
 proc getAutocommit*(db: ptr SqliteConnection): cint {.importc: "sqlite3_get_autocommit".}
 proc libraryVersionNumber*(): cint {.importc: "sqlite3_libversion_number".}
 proc setProgressHandler*(db: ptr SqliteConnection, interval: cint, callback: ProgressHandler, context: pointer) {.importc: "sqlite3_progress_handler".}
+when not BundledSqliteEnabled: {.pop.}
 {.pop.}

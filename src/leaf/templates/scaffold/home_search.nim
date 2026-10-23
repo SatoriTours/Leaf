@@ -1,7 +1,8 @@
 proc renderSearch(state: HomeState): Node =
   view:
     column:
-      styles: {"gap": "16", "flex_grow": "1", "min_height": "0"}
+      styles: (when defined(android) or defined(windows): style({"gap": "16", "flex_grow": "1"})
+               else: style({"gap": "16", "flex_grow": "1", "min_height": "0"}))
       text "Search"
       input state.query:
         key: "search_query"

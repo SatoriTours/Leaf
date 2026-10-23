@@ -1,0 +1,29 @@
+buildscript {
+    repositories { google(); mavenCentral() }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:9.0.1'
+        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.20'
+    }
+}
+apply plugin: 'com.android.application'
+def evidence = layout.projectDirectory.dir('/home/jimxl/projects/leaf/target/verification/native-five-platform/s2/resources')
+layout.buildDirectory = evidence.dir('gradle-build')
+android {
+    namespace 'dev.leaf.testresources'
+    compileSdk 36
+    buildToolsVersion '36.0.0'
+    defaultConfig {
+        applicationId 'dev.leaf.testresources'
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName '0.0.1'
+    }
+    sourceSets.main {
+        kotlin.directories.add('src/main/java')
+        kotlin.directories.add('../../../native/android/src/main/java')
+        jniLibs.directories.add(evidence.dir('jniLibs').asFile.absolutePath)
+    }
+}
+
+dependencies { implementation 'androidx.recyclerview:recyclerview:1.4.0' }

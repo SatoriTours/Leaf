@@ -52,6 +52,7 @@ proc packageSdk*(options: PackageOptions): string =
   if options.commit.len notin 6..40 or not options.commit.allCharsInSet({'0'..'9', 'a'..'f'}):
     raise newException(ValueError, "commit must be a Git SHA")
   verifyOrmSources(root / "src")
+  verifySqliteSources(root / "src")
   createDir(options.output)
   let temporary = createTempDir("leaf-sdk-package-", "")
   defer: removeDir(temporary)
@@ -61,6 +62,7 @@ proc packageSdk*(options: PackageOptions): string =
   copyFileWithPermissions(options.bridge, sdk / "lib" / library)
   copyTree(root / "src", sdk / "src")
   copyTree(root / "include", sdk / "include")
+  copyTree(root / "native/android/src/main", sdk / "native/android/src/main")
   copyFileWithPermissions(root / "LICENSE", sdk / "LICENSE")
   copyFileWithPermissions(options.nimRoot / ("bin/nim" & executable), sdk / ("toolchain/nim/bin/nim" & executable))
   for directory in ["lib", "config"]: copyTree(options.nimRoot / directory, sdk / "toolchain/nim" / directory)

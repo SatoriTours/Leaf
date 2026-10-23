@@ -21,8 +21,15 @@ proc resolveBuild*(configured: BackendChoice, target = "", backend = "",
   result = BuildSelection(target: (if target.len == 0: hostTarget() else: target),
     backend: (if backend.len == 0: configured else: parseBackend(backend)),
     headlessOnly: headlessOnly)
-  if result.target notin ["windows", "linux", "macos"]: fail("unsupported build target: " & result.target)
+  if result.target notin ["windows", "linux", "macos", "android"]: fail("unsupported build target: " & result.target)
+  if result.target == "android":
+    if headlessOnly: fail("Android does not support headless execution")
+    if backend.len > 0 and result.backend != backendNative: fail("Android requires the native backend")
+    result.backend = backendNative
 proc validateHost*(selection: BuildSelection) =
+  if selection.target == "android":
+    if selection.backend != backendNative or selection.headlessOnly: fail("invalid Android build selection")
+    return
   if selection.target != hostTarget(): fail("cross compilation is not configured; build on target " & selection.target)
   if not selection.headlessOnly and selection.backend == backendNative:
     when not (defined(windows) and defined(amd64)):
