@@ -48,6 +48,24 @@ proc runCliIn(root: string, args: seq[string]): int =
   try: return leaf_cli.main(args)
   finally: setCurrentDir(previous)
 
+proc writeHeadlessRows(app: string) =
+  # Native templates use lazy lists; this fixture supplies their small viewport.
+  writeFile(app / "tests/headless_rows.nim", """
+import leaf
+proc realizeRows*(rt: Runtime) =
+  var lists: seq[tuple[key: string, count: int]]
+  proc collect(node: MountedNode) =
+    if node.node.kind == virtualList:
+      lists.add((node.node.key, node.node.listSource.len))
+    for child in node.children: collect(child)
+  collect(rt.snapshot.root)
+  for list in lists:
+    discard rt.materialize(list.key, 0, list.count)
+proc dispatchFixture*(rt: Runtime, key: string, event: Event): bool =
+  result = rt.dispatch(key, event)
+  rt.realizeRows()
+""")
+
 suite "Application and resource scaffolding":
   when defined(macosx):
     test "macOS system directory aliases allow scaffolding":
@@ -59,14 +77,17 @@ suite "Application and resource scaffolding":
   test "default SQLite storage survives processes and applies newly generated migrations":
     let app = base / "persistent"
     require runCliIn(app, @["g", "scaffold"]) == 0
+    writeHeadlessRows(app)
     writeFile(app / "tests/persistence.nim", """
 import std/os
 import leaf
 import leaf/host_session
 import ../app/application
-proc click(rt: Runtime, key: string) = doAssert rt.dispatch(key, Event(kind: click))
-proc change(rt: Runtime, key, value: string) = doAssert rt.dispatch(key, Event(kind: change, value: value))
+import ./headless_rows
+proc click(rt: Runtime, key: string) = doAssert rt.dispatchFixture(key, Event(kind: click))
+proc change(rt: Runtime, key, value: string) = doAssert rt.dispatchFixture(key, Event(kind: change, value: value))
 let rt = newRuntime(createApplication())
+rt.realizeRows()
 let title = "中文 '); DROP TABLE tasks; --"
 case paramStr(1)
 of "write":
@@ -418,14 +439,16 @@ else: doAssert false
     require runCliIn(app, @["g", "scaffold"]) == 0
     require runCliIn(app, @["g", "scaffold", "Note", "title:string", "archived:bool"]) == 0
     require runCliIn(app, @["generate", "scaffold", "Metric", "count:int", "amount:float"]) == 0
+    writeHeadlessRows(app)
     writeFile(app / "tests/integration.nim", """
 import std/strutils
 import leaf
 import ../app/application
 import ../config/database
-proc click(rt: Runtime, key: string) = doAssert rt.dispatch(key, Event(kind: click))
-proc change(rt: Runtime, key, value: string) = doAssert rt.dispatch(key, Event(kind: change, value: value))
-proc toggle(rt: Runtime, key: string, checked: bool) = doAssert rt.dispatch(key, Event(kind: change, checked: checked))
+import ./headless_rows
+proc click(rt: Runtime, key: string) = doAssert rt.dispatchFixture(key, Event(kind: click))
+proc change(rt: Runtime, key, value: string) = doAssert rt.dispatchFixture(key, Event(kind: change, value: value))
+proc toggle(rt: Runtime, key: string, checked: bool) = doAssert rt.dispatchFixture(key, Event(kind: change, checked: checked))
 let connection = openApplicationDatabase(":memory:")
 let rt = newRuntime(createApplication(connection))
 rt.change("task_draft", "  first task  ")

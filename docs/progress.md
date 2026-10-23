@@ -419,3 +419,5 @@ Android SQLite 基础已开发自测并整合：272源manifest3f7aa456…固定�
 - 提交前本地完整149套覆盖已完成：原总入口执行至第110套native_toolchain时出现1条旧Android拒绝oracle（957 OK/1 FAILED），与已接受Android默认native契约冲突；只修该测试，6项复验自然0，并用相同排序/ormCompilerArgs续跑剩余39套全部自然0（298 OK），未变前109套沿用。最终149套覆盖无未解测试失败，合并日志通过条目1256；不冒称首总入口一次全绿。第三方SQLite原文与精确patch context的空白按固定hash保留，其余staged diff check通过。source270独立审阅遇503计费范围查询超时，同配置有界续接一次，非额度结论、无切模型。
 
 - 跨源source-replacement C270独立报告844bab2e59c17848db97a9a79054df3bb40dbf7ec5d35da3b1d91d6bec9087f6已由主控核对实际diff、隔离compileOnly、RED/GREEN与10回归Native原始证据及270源零漂移接受；仅2私有文件+probe，片外工具链oracle也交叉核对无问题。完整probe RED/GREEN字节不同、failure属新增覆盖，非完整T2通过。source片验收非缓存输入297526/缓存10998784/输出132202，logged0/实付未知，含一次503后同配置续接；不换模型或重置轮次。用户本次口令按阶段成果提交至GitHub main并跟进对应CI，保持完整迁移未完成和当前空间保留。
+
+- 代码交付首推 main 145fb32 后，GitHub 三平台实跑暴露三处集成问题：Windows Linux-SDK测试夹具误用宿主.exe后缀、无窗口脚手架测试未请求新虚拟列表行、SQLite vendor checkout缺LF属性导致固定hash拒绝。修正仅测试与.gitattributes，产品字节未变。SDK夹具本地2项与独立正/负例通过；脚手架普通18项、隔离副本强制native列表模板分支18项、SQLite vendor4项均自然0；core.autocrlf=true旧规则6文件全漂移，新规则6文件全等。首次本地补验漏NIM环境与隔离副本漏LICENSE的方法失败保留，配置补齐后通过；Windows实际修复结果待新SHA CI。完整迁移未完成，当前空间与原始证据保留。

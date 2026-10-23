@@ -12,11 +12,11 @@ suite "bundled SQLite SDK inputs":
     let temporary = createTempDir("leaf-sqlite-sdk-", "")
     let nimRoot = temporary / "nim"
     for directory in ["bin", "lib", "config"]: createDir(nimRoot / directory)
-    let executable = when defined(windows): ".exe" else: ""
-    writeFile(nimRoot / ("bin/nim" & executable), "fixture compiler")
+    # These inputs target the Linux archive below, regardless of the test host.
+    writeFile(nimRoot / "bin/nim", "fixture compiler")
     writeFile(nimRoot / "lib/system.nim", "discard")
     writeFile(nimRoot / "config/nim.cfg", "# fixture")
-    let cli = temporary / ("leaf" & executable)
+    let cli = temporary / "leaf"
     let bridge = temporary / "bridge"
     writeFile(cli, "fixture CLI")
     writeFile(bridge, "fixture bridge")

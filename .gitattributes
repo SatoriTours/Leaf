@@ -1,4 +1,5 @@
 # These files are embedded or verified byte-for-byte; checkout must retain LF.
 src/leaf/templates/** text eol=lf
 src/leaf/vendor/orm/** text eol=lf
+src/leaf/vendor/sqlite/** text eol=lf
 tests/fixtures/** text eol=lf
