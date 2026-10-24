@@ -97,7 +97,16 @@ proc systemWin32Calls*(): Win32Calls =
   result.textMetrics = proc(dc: HDC, metric: ptr TEXTMETRICW): BOOL = GetTextMetricsW(dc,metric)
   result.textExtent = proc(dc: HDC, text: WidePtr, count: int32, size: ptr SIZE): BOOL = GetTextExtentPoint32W(dc,text,count,size)
   result.drawText = proc(dc: HDC, text: WidePtr, count: int32, rect: ptr RECT, flags: UINT): int32 = DrawTextW(dc,text,count,rect,flags)
-  result.systemParameters = proc(action,param: UINT, value: pointer, flags,dpi: UINT): BOOL = SystemParametersInfoForDpi(action,param,value,flags,dpi)
+  result.systemParameters = proc(action,param: UINT, value: pointer, flags,dpi: UINT): BOOL =
+    ## `SystemParametersInfoForDpi` does not support every action: it fails for
+    ## `SPI_GETWHEELSCROLLLINES`, whose value is a line count rather than a
+    ## per-DPI metric, so that one read goes through the plain API. The `dpi`
+    ## argument is unused there. Every other action keeps the ForDpi behaviour,
+    ## including `SPI_GETNONCLIENTMETRICS`.
+    if action == SPI_GETWHEELSCROLLLINES:
+      SystemParametersInfoW(action,param,value,flags)
+    else:
+      SystemParametersInfoForDpi(action,param,value,flags,dpi)
   result.systemMetric = proc(index: int32, dpi: UINT): int32 = GetSystemMetricsForDpi(index,dpi)
   result.openTheme = proc(window: HWND, classList: WidePtr, dpi: UINT): HTHEME = OpenThemeDataForDpi(window,classList,dpi)
   result.closeTheme = proc(theme: HTHEME): int32 = CloseThemeData(theme)

@@ -271,6 +271,28 @@ proc listProc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM,
         let delta = int32(cast[int16](wp shr 16))
         list.handleWheel(delta, int(GetDpiForWindow(window)))
         return 0
+      of WM_GETDLGCODE:
+        # Claim arrows/Home/End/PageUp/PageDown so the dialog manager and the host
+        # pump route them here instead of treating them as dialog navigation.
+        # DLGC_WANTALLKEYS is deliberately NOT claimed: Tab must keep moving focus
+        # and Enter must keep submitting, which the row editors already handle.
+        return DefSubclassProc(window, message, wp, lp) or DLGC_WANTARROWS
+      of WM_KEYDOWN:
+        # Translate a key to the *same* scroll codes the scrollbar produces, so the
+        # viewport keeps exactly one scroll authority (list.handleScrollCode). This
+        # only records intent and wakes an ordinary turn; it never lays out, drains
+        # or commits here.
+        var code = -1
+        case wp
+        of VK_UP: code = SB_LINEUP
+        of VK_DOWN: code = SB_LINEDOWN
+        of VK_PRIOR: code = SB_PAGEUP
+        of VK_NEXT: code = SB_PAGEDOWN
+        of VK_HOME: code = SB_TOP
+        of VK_END: code = SB_BOTTOM
+        else: discard
+        if code >= 0 and list.handleScrollCode(code): return 0
+        return DefSubclassProc(window, message, wp, lp)
       of WM_SIZE:
         list.want = true
         list.requestWake()
@@ -1007,7 +1029,9 @@ proc makeControl(win: Win32Backend, entity: MountedEntity): NativeControl =
     exStyle = 0x00010000'u32 # WS_EX_CONTROLPARENT: recursive native tab traversal
   of NodeKind.virtualList:
     # A real scrollable viewport: Unicode child window owning its row subtrees.
-    style = style or WS_VSCROLL or WS_CLIPCHILDREN
+    # WS_TABSTOP puts it in the native tab order so it can hold real keyboard
+    # focus; without it the arrows below could never reach this window.
+    style = style or WS_VSCROLL or WS_CLIPCHILDREN or WS_TABSTOP
   of NodeKind.text, NodeKind.tag: style = style or SS_NOPREFIX
   of NodeKind.button: className = "BUTTON"; style = style or WS_TABSTOP
   of NodeKind.input: className = "EDIT"; style = style or WS_TABSTOP or WS_BORDER or 0x80'u32

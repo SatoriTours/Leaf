@@ -114,11 +114,16 @@ proc settle(f: Fixture) =
   f.win.safeListTurn()
 
 proc systemWheelLines(host: Win32Host): int =
-  ## Read-only system policy for one wheel notch. The product must not hard-code
-  ## a line count and the test must not change the user's configuration.
+  ## Read-only system policy for one wheel notch, queried with the plain
+  ## `SystemParametersInfoW`: the ForDpi variant does not support
+  ## `SPI_GETWHEELSCROLLLINES` and would silently report its fallback. Only the
+  ## named GET action is used, param and flags are 0, and the user's
+  ## configuration is never modified. `host` is kept for call-site stability but
+  ## the line count is not a per-DPI quantity.
+  discard host
   var lines: UINT = 3
-  if SystemParametersInfoForDpi(SPI_GETWHEELSCROLLLINES, 0'u32, addr lines,
-      0'u32, UINT(max(96, int(GetDpiForWindow(host.windowHandle)))) ) == 0:
+  if SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0'u32, addr lines,
+      0'u32) == 0:
     return 3
   if int32(lines) == WHEEL_PAGESCROLL: return -1   # page scroll policy
   int(lines)

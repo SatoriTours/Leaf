@@ -1,0 +1,1 @@
+{"name":"LeafNativeList","identifier":"org.leaf.nativelist","version":"0.1.0","entry":"main.nim","include":["main.nim","application.nim","store.nim","README.md"],"backend":"native"}

@@ -241,6 +241,10 @@ proc GetDC*(window: HWND): HDC
 proc ReleaseDC*(window: HWND, dc: HDC): int32
 proc DrawTextW*(dc: HDC, text: WidePtr, count: int32, rect: ptr RECT, format: UINT): int32
 proc SystemParametersInfoForDpi*(action, param: UINT, value: pointer, flags, dpi: UINT): BOOL
+# Plain (non-DPI) variant. `SystemParametersInfoForDpi` only supports a subset of
+# actions and fails for `SPI_GETWHEELSCROLLLINES`; the line count is not a
+# per-DPI quantity, so it is queried through this API instead. Read-only GET use.
+proc SystemParametersInfoW*(action, param: UINT, value: pointer, flags: UINT): BOOL
 proc GetSystemMetricsForDpi*(index: int32, dpi: UINT): int32
 proc SetWindowRgn*(window: HWND, region: HRGN, redraw: BOOL): int32
 proc GetGuiResources*(process: HANDLE, flags: DWORD): DWORD
@@ -273,6 +277,14 @@ const
   WM_KEYDOWN* = 0x0100'u32
   WM_CHAR* = 0x0102'u32
   WM_GETDLGCODE* = 0x0087'u32
+  DLGC_WANTARROWS* = 1'i64      ## accept arrow keys (and Home/End/PageUp/PageDown)
+  DLGC_WANTALLKEYS* = 4'i64     ## accept every key: deliberately NOT used by lists
+  VK_END* = 0x23'u32
+  VK_HOME* = 0x24'u32
+  VK_UP* = 0x26'u32
+  VK_DOWN* = 0x28'u32
+  VK_PRIOR* = 0x21'u32          ## VK_PRIOR = Page Up
+  VK_NEXT* = 0x22'u32           ## VK_NEXT = Page Down
   WM_IME_STARTCOMPOSITION* = 0x010D'u32
   WM_IME_ENDCOMPOSITION* = 0x010E'u32
   WM_IME_COMPOSITION* = 0x010F'u32

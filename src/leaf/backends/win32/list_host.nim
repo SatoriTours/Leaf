@@ -109,6 +109,12 @@ type
       ## Monotonic user-intent counter. Only a plan prepared after the latest
       ## intent may clear `want`; an intent recorded during the attempt survives.
     appliedFirst*, appliedFinish*: int
+    requestedSourceGeneration*: uint64
+      ## Source generation of the last fact actually handed to the session.
+      ## Zero until the first fact, and a real accepted source is never zero, so a
+      ## fresh host cannot match. Same bare range under a NEW source is a
+      ## different fact (the rows it must materialize are different rows), never a
+      ## no-progress duplicate.
     calls*: Win32Calls
     wake*: proc() {.closure.}
     commands*: proc(receiver: HWND, wp: WPARAM, lp: LPARAM): bool {.closure.}
@@ -316,15 +322,22 @@ proc settleFrameDemand*(list: Win32ListHost, frame: ListFrame) {.raises: [].} =
   # re-issued by itself. Both signatures below are bare visible ranges; the
   # expanded neededFirst/neededFinish are rowset readiness facts, not requests.
   let newIntent = list.intentGeneration != frame.intentAtPrepare
-  list.want = newIntent or
-    (pending and
-     not (frame.first == list.requestedFirst and
-          frame.finish == list.requestedFinish))
+  # Suppress a repeat only when the very same source and the same bare range were
+  # already handed to the session. The fact identity is (source, range): under a
+  # new source the same 4..10 names entirely different rows, so the identical
+  # range is a NEW fact that must be requested again.
+  let sameFact = frame.first == list.requestedFirst and
+    frame.finish == list.requestedFinish and
+    frame.sourceGeneration == list.requestedSourceGeneration
+  list.want = newIntent or (pending and not sameFact)
 
 proc noteRowFactRequested*(list: Win32ListHost, first, finish: int) {.raises: [].} =
-  ## Scalar ack of the bare visible fact actually handed to the session.
+  ## Scalar ack of the bare visible fact actually handed to the session. The
+  ## source stamped here is the same scalar `viewportFact` carries, so the ack and
+  ## the fact it acknowledges cannot disagree.
   list.requestedFirst = first
   list.requestedFinish = finish
+  list.requestedSourceGeneration = list.generation
 
 proc installFrame*(list: Win32ListHost, frame: ListFrame,
                    desiredOffset: float64, intentGeneration: uint64) =
