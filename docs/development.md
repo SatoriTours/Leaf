@@ -2,7 +2,18 @@
 
 当前实现、固定提交的 CI 结果和待验范围见[开发进度](progress.md)；Windows 实跑按[当前版本验收步骤](windows-acceptance.md)记录，不以 Linux 或 SDK 构建代替。
 
-安装 Nim 2.2.6+ 和 Rust 1.92+，按照 README 安装平台图形依赖。GPUI Kit 固定为 0.7.0，提交 `Cargo.lock`。
+从源码开发 Leaf 需要 Nim 2.2.6+、Rust 1.92+ 和 C/C++ 编译器。GPUI Kit 固定为 0.7.0，提交 `Cargo.lock`。使用 SDK 开发应用无需 Rust，安装及运行依赖见[安装说明](installation.md)。
+
+Ubuntu / Debian 源码构建依赖：
+
+```sh
+sudo apt-get install build-essential pkg-config cmake libssl-dev libclang-dev \
+  libfontconfig1-dev libfreetype6-dev \
+  libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev \
+  libwayland-dev libvulkan-dev fonts-noto-cjk
+```
+
+构建并运行：
 
 ```sh
 cargo build --locked -p leaf-gpui
