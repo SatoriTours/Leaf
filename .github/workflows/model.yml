@@ -17,6 +17,10 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - name: 使用与 Windows SDK 相同的 C 编译链
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/prepare_windows_sdk.ps1
       - uses: jiro4989/setup-nim-action@v2
         with:
           nim-version: '2.2.6'

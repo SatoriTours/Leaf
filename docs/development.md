@@ -12,6 +12,8 @@
 
 不需要 Rust、Cargo、Vulkan 或其他渲染工具包。不要为了源码构建安装已删除的桥接依赖。
 
+Windows CI 和 SDK 使用 Nim 官方文档提供的 MinGW 发行包（见 `scripts/prepare_windows_sdk.ps1`），本轮验收以该编译链为准。其他 GCC 版本不能沿用该通过结论：首轮 Model CI 的系统 GCC 将 Nim 2.2.6 生成的 Win32 opaque-handle 闭包指针类型不匹配升级为编译错误；切换到与 SDK 一致的已校验发行包不代表修复了该代码生成兼容性问题。
+
 ## 构建与运行
 
 在仓库根目录：
