@@ -30,11 +30,11 @@ type
 
   ListRowBox* = object
     ## Pure geometry of one materialised row-subtree window: the parent-local
-    ## window rect and the viewport-space clip used for its region. No HWND, no
+    ## window rect plus the viewport-space rect/clip used for its region. No HWND, no
     ## resource owner, no business Node and no entity copy: a replay resolves the
     ## handle through the typed control store at apply time.
     handle*: NodeHandle
-    local*, clip*: DipRect
+    local*, rect*, clip*: DipRect
 
   ListFrame* = ref object
     ## Private native geometry plan. One frame owns its props, HeightIndex,

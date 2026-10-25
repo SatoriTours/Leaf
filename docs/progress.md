@@ -1,5 +1,45 @@
 # 开发进度与下一步
 
+## 2026-10-25 提交代码：入口与 Win32 行裁剪修复
+
+用户已授权“提交代码”：在当前 `wks_2a5b342b722663f0` / local（不隔离）/ main 提交本轮10个源码、测试及文档文件，推送核实的 GitHub 默认主分支并跟进同SHA全部相关Actions；不打版本Tag、不新建空间。复用下述冻结快照的自测和独立验收证据，不把提交或CI成功改写为部分滚动／cold资源／现场门通过。最终SHA、Actions、SDK及关联空间清单存于 `~/.local/state/agent-artifacts/leaf/2026-10-25-windows-beta-acceptance/code-delivery.json`。`docs/design/` 和另一界面设计会话属于范围外成果，保留且不夹带提交；共享空间承载其他任务及未关闭验收门，不归档。
+
+### 提交前验收快照：局部复验通过，部分滚动门仍阻塞
+
+本轮提交前的已交付基线为 `c72ca99dfad610ae06e95fad214b384c95046920`（main）。Windows 默认使用 Win32 系统控件，GPUI/Rust 桥接已移除；Linux/macOS GUI 暂缓，Android 保留既有原生路径，不扩大本轮平台范围。下面的日期化记录保留当时事实，旧段落中的“未提交／未发布／18套未执行”不是当前状态。
+
+上述基线 SHA 的远端结果已核实（不是本轮新提交的 CI）：
+
+| 验证 | 结果与固定入口 |
+| --- | --- |
+| 共享 Runtime 与 Windows Host | [CI 40156213233](https://github.com/SatoriTours/Leaf/actions/runs/40156213233) 成功；日志确认 145 套 Nim、18 套 Windows Host 全部通过，并生成原生示例 ZIP |
+| Model | [40156213287](https://github.com/SatoriTours/Leaf/actions/runs/40156213287) 三平台成功；Windows 使用与 SDK 一致的 MinGW 编译链 |
+| 数据库迁移 | [40156213216](https://github.com/SatoriTours/Leaf/actions/runs/40156213216) 三平台最终成功；首轮 macOS 偶发生成失败在重跑后通过，竞争根因未修复，不称首次全绿 |
+| SDK | [40156213210](https://github.com/SatoriTours/Leaf/actions/runs/40156213210) 构建、安装、重定位、离线 Model CRUD／持久化、后台任务和失败更新保护成功，已更新滚动 beta |
+
+Windows 包版本 `beta.c72ca99dfad6`，schema 2 / native，9,446,059 字节，SHA256 `7f4806d7fbcef2d50e1d2bf1147297b1d89cafa1de9d875723ce72fc9b576a63`。来源为[滚动 beta](https://github.com/SatoriTours/Leaf/releases/tag/beta)的 `leaf-sdk-windows-x86_64.zip`；该页面残留的旧 Linux/macOS 包不能充作当前原生产物。固定交付清单见 `~/.local/state/agent-artifacts/leaf/2026-10-24-remove-gpui/code-delivery.json`。
+
+### 本轮执行与出口
+
+以下为提交前执行记录：当时用户批准先收口 Windows SDK 实际应用链路，再处理资源和现场缺口、纠正文档；不扩功能，不提交／推送／发布／归档，不删除旧包。后续“提交代码”授权及当前交付范围见本节顶部。继续使用当前 local checkout（不隔离）。用户随后明确解除冻结，先批准修复两处示例入口；主控修改 `main.nim`、README 并增加入口回归，该阶段框架与 SDK 未改。a2 暴露列表视觉缺陷后，用户回复“继续”，再批准最小列表修复；当前运行源码再次冻结，原发布 SDK 未更新。独立功能验收单端使用既有 Windows Session1 环境。
+
+1. **a3 局部独立通过，整体阻塞／未完成**：a1 入口失败、a2 单行／末行不可见失败均保留。a3 使用原 SDK 隔离副本，仅覆盖两份冻结 Win32 框架源码；真实构建和搬迁交付 exe 的首0–4／尾9995–9999五行及末行控件均实际目视通过，非首行3编辑／勾选／保存、同库重开、默认 pack 与 ZIP 搬迁读回均实际 exit 0。但部分滚动控制未触发内容偏移，一次夹具纠正后仍未覆盖，因此该门阻塞，不能把机器 `scopePassed=true` 当整体通过，也不能把覆盖不足直接当新产品裁剪失败。主任务和补验任务均结束，无遗留进程；线上 beta 未更新。
+2. **资源门未关闭**：cold USER/GDI 原 FAIL 保留，尚无对象归属根因；已停止追加裸 API／控件变体，不放宽预算或将有限零分配围栏解释为系统零泄漏。完整 T2/T3/M4 不因 CI 全绿而关闭。
+3. **现场验证仍缺证据**：系统中文 IME、物理键鼠、混合 DPI／多屏、完整辅助功能；现有 96 DPI 自动消息与基础 UIA 不替代这些项。缺环境／图像能力时明确标阻塞，继续可独立执行的自动化。
+4. **单列兼容性与工具缺口**：其他 GCC 的 Win32 opaque-handle 类型兼容性尚未修复；macOS 偶发生成竞争未根治；原生 watch 与原生性能 producer 尚未实现。Android 的 API36/x86_64 模拟器证据不代表 arm64／API26／16KiB 完整设备矩阵。
+
+### 两处入口修复与新增列表视觉缺陷
+
+原入口同时存在 `--database` 被 `run(app)` 再次从全局解析，以及独立 `--check` 被示例拒绝的冲突。现仅由示例消费开头的可选数据库参数，剩余参数显式传给 `run(app, args)`；不剥除事件值中字面的 `--database`，不修改框架参数规则、不使用 `--binary` 绕过 pack 自检。`main.nim` SHA256 为 `1ff4581e8866304a91a9cf3b27f5c141c33478f08e3c4ea2a75d0a3bad77bc7e`。
+
+新增真实二进制入口回归先 **4 FAIL/1 OK**，修后 **5 OK**；覆盖独立 check、数据库加 check、Leaf 事件保存／同库重开、参数值边界及错误拒绝。本地官方入口 `NIM=/tmp/nim-2.2.6/bin/nim /tmp/nim-2.2.6/bin/nim c -r --out:target/nim/test_runner scripts/test.nim` 实际 **146 套通过／1235 OK／0 FAILED／5 平台 SKIPPED／exit 0**。随后仅修正测试输出文件的 Windows 扩展名拼接，对受影响 5 项重跑通过，并通过 Windows codegen（不冒充 Windows 运行）；应用代码未变，不重复全套。
+
+GPT a2 对相同修复 `main.nim` 实跑：SDK 安装 15.55s、构建 23.91s、显式数据库 check 0.95s、两次原生窗口 1.26s/1.39s、默认 pack 23.18s、搬迁交付 exe 0.47s，均实际 exit 0。同一 SQLite 最终仅 id0 一条修改，中文／emoji 备注与勾选恢复；保存后至交付进程退出数据库 hash 均为 `9069c26b971902a939cef33b3d3fbced97d5c7c2f03b4c0e87934704f1366a75`。这是旧发布 SDK 构建 dirty 示例的证据，未重组或更新线上 beta。
+
+**a2 必要门失败与后续修复：** 480px 视口只显示记录0一行；滚到底仅显示9995，看不到9996–9999，双方实际看图确认。用户批准继续后，定位为行内窗口位置已变成父局部坐标，区域裁剪却仍减自视口坐标。`ListRowBox` 现保存原视口 rect，位置仍用 local，region 使用同空间的 rect/clip；仅修改 Win32 私有投影两文件，不改共享布局或示例。真实示例测试新增首0–4／尾9995–9999各正尺寸子树窗口的区域及视口位置断言，原产品编译0／运行1复现第二行错位，修后运行0。另15项失败恢复及两项变高列表事务／滚动失败回放程序均运行0，三套共享定向回归28项通过；原146套只属于入口修复阶段，不冒称最终Win32快照全量重跑。自动区域断言不替代视觉：同一 GPT 的 a3 已实际看图确认构建／搬迁交付 exe 的首尾五行与9999完整可见，行3中文／emoji备注及勾选同库恢复、邻行不串行，默认pack／搬迁读回通过。部分滚动仍未有效触发：设置滚动条位置不等于内容偏移，合成拖动补验后真实行位置仍为0、96、192、288、384。故该必要门阻塞／未完成，未证明新的产品根因；停止原策略追加，不重跑已通过项。
+
+本轮材料位于 `~/.local/state/agent-artifacts/leaf/2026-10-25-windows-beta-acceptance/`：最新独立报告 `acceptance-gpt/report-a3.md`，原始 `run-a3/guest/`、定向缺口补验 `run-a3-partial/guest/`；回归见 `list-region-green/` 和 `list-region-shared-*`。a1/a2及此前失败完整保留。主控已核报告／结果／脚本／数据库／截图hash，并实际看过交付exe首尾两图。a3主任务Ready/0、部分滚动补验Ready/1，各app自身exit0、无残留进程；补验task1不是app1。未提交／发布，不称稳定版或整体迁移验收通过。
+
 ## 2026-10-24 Windows 原生去依赖：提交代码
 
 用户已明确授权本次提交代码：由原主控在现有 `wks_8912916759329604` / `/home/jimxl/projects/leaf` / main 统一提交本任务全部源码、测试、workflow与文档成果，整合并推送核实的远端默认分支，跟进新SHA全部相关Actions及Windows SDK；不打Tag、不新建空间、不派发Agent。现有145套分段回归及731文件Windows冻结证据复用，提交前后仅台账说明变化不重复全套。下节是提交前作者验证快照，不把本地SDK、历史CI或阶段性作者自测当成新SHA发布成功。交付SHA、Actions、SDK和空间清单最终结果保存在空间外 `~/.local/state/agent-artifacts/leaf/2026-10-24-remove-gpui/code-delivery.json`。当前保留历史17G诊断、完整Windows/SDK矩阵与资源/现场验收未完项，不为归档删除材料。

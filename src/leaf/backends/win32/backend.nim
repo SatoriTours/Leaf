@@ -1197,7 +1197,8 @@ proc projectRowPlan(win: Win32Backend, entity: MountedEntity, rect, clip: DipRec
         let parentRect = byHandle[parent]
         local.x = box.rect.x - parentRect.x
         local.y = box.rect.y - parentRect.y
-    into.add ListRowBox(handle: box.handle, local: local, clip: box.clip)
+    into.add ListRowBox(handle: box.handle, local: local, rect: box.rect,
+      clip: box.clip)
 
 proc noteRowsetReadiness(win: Win32Backend, list: Win32ListHost,
                          frame: ListFrame) =
@@ -1237,11 +1238,15 @@ proc applyRowBoxes(win: Win32Backend, boxes: seq[ListRowBox], dpi: int32) =
   for item in boxes:
     let control = win.controls.getOrDefault(item.handle)
     if control == nil: continue
-    let bp = pixelEdges(item.local, int(dpi))
-    if win.calls.windowPos(control.window, nil, int32(bp.left), int32(bp.top),
-        int32(max(0, bp.right - bp.left)), int32(max(0, bp.bottom - bp.top)),
+    let local = pixelEdges(item.local, int(dpi))
+    if win.calls.windowPos(control.window, nil, int32(local.left), int32(local.top),
+        int32(max(0, local.right - local.left)), int32(max(0, local.bottom - local.top)),
         SWP_NOZORDER or SWP_NOACTIVATE) == 0:
       nativeError("SetWindowPos row subtree")
+    # Region coordinates are window-local. Subtract the window's viewport
+    # rect from the viewport clip, NOT its parent-local placement: descendants
+    # of nonzero/partially scrolled rows otherwise receive displaced regions.
+    let bp = pixelEdges(item.rect, int(dpi))
     let cp = pixelEdges(item.clip, int(dpi))
     let region = win.calls.rectRegion(int32(max(0, cp.left - bp.left)),
       int32(max(0, cp.top - bp.top)),

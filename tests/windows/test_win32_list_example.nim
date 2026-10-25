@@ -7,6 +7,10 @@ import leaf/[core, backend, backend_session, ui_thread, native_layout]
 import leaf/backends/win32/[api, host, backend]
 import ../../examples/native_list/[store, application]
 
+# Read the installed window region, not just WS_VISIBLE/handle existence.
+proc GetWindowRgnBox(window: HWND, rect: ptr RECT): int32 {.
+  stdcall, dynlib: "user32.dll", importc, raises: [].}
+
 type TestFailure = object of CatchableError
 proc require(ok: bool, why: string) =
   if not ok: raise newException(TestFailure, why)
@@ -91,6 +95,38 @@ proc runWindow(storage: ListStore, reopen: bool) =
       for n, index in indices: require(index == first + n, "contiguous row identity")
       echo "rows=", indices, " source=", source
 
+    proc checkVisibleRows(first: int) =
+      var viewport: RECT
+      require(GetClientRect(port, addr viewport) != 0, "viewport client rect")
+      for index in first ..< first + 5:
+        let row = rowWindow(index)
+        require(row != nil, "visible row " & $index)
+        var rowRect: RECT
+        require(GetWindowRect(row, addr rowRect) != 0, "row screen rect")
+        discard MapWindowPoints(nil, port, cast[ptr POINT](addr rowRect), 2)
+        require(rowRect.top == int32((index - first) * 96) and
+          rowRect.bottom == rowRect.top + 96, "distinct visible row position")
+        children.setLen(0)
+        discard EnumChildWindows(row, collect, 0)
+        let subtree = @[row] & children
+        for window in subtree:
+          var rect, region: RECT
+          require(GetWindowRect(window, addr rect) != 0, "subtree screen rect")
+          let width = rect.right - rect.left
+          let height = rect.bottom - rect.top
+          if width <= 0 or height <= 0: continue # empty status text
+          let kind = GetWindowRgnBox(window, addr region)
+          echo "row=", index, " control=", className(window),
+            " region_kind=", kind, " region=", region,
+            " extent=", width, "x", height
+          require(kind == 2 and region.left == 0 and region.top == 0 and
+            region.right == width and region.bottom == height,
+            "fully exposed native subtree region for row " & $index & "/" & className(window))
+          discard MapWindowPoints(nil, port, cast[ptr POINT](addr rect), 2)
+          require(rect.left >= viewport.left and rect.top >= viewport.top and
+            rect.right <= viewport.right and rect.bottom <= viewport.bottom,
+            "native subtree lies inside actual viewport")
+
     proc observe() =
       inc ticks
       echo "window_reopen=", reopen, " tick=", ticks, " phase=", phase
@@ -108,6 +144,7 @@ proc runWindow(storage: ListStore, reopen: bool) =
         require(GetClientRect(port, addr client) != 0 and client.bottom == 480,
           "actual 480px list viewport")
         checkRows(0, 6)
+        checkVisibleRows(0)
         edit = control(row, "EDIT", "", false)
         check = control(row, "BUTTON", "完成")
         save = control(row, "BUTTON", "保存 0")
@@ -149,6 +186,7 @@ proc runWindow(storage: ListStore, reopen: bool) =
         let intent = win.listIntentForTest(list)
         if intent.appliedOffset != 959520.0: return
         checkRows(9994, 10000)
+        checkVisibleRows(9995)
         let last = rowWindow(9999)
         require(last != nil and caption(control(last, "EDIT", "", false)) == "末行 中文 😀",
           "actual final row reads its own persisted id")

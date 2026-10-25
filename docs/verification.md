@@ -1,8 +1,16 @@
 # 验证范围与历史记录
 
-> **当前范围（2026-10-24）：** Windows 默认使用系统原生控件；旧渲染桥接及其工具链已退出当前实现，Linux/macOS GUI 暂缓。下面保留旧快照的实际命令、失败和证据，**不是当前依赖安装说明，也不能作为本轮验收结果**。本轮进展见[开发进度](progress.md)，当前命令见[源码开发](development.md)。
+> **当前范围（2026-10-25）：** Windows 默认使用系统原生控件；GPUI/Rust 桥接已移除，Linux/macOS GUI 暂缓。`c72ca99` 的 Windows 原生 beta 已交付，但整体迁移验收尚未完成。下面折叠区仅保留历史证据，**不是当前依赖安装说明，也不代表当前快照通过**。最新状态见[开发进度](progress.md)，命令见[源码开发](development.md)。
 
-当前验证分为共享 Runtime/数据库/工具链测试，以及真实 Windows 默认入口、原生控件、打包和 SDK 检查。headless、代码生成和历史成功不能替代新的 Windows 运行证据；视觉、IME、物理输入、混合 DPI 与未关闭资源门分别报告。
+## 当前证据与未关闭门
+
+- **提交前基线 c72ca99 的 CI**：[40156213233](https://github.com/SatoriTours/Leaf/actions/runs/40156213233) 实际运行 145 套共享 Nim 测试和 18 套 Windows Host 测试成功；Model／数据库三平台工作流最终成功。Windows runner 只扫描 `test_*.nim`，不意味着 `probe_*.nim` 或全部现场矩阵均已执行。
+- **提交前基线发布 SDK**：[40156213210](https://github.com/SatoriTours/Leaf/actions/runs/40156213210) 的安装、重定位、Model CRUD／持久化及后台任务检查成功；对应 `beta.c72ca99dfad6`。安装说明见[这里](installation.md)。
+- **GPT a2 历史：功能链路通过，列表视觉不通过**。用户批准修复入口后，普通用户 Windows Session1 实测安装／构建、`--database` 与 `--check`、第一行编辑／保存／同库重开、默认 pack、ZIP 搬迁从交付 exe 读回均实际 exit 0，未用 `--binary` 绕过；task Ready/lastResult 0、无残留进程。但实际截图中视口只呈现一行，滚到底仅见9995、末行9999不可见，不能以绿色句柄断言宣称整体通过。报告见 `~/.local/state/agent-artifacts/leaf/2026-10-25-windows-beta-acceptance/acceptance-gpt/report-a2.md`；a1 参数失败与前旧端未执行记录保留为历史。
+- **提交前入口／列表修复验证**：入口阶段仅修改真实示例参数消费／显式转交，该阶段框架和已发布 SDK 未变。新增真实入口测试先4FAIL/1OK→5OK；官方本地146套/1235OK/0FAILED/5平台SKIPPED/exit0。之后仅更正测试 Windows 文件扩展名，定向5项与Windows codegen通过，不冒充Windows测试运行。随后获准修复列表：Win32 行子树保存视口 rect，用同空间 rect/clip 生成窗口区域。真实示例区域回归先运行1再0，失败恢复15项及两项变高事务／滚动失败回放程序均0，共享定向28项通过。原146套不扩称最终Win32快照全量结果；同一GPT的a3已完成审阅及独立视觉／交付复验：首尾五行和9999完整可见，非首行3保存／重开／邻行隔离、默认pack与搬迁同库读回通过；验收执行时原发布SDK未更新；本轮新提交及对应CI状态见[交付记录](progress.md)。
+- **最新 a3 整体裁定：阻塞／未完成**。部分滚动裁剪未有效触发；设置SIF_POS不能当SIF_TRACKPOS，合成拖动补验后行几何仍未偏移，原断言失败。没有证据认定新产品裁剪缺陷，也不判该门通过。主控已核原始结果／hash及实际交付首尾图；报告为 `acceptance-gpt/report-a3.md`。主任务Ready/0、补验Ready/1，各app自然exit0，ownedProcesses=[]；停止原控制策略追加，不重跑已通过项。
+- **资源与现场门**：cold USER/GDI 原 FAIL、完整 T2/T3/M4、真实系统 IME、物理键鼠、混合 DPI／多屏与完整辅助功能保持未关闭；自动消息、headless、代码生成和有限零分配围栏不能替代。
+- **已知限制**：本轮去 GPUI 尚无整体独立验收；其他 GCC 编译兼容性及 macOS 偶发生成竞争未根治。必需项缺证据报告“阻塞／未完成”，不能用 CI 或预发布标签代替。
 
 <details>
 <summary>展开历史记录（含已退役渲染器，不适用于当前构建）</summary>
