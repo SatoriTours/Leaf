@@ -1,1 +1,1 @@
-{"name":"LeafNativeForms","identifier":"org.leaf.nativeforms","version":"0.1.0","entry":"main.nim","include":["main.nim"],"backend":"native"}
+{"name":"LeafNativeForms","identifier":"org.leaf.nativeforms","version":"0.1.0","entry":"main.nim","include":["main.nim","model.nim"],"backend":"native"}
