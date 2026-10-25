@@ -34,12 +34,12 @@ suite "Nim release CLI and template":
   test "CLI packs an explicitly provided application and reports archive paths":
     let path = root / "provided"
     initProject(path)
-    var elf = newString(64)
-    elf[0..6] = "\x7fELF\x02\x01\x01"; elf[16] = '\x02'; elf[18] = '\x3e'; elf[52] = '\x40'
-    writeFile(root / "application", elf)
-    elf[16]='\x03'
-    writeFile(root / "libleaf_gpui.so", elf)
+    var pe = newString(392)
+    pe[0..1] = "MZ"; pe[60] = '\x80'; pe[128..131] = "PE\0\0"
+    pe[132] = '\x64'; pe[133] = '\x86'; pe[148] = '\xf0'; pe[150] = '\x02'
+    pe[152] = '\x0b'; pe[153] = '\x02'
+    writeFile(root / "application.exe", pe)
     let output = root / "dist"
-    check runCliIn(path, @["pack", "--target", "linux", "--binary", root / "application", "--output", output]) == 0
-    check fileExists(output / "provided-0.1.0-linux-x86_64.tar.gz")
-    check fileExists(output / "provided-0.1.0-linux-x86_64.tar.gz.sha256")
+    check runCliIn(path, @["pack", "--target", "windows", "--binary", root / "application.exe", "--output", output]) == 0
+    check fileExists(output / "provided-0.1.0-windows-x86_64.zip")
+    check fileExists(output / "provided-0.1.0-windows-x86_64.zip.sha256")

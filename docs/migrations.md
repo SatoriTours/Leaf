@@ -1,6 +1,69 @@
-# 数据库迁移
+# 数据库迁移：把表结构变更留在版本里
 
-Leaf 使用 SQLite 和声明式 Nim 迁移。Model 负责查询和持久化；迁移负责表结构，二者不会通过导入模块自动打开数据库。
+[文档首页](README.md) · [CRUD 脚手架](scaffolding.md) · [Model](models.md)
+
+**Model 管记录，迁移管表结构。** 迁移与代码一起提交；应用启动只做正向升级，不自动回滚。
+
+## 日常只需记住三步
+
+```mermaid
+flowchart LR
+    A["生成迁移"] --> B["编辑 change"]
+    B --> C["预览 SQL"]
+    C --> D["执行并记录历史"]
+```
+
+在已有 Leaf 项目中，假设已生成 Note 资源：
+
+```sh
+leaf g migration AddPriority
+# 编辑生成的 db/migrations/<编号>_add_priority.nim
+leaf db migrate --dry-run
+leaf db migrate
+leaf db status
+```
+
+把生成模板中的 `pending()` 替换为真实操作。下面是**完整迁移文件内容**：
+
+```nim
+import leaf/migrations
+
+migration add_priority:
+  change:
+    addColumn notes, priority, integer, default = 0
+```
+
+迁移文件在编译时自动发现，不必编辑注册表。新增字段后，还需按业务需要更新 Model / View；迁移不替你改应用代码。
+
+## 常用命令
+
+| 目的 | 命令 |
+| --- | --- |
+| 查看已执行与待执行 | `leaf db status` |
+| 只看计划，不改数据库 | `leaf db migrate --dry-run` |
+| 应用全部待执行迁移 | `leaf db migrate` |
+| 撤销最近一个版本 | `leaf db rollback --steps 1` |
+| 前进一个版本 | `leaf db forward --steps 1` |
+| 切到指定版本 | `leaf db migrate --to V` |
+
+> **回滚不等于恢复数据。** 删表、删列可能丢失数据；先备份，再检查双向计划。已执行迁移不能重写，修正结构应新增迁移。
+
+## 新项目和分支数据库
+
+完整脚手架已配置迁移；自定义项目先 `leaf db init`，再按输出把 `openApplicationDatabase()` 接入入口。
+
+```sh
+export LEAF_DATABASE_PATH="$PWD/dev.sqlite3"
+leaf db migrate --dry-run
+```
+
+应用与 CLI 共用数据库路径。Windows PowerShell 使用 `$env:LEAF_DATABASE_PATH = "$PWD/dev.sqlite3"`。切回缺少已执行迁移的分支会报错，优先使用各分支独立数据库。
+
+## 深入参考
+
+
+<details>
+<summary>创建项目、迁移文件与数据库配置</summary>
 
 ## 创建和维护
 
@@ -39,6 +102,12 @@ migration add_priority:
 
 `db/catalog.nim` 编译时自动发现该目录直接包含的迁移，新增、删除文件后重新构建即可，无需修改共享注册表。编译后的目录描述已嵌入可执行文件，可随 SDK 和应用搬迁。
 
+</details>
+
+
+<details>
+<summary>建表 DSL、字段类型与可逆操作</summary>
+
 ## DSL 和回滚
 
 迁移文件只包含 `import leaf/migrations` 和一个与文件名一致的 `migration` 声明。表、列和索引名使用裸标识符，无需预先定义变量；不允许在迁移内执行任意 Nim 代码。
@@ -72,6 +141,12 @@ migration create_archive:
 
 SQLite renameColumn 需要 3.25+，removeColumn 需要 3.35+；执行前会检查所选双向计划的实际能力，回滚 addColumn 同样需要 DROP COLUMN 支持。回滚仅恢复结构，不恢复已经删除的数据。
 
+</details>
+
+
+<details>
+<summary>全部命令、只读预览、逐步事务与迁移锁</summary>
+
 ## 命令语义
 
 | 命令 | 行为 |
@@ -90,6 +165,12 @@ SQLite renameColumn 需要 3.25+，removeColumn 需要 3.35+；执行前会检�
 
 每条迁移的 DDL 和历史记录在一个事务内提交，整条命令通过 OS 文件锁串行化。后续步骤失败会撤销当前步骤，此前已提交步骤保留并列于报告。等待锁后重新读取历史和计算计划；锁超时为 `concurrent_migration`。持久 `.leaf-migrate.lock` 文件存在不代表锁被持有，不要删除它来解锁。进程退出由系统释放锁；硬链接数据库的多路径并发不受支持。
 
+</details>
+
+
+<details>
+<summary>历史指纹、多分支合并与旧 SQL 兼容</summary>
+
 ## 历史和多分支
 
 `leaf_schema_migrations` 保留版本、名称、SQL 和源文件、双向操作、反向定义的 SHA256。已应用迁移缺文件、内容变化（包括注释）或历史格式未知时，修改命令和应用启动拒绝执行；`status` 指出版本和文件。修复结构时新增迁移，不能重写已执行历史。
@@ -97,6 +178,12 @@ SQLite renameColumn 需要 3.25+，removeColumn 需要 3.35+；执行前会检�
 两个分支新增不同编号的文件，合并后自动发现二者。已运行较高版本的数据库会补跑后合入的较低版本。重复版本、重复名称和跨 Nim/SQL 格式冲突在写入前拒绝；时间戳不能解决创建同一张表等语义冲突。切回缺少已应用迁移的分支会报 missing，应使用分支独立数据库，或先在拥有完整历史的分支显式回滚。
 
 旧 `.up.sql` / `.down.sql` 文件继续按原文、原名称读取，不改写历史 SQL。只有 up 的旧迁移可正向运行，但不可回滚。旧三列历史在受控事务内升级；第一次接入 down 文件仅建立当前校验基线，`legacy-unverified-down` 表示过去未记录的反向内容无法验证。生成器只转换可确认未修改的旧注册文件；人工配置冲突需手动接入，schema 1 的 service 与 AUTOINCREMENT 语义保留。schema 3 清单用 `model_schema` 记录业务模型版本，迁移编号保存为十进制字符串。
+
+</details>
+
+
+<details>
+<summary>JSON 报告、退出码、取消与专项测试</summary>
 
 ## 自动化和取消
 
@@ -113,3 +200,9 @@ nim c -r --out:target/nim/test_runner scripts/test.nim --database-only
 ```
 
 Windows/macOS 的锁、系统 SQLite 和中文路径由 `.github/workflows/database.yml` 实际运行验证；本地 Linux 测试和交叉生成 C 不能代替这些平台结果。
+
+</details>
+
+---
+
+数据库命令不依赖 GUI 或 Rust，但会编译项目中受信任的 Nim 配置。[源码开发与测试](development.md)

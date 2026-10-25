@@ -8,7 +8,7 @@
 ## is not evidence that any Windows host behavior passed.
 when defined(windows):
   import std/[os, osproc, strutils, algorithm]
-  import ../src/leaf/[windows_manifest, windows_paths]
+  import ../src/leaf/[windows_manifest, windows_paths, orm_config]
 
   proc execute(compiler, root: string, args: seq[string]): int =
     let process = startProcess(compiler, workingDir = root, args = args,
@@ -40,13 +40,15 @@ proc main(): int =
       let name = test.extractFilename.changeFileExt(ExeExt)
       let output = outputDirectory / name
       let cache = compilerPath(outputDirectory / (name & "-cache"))
-      var args = @["c", "--threads:on", "--forceBuild:on",
+      var args = @["c", "--threads:on", "--forceBuild:on", "-d:leafProtocolProbes",
         "--skipParentCfg:on", "--skipUserCfg:on",
         "--nimcache:" & cache.replace("$", "$$"),
         "--passC:-I" & quoteShell(compilerPath(directory)),
         "--path:" & compilerPath(root / "src").replace("$", "$$"),
         "--out:" & compilerPath(output).replace("$", "$$")]
       args.add(WindowsHeaderCompilerArgs)
+      for argument in ormCompilerArgs(compilerPath(root / "src")):
+        args.add(argument.replace("$", "$$"))
       let entry = compilerPath(test)
       # Use Nim's selected compiler, then link the same v6/PMv2 resource as apps.
       # No generated object in the source checkout is a prerequisite.

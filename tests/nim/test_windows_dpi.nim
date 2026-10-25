@@ -46,7 +46,7 @@ suite "Windows DPI decisions":
     test "real process contexts are isolated in probe subprocesses":
       let nim = getEnv("NIM", findExe("nim"))
       let probe = getTempDir() / "leaf-dpi-probe.exe"
-      let compiled = execCmdEx(quoteShell(nim) & " c --path:src --out:" & quoteShell(probe) & " tests/nim/windows_dpi_probe.nim")
+      let compiled = execCmdEx(quoteShell(nim) & " c -d:leafHeadlessOnly --path:src --out:" & quoteShell(probe) & " tests/nim/windows_dpi_probe.nim")
       check compiled.exitCode == 0
       for mode in ["default", "per_monitor_v2", "system", "per_monitor", "headless"]:
         let child = execCmdEx(quoteShell(probe) & " " & mode)

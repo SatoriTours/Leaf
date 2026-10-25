@@ -272,14 +272,14 @@ suite "Owned performance builds and measurements":
 
   test "no-build accepts an exact manifest and rejects changed source or binary":
     ownedFixture:
-      createDir(root / "crates/leaf-gpui/src")
-      writeFile(root / "crates/leaf-gpui/src/lib.rs", "// GPUI source\n")
-      writeFile(root / "Cargo.lock", "# locked dependencies\n")
+      createDir(root / "src/leaf/backends/win32")
+      writeFile(root / "src/leaf/backends/win32/facts.nim", "# native source\n")
+      writeFile(root / "config.nims", "# compiler configuration\n")
       var config = fixtureConfig()
       discard runPerformance(config, root)
       config.noBuild = true
       discard runPerformance(config, root)
-      for source in ["crates/leaf-gpui/src/lib.rs", "Cargo.lock"]:
+      for source in ["src/leaf/backends/win32/facts.nim", "config.nims"]:
         let path=root / source
         let previous=readFile(path)
         writeFile(path,previous & "changed\n")
@@ -443,15 +443,14 @@ emit(%*{"type": "complete", "group": "runtime", "cycles": 1})
         check parseFile(root / config.output / "latest.json")["status"].getStr == "failed"
 
   when defined(linux):
-    test "native without graphics fails explicitly and saves its report":
+    test "missing native producer fails explicitly and saves its report":
       ownedFixture:
-        delEnv("DISPLAY")
-        delEnv("WAYLAND_DISPLAY")
+        removeFile(root / "benchmarks/performance_native.nim")
         var config = fixtureConfig()
         config.suite = nativeSuite
         expect PerformanceError: discard runPerformance(config, root)
         let report = parseFile(root / config.output / "latest.json")
-        check "graphical session" in report["failures"][0].getStr
+        check "not implemented" in report["failures"][0].getStr
         check not fileExists(root / "trace")
 
     test "CPU request actually constrains the measurement child's affinity":

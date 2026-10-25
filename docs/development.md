@@ -1,130 +1,72 @@
-# 开发
+# 从源码开发 Leaf
 
-当前实现、固定提交的 CI 结果和待验范围见[开发进度](progress.md)；Windows 实跑按[当前版本验收步骤](windows-acceptance.md)记录，不以 Linux 或 SDK 构建代替。
+[文档首页](README.md) · [架构](architecture.md) · [验证范围](verification.md)
 
-从源码开发 Leaf 需要 Nim 2.2.6+、Rust 1.92+ 和 C/C++ 编译器。GPUI Kit 固定为 0.7.0，提交 `Cargo.lock`。使用 SDK 开发应用无需 Rust，安装及运行依赖见[安装说明](installation.md)。
+## 需要哪些工具
 
-Ubuntu / Debian 源码构建依赖：
+| 工作 | 环境 |
+| --- | --- |
+| 共享 Runtime、CLI、headless 与数据库测试 | Nim 2.2.6+、C 编译器 |
+| Windows 原生窗口与打包 | Windows x64、Nim、MinGW（含 windres） |
+| Android 现有构建路径 | 现成 SDK/NDK/JDK/离线 Gradle |
+
+不需要 Rust、Cargo、Vulkan 或其他渲染工具包。不要为了源码构建安装已删除的桥接依赖。
+
+## 构建与运行
+
+在仓库根目录：
 
 ```sh
-sudo apt-get install build-essential pkg-config cmake libssl-dev libclang-dev \
-  libfontconfig1-dev libfreetype6-dev \
-  libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev \
-  libwayland-dev libvulkan-dev fonts-noto-cjk
-```
-
-构建并运行：
-
-```sh
-cargo build --locked -p leaf-gpui
 nim c -d:release --out:target/nim/leaf src/leaf_cli.nim
-export PATH="$PWD/target/nim:$PATH"
-leaf --help
-leaf init my-app
-cd my-app
-# 将未修改的最小模板升级为完整应用。
-leaf g scaffold
-leaf g scaffold Note title:string archived:bool
-leaf db migrate --dry-run
-leaf db migrate
-leaf --watch
 ```
 
-`NIM` 指定 Nim 编译器，`CARGO` 指定 Cargo；`LEAF_LIBRARY` 指定包含 `leaf.nim` 的 Nim 源码目录；`LEAF_GPUI_ROOT` 指定包含桥接 Cargo workspace 的目录。`LEAF_GPUI_LIBRARY` 可以指定已编译桥接库；使用它时 CLI 直接复制该库。设置 `LEAF_GPUI_PROFILE=release` 可构建优化桥接库，默认使用 Cargo dev profile。
-
-项目配置 `leaf.json` 指定名称、入口、资源包含规则和平台二进制路径。`init` 创建多模块 Nim 项目和资源示例。资源根据程序位置解析，发布包可搬迁运行。
-
-`g scaffold` / `generate scaffold` 在当前目录创建完整页面组应用；加模型名与字段则在最近的 Leaf 项目生成并注册业务资源。所有项目命令从 cwd 向上查找最近的 `leaf.json`；旧 PROJECT 位置参数与 `--project` 已移除。两种模式支持 `--dry-run`，已有文件或被修改的自动注册文件会报告冲突。页面组、独立路由、模型、服务与迁移文件的约定见[脚手架说明](scaffolding.md)。完整模板默认 SQLite 持久化并在启动时执行待应用迁移；可用 `LEAF_DATABASE_PATH` 指定测试数据库。目标平台需要 SQLite 动态库。`init` 提供简洁示例，业务应用使用 `g scaffold`。
-
-应用命令支持 `--check`、`--headless`、`--click KEY`、`--change KEY VALUE`、`--submit KEY VALUE`、`--toggle KEY true|false` 和 `--list KEY FIRST FINISH`。`--trace`、`--log-file`、`--dump-tree` 提供诊断。
-
-watch 在后台编译候选，失败保留旧程序。候选在 GPUI 首次显示帧之后通过同步 ready 回调写入带代号和 PID 的就绪消息，随后监督器替换旧程序。每次成功替换重新初始化状态。
+Windows 产物为 `leaf.exe`。把 `target/nim` 加入当前终端 PATH 后，在应用目录：
 
 ```sh
-cargo test --workspace --locked
+leaf doctor --json
+leaf run
+leaf --check
+leaf --headless --click add
+leaf pack --target windows
+```
+
+`NIM` 指定 Nim 编译器；`LEAF_LIBRARY` 指向包含 `leaf.nim` 的源码目录。安装 SDK 时默认使用随包编译器和源码。`--backend native` 可省略；其他后端被拒绝。Linux/macOS GUI 尚未实现，使用 headless 检查。原生 `--watch` 暂不支持，不承诺热替换。
+
+## 测试入口
+
+```sh
+# 共享运行时、工具链和发布脚本
 nim c -r --out:target/nim/test_runner scripts/test.nim
-# 仅执行 SDK 归档、安装与发布工具回归
-nim c -r --out:target/nim/test_runner scripts/test.nim --release-only
-# 数据库 CLI、DSL、并发锁与历史回归（无需图形库或 Rust）
-nim c -r --out:target/nim/test_runner scripts/test.nim --database-only
-nim c -r --out:target/nim/native_test scripts/native_test.nim
-nim c -d:release -r --out:target/nim/benchmark benchmarks/runtime.nim
+# Model / 数据库专项
+nim c -r scripts/test.nim --model-only
+nim c -r scripts/test.nim --database-only
+# 真实 Windows host（只能在 Windows 执行）
+nim c -r --out:target/nim/test_win32 scripts/test_win32.nim
 ```
 
-## 本地工具链与动态依赖排查
+测试应保留实际命令、退出码、输入快照与原始日志。Windows runner 在非 Windows 返回 NotRun/退出 2，不能当通过。截图、物理输入、IME、混合 DPI 和辅助技术仍需实际环境核查。
 
-`NIM` 可指定已有 Nim 编译器的绝对路径；这不会创建名为 `nim` 的 shell 命令。直接执行文档中的 `nim ...` 前，仍需将该编译器目录加入当前终端 PATH，或改用其绝对路径。不要因为 PATH 缺少命令就重新安装一份工具链。
+## 诊断
 
-Linux 动态桥接库加载失败时，先确认文件存在，再检查其传递依赖：
+应用支持 `--trace`、`--log-file FILE`、`--dump-tree FILE`。诊断不得覆盖源码、配置或成为 watch 资源循环；完整快照会产生显式成本。headless 检查不初始化窗口，但应用初始化仍可能写数据库。
+
+Windows CLI 产物嵌入 Common Controls v6 / PerMonitorV2 manifest。直接 `nim c` 不自动得到同一资源；窗口启动会检查现有 DPI 上下文。逻辑尺寸是 DIP，不在业务代码重复乘比例。既有宿主 DPI 模式和全局系统设置不得为了测试擅自修改。
+
+## 性能：先说清测了什么
 
 ```sh
-ldd target/debug/libleaf_gpui.so
+nim c -d:release --out:target/nim/leaf-performance scripts/performance.nim
+target/nim/leaf-performance --suite runtime --output artifacts/performance
 ```
 
-`not found` 表示动态依赖缺失；不要直接将“native library could not be opened”归因于框架 ABI 或重建源码。若本机已有可信的依赖目录，可仅在本次测试的子 shell 中分别设置 `LIBRARY_PATH`（GCC 链接查找）与 `LD_LIBRARY_PATH`（运行时动态加载），二者不能互相替代。不要将临时 `/tmp` 路径写入 SDK、项目配置或系统 shell profile。
+运行时工作负载保留原始样本、校验与构建身份。`--suite native/all` 当前因原生测量 producer 未实现而明确失败，不再运行旧绘制基准。
 
-这只补足本机系统库搜索，不提供图形会话。`--check`/普通 headless 成功也不代表真实窗口可用；窗口仍需实际 X11/Wayland 环境和图形驱动。定向抽检不替代全量回归，系统依赖失败也不应当作产品行为的 RED。
+`benchmarks/components.nim` 仅测 managed Runtime 与 Host 批次准备；无原生 apply/layout/frame 数据。Nim 分配次数、存活堆、RSS 与 CPU 时间是不同指标，不能互相替代，也不能由 headless 微基准推断窗口 FPS。
 
-## 桌面与 Windows 验证
+## SDK 与资源
 
-真实桌面验收当前使用 Linux X11、Xvfb 和 xdotool。`LEAF_TEST_XVFB` / `LEAF_TEST_XDOTOOL` 可指定测试工具。Xvfb 中的软件图形结果不能代表硬件 GPU 性能。
+`scripts/package_sdk.nim` 组装原生 schema 2 SDK，不接受渲染库参数；`scripts/verify_sdk_install.nim` 验证安装和重定位。搬迁验证应清除编译器/源码覆盖，核对 doctor 指向随包工具，再检查生成应用、CRUD、迁移和后台任务。
 
-Windows 应用的尺寸、布局和字号采用逻辑像素，由 GPUI 按当前窗口的设备比例缩放一次。例如逻辑宽度 640 在 150% 下换算为 960 设备像素，不应再在页面中乘 1.5。
+Windows 应用默认使用系统 `winsqlite3.dll`；Android 使用固定的应用内引擎。连接只在创建线程使用；worker 自建连接。UI 与数据库不是联合事务。
 
-Windows CLI 的 build/run/watch/pack 共用 `startBuild`，为主 EXE 嵌入 ID=1、RT_MANIFEST=24 的 PerMonitorV2 manifest，保留 Common Controls v6 依赖。安装 SDK 的资源取自其 `src/leaf/resources/windows`，可随 SDK 搬迁。资源编译复用已选 MinGW GCC 同目录的 windres（其次 PATH），缺工具、工具失败或缺输出会终止构建。源码构建先用 Nim 的项目配置生成 C 编译/链接命令，确认同一 GCC；不兼容工具链明确失败。发现阶段的源码编译错误与正式编译错误一样返回可轮询的失败 BuildJob，保留诊断和退出码。CLI 与 Win32 测试 runner 显式选择 Windows 10 头文件（`_WIN32_WINNT=0x0A00`、`WINVER=0x0A00`），无需编辑 Nim 安装目录的配置。此路径仅支持现有 MinGW，未新增 MSVC/Clang 支持。
-
-仓库通过 `.gitattributes` 将内嵌模板、vendored ORM 与测试 fixture 固定为 LF，避免 Windows `core.autocrlf=true` 改变生成文件字节或 ORM 的 SHA256。新检出会自动遵循这些属性；已有 CRLF checkout 可在独立目录重新克隆后验证，不要强制覆盖包含未提交修改的目录。ORM 的原始字节哈希校验保持启用。
-
-直接 `nim c` 不自动嵌入应用资源；桌面入口在加载 GPUI 前按需加载 WinAPI，检查有效 DPI 上下文并尝试 PMv2。已是 PMv2 不重复设置；宿主已选 system/per_monitor 模式则保留并输出 `host_context`，unknown 或初始化失败输出 `failed` 和错误码。访问拒绝只有复查到 PMv2 才视为 already_set。不会强改线程模式。导入 Leaf 和 `--headless`/`--check` 不调用此初始化。Manifest 建立的进程上下文由 Windows 加载器在进程启动时决定，CLI 产物即使以 headless 运行也可能已是 PMv2；这与 headless 主动初始化是两回事。
-
-```powershell
-# 在已有 Windows Nim/MinGW/Rust 环境中，从项目根目录运行
-nim c --path:src --out:target\dpi-direct.exe tests\nim\windows_dpi_app.nim
-.\target\dpi-direct.exe --trace --log-file .\dpi-direct.jsonl
-```
-
-JSONL 的 `dpi` 记录包含 `awareness`、`status` 和 `error_code`。首帧的 `rendering` 记录包含 GPUI 当前窗口实测 `scale_factor` 和 `logical_size`；`device_size_calculated`、`dpi_from_scale_calculated` 为换算值，不是 Win32 DPI 或交换链实测。旧 ABI1 兼容路径已删除；历史记录仅作存档。ABI2 在成功 ready 严格协商 `capabilities.rendering_diagnostics=true` 后，才在窗口 bounds 变化时继续记录并去重；Nim 侧按比例和逻辑尺寸去重，`FRAME` 采样不重复写尺寸日志；非法尺寸或换算溢出只拒绝该诊断请求，不影响后续 ready。诊断不会因尺寸请求再次 ready 或改写 watch receipt。JSONL 仅为可选日志，不用于 UI 树传输；完整诊断需要重新编译框架/DLL 和应用。
-
-更新 SDK/框架后应重新编译主 EXE，已有 EXE 不会获得新 manifest。比例仍不符合系统设置时，先查应用属性中的 Windows 高 DPI 兼容性覆盖、启动宿主的 DPI 模式，再用[原生验证步骤](verification.md)核对实际 HWND DPI 和 GPUI 比例。当前 Linux 测试不能证明 Windows 清晰度已改善。
-
-数据库命令在 `target/leaf-db` 编译独立维护入口，不导入应用 UI，也不要求 Cargo 或 GPUI。`db init` 仅安装配置；自定义入口需显式调用 `openApplicationDatabase()`，完整脚手架自动接入。命令、DSL 与多分支规则见[数据库迁移](migrations.md)。
-
-## 组件性能与发布回归
-
-组件 CPU 基准：`nim c -d:release --mm:orc -d:nimAllocStats --path:src --out:target/nim/component_bench benchmarks/components.nim`。运行 `--mode managed-typed --static 100|1000|5000 --iterations 200 --warmup 50 --rounds 3 --output PATH`；仅托管模式保留，旧 JSON/typed 样本作为冻结历史证据，不再重建。计时内不输出报告。分配字段是 Nim allocator 的分配次数；RSS、堆占用与峰值另记，不能把存活堆增量当总分配字节数。
-
-`nim c -r scripts/verify_component_performance.nim MODE-100.json MODE-1000.json MODE-5000.json` 验证元数据、原始样本、业务正确性和局部计数约束；已移除的旧模式报告会被明确拒绝。CPU 工具只测 Runtime 与编码，Rust apply 和 GPUI 帧字段为空，不能据此推出帧率。
-
-`benchmarks/components_native.nim` 使用真实 GPUI 窗口。设置 `LEAF_GPUI_LIBRARY` 和 `LEAF_BENCH_MODE`，参数由 `LEAF_BENCH_STATIC/ITERATIONS/WARMUP/ROUNDS/OUTPUT` 指定。typed 模式测量 Rust prepare/apply 与显式 GPUI draw（layout+paint 合计），event-to-frame 含调度；纯 layout 无公开独立测量时保留空值。报告必须标明 Rust profile、库 hash、实际 GPU 或软件渲染，不能与 CPU 微基准混算。
-
-SDK 打包复制所有新 Nim 模块及 `include/leaf_gpui_v2.h`。实际搬迁回归应清除 `NIM/LEAF_LIBRARY/LEAF_GPUI_ROOT/LEAF_GPUI_LIBRARY` 覆盖，检查 doctor 指向随包编译器和源码，默认 GPUI build 的 staged DLL hash 与 SDK lib 相同，再运行组件应用。Linux 测试不能替代 Windows ABI、IME、DPI 和窗口验收。
-
-## 后台任务的线程与退出边界
-
-用 `examples/component_tasks.nim` 的 load/retry/status/go-other/go-retained/go-disposed 稳定 key 复现任务流程；`fail` 模拟 work 错误。worker 只用输入字符串和 `WorkerContext.cancelled`，示例操作约 500ms 且每步检查取消。真实 I/O 应设置自身超时/截止时间，框架的 4ms 泵预算不限制 work，也不能中断一个正在执行的业务 handler。窗口资源释放时间与进程最终等待非合作 work 的退出时间是两个指标，不能以窗口消失宣称 worker 已结束。
-
-数据库任务必须在线程内自建连接，Model/Query 也不能从 UI 线程传入。同步 `withDatabase` 只在本次调用栈中使用，不跨 await；退出时 finally 关闭本任务拥有的连接。例如只从 input 接收数据库路径：
-
-```nim
-import leaf/[sqlite, model, components]
-
-proc databaseWork(input: string, ctx: WorkerContext): string {.nimcall, gcsafe.} =
-  if ctx.cancelled: return "cancelled"
-  let db = openDatabase(input)
-  try:
-    withDatabase(db):
-      # Model/Query operations created here use this thread's own connection.
-      result = $db.query("SELECT 1").len
-  finally:
-    db.close()
-```
-
-SQLite 默认 busy timeout 为 5 秒；这不是整个任务的总超时。长查询、网络调用和第三方库需各自的操作超时及取消策略；取消不能回滚框架外已经提交的副作用。业务需要幂等键/事务时由业务定义。最终 ordinary close 可能等待不合作的 work，报告窗口与进程退出观测时间时须分列。
-
-新旧 GPUI 必须严格协商 task pump，旧库在任何新 work 启动前明确拒绝。不要用普通 HostConsumer 的存在推断支持，也不要在 status/ready/rendering 查询中驱动任务。Win32 任务 timer 独立于 close-retry timer；WndProc 只置任务标记，业务交付在保留 thread/lease/session/busy/hook 保护的 ordinary safeTurn。
-
-公开 launcher 的最终收尾由 `newRuntime`、`runHeadless`、desktop/native 和高层 `run` 共同传递 ownership；遇到 `RuntimeCleanupError` 或其宿主子类，先保存异常/owner，恢复失败的 scope 条件后显式 ordinary retry。不要在 catch/finally 中无条件立即重试，也不要因为 `run(...,cleanupOwner=addr owner)` 返回 0 就释放非 nil owner。headless 输出最终 Snapshot 后取消未提交任务、回收空闲 pool 并 dispose；没有新增自动 task pump。
-
-任务兼容普通测试会从 `tests/ffi/gpui_v2_library.c` 构建无 task capability 的双 ABI fixture，不依赖开发者 home。真实旧库 integration 为显式可选输入：设置 `LEAF_TASK5_OLD_LIBRARY` 为绝对库路径，可同时设置 `LEAF_TASK5_OLD_LIBRARY_SHA256`；配置时检查实际 SHA 和无 task capability，未配置的 integration 明确 SKIPPED。本轮保留旧生产库 `63ef5b8104253b14bfcda7dca45fe84cc8a8e3ce8840c1f2555cfdfec63af9a1` 历史证据，不覆盖该文件。
-
-native 关闭观测的两个分支使用同一个截止时间，观测子进程创建后立即 defer close；非零退出表示窗口已消失，挂起工具则报告超时并回收进程组/句柄。共享 deadline 约束轮询，既有 ManagedProcess.close 还可能使用最多 500ms TERM grace 再 KILL，不能把它写成对系统清理的抢占时限。
+发布、安装和打包细节：[SDK 安装](installation.md) · [应用打包](packaging.md)。

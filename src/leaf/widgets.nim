@@ -1,4 +1,4 @@
-## Typed Nim constructors for GPUI and GPUI Kit controls.
+## Typed Nim constructors for native controls and layout descriptions.
 import std/math
 import ./core
 export core

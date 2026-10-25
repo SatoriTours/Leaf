@@ -1,7 +1,7 @@
-## Shared build selection; selecting native never falls through to GPUI.
+## Native-only build selection; unsupported GUI targets never fall back.
 import ./core
 type
-  BackendChoice* = enum backendGpui, backendNative
+  BackendChoice* = enum backendNative
   BuildSelection* = object
     target*: string
     backend*: BackendChoice
@@ -13,9 +13,8 @@ proc hostTarget*(): string =
   else: "unsupported"
 proc parseBackend*(value: string): BackendChoice =
   case value
-  of "gpui": backendGpui
   of "native": backendNative
-  else: fail("backend must be gpui or native")
+  else: fail("backend must be native; other backends have been removed")
 proc resolveBuild*(configured: BackendChoice, target = "", backend = "",
                    headlessOnly = false): BuildSelection =
   result = BuildSelection(target: (if target.len == 0: hostTarget() else: target),
@@ -31,6 +30,8 @@ proc validateHost*(selection: BuildSelection) =
     if selection.backend != backendNative or selection.headlessOnly: fail("invalid Android build selection")
     return
   if selection.target != hostTarget(): fail("cross compilation is not configured; build on target " & selection.target)
-  if not selection.headlessOnly and selection.backend == backendNative:
+  if not selection.headlessOnly:
+    if selection.target != "windows":
+      fail("native GUI backend not implemented for " & selection.target & "; use --headless or --check")
     when not (defined(windows) and defined(amd64)):
-      fail("native windows require a Windows x64 build host")
+      fail("native Windows GUI requires a Windows x64 build host")

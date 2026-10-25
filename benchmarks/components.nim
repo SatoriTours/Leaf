@@ -1,6 +1,6 @@
-## CPU runtime + encoding only. Real GPUI frames are a separate benchmark.
+## CPU managed-runtime and host-batch preparation only; no native drawing.
 import std/[os,osproc,json,strutils,monotimes,times]
-import leaf/[core,widgets,components,host_session,gpui_ffi_v2,managed_runtime,process_metrics,checksum]
+import leaf/[core,widgets,components,host_session,managed_runtime,process_metrics,checksum]
 var counter:State[int]
 let Counter* = defineComponent[int,State[int]]("BenchCounter",
   proc(ctx:MountContext,p:int):State[int]=
@@ -57,15 +57,10 @@ proc main()=
   var latest:UpdateStats
   var encodingMs=0.0
   var sinkRevision:uint64
-  proc encode(batch:HostBatch)=
-    let start=getMonoTime()
-    var wire=encodeBatch(batch)
-    discard wire.borrow()
-    let bytes=wire.wireBytes
-    encodingMs+=milliseconds(start)
-    rt.recordFfiBytes(bytes)
+  proc consume(batch:HostBatch)=
+    discard
   rt=newRuntime(componentApplication(makeBenchmarkDescription(size),"components"))
-  session=attachHostSession(rt,HostConsumer(sessionId:91,prepare:encode,apply:proc()=discard,
+  session=attachHostSession(rt,HostConsumer(sessionId:91,prepare:consume,apply:proc()=discard,
     accept:proc(r:uint64) {.raises:[].}=sinkRevision=r,discardPrepared:proc() {.raises:[].}=discard))
   var operations=0
   proc operation()=
@@ -100,7 +95,7 @@ proc main()=
   var raw=newJArray()
   for sample in samples:
     raw.add(%*{"latency_ms":sample.latency,"compute_ms":sample.compute,"encoding_ms":sample.encoding,
-      "rust_apply_ms":newJNull(),"gpui_layout_ms":newJNull(),"frame_ms":newJNull(),
+      "native_apply_ms":newJNull(),"native_layout_ms":newJNull(),"frame_ms":newJNull(),
       "allocations":sample.allocations,"counters": %sample.counters})
   var hardware=hostCPU
   when defined(linux):

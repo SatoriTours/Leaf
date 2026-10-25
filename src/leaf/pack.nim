@@ -1,7 +1,7 @@
 ## Compile and stage whole release batches before a no-overwrite hardlink commit.
 import std/[os, tempfiles, json, tables, strutils, algorithm, strtabs, monotimes, times, options]
 import ./[targets, android_build, android_tools, android_job, android_apk]
-import ./[core, project, native_binary, package_files, licenses, archives, checksum, build, process_io, gpui_build]
+import ./[core, project, native_binary, package_files, licenses, archives, checksum, build, process_io]
 
 proc nativeTarget*(): string =
   when defined(linux): "linux"
@@ -114,12 +114,10 @@ proc packAndroid(project:Project,output,binaryOverride,backend:string):seq[strin
 
 proc pack*(project: Project, target, output: string, binaryOverride = "", backend = ""): seq[string] =
   if target=="android":return packAndroid(project,output,binaryOverride,backend)
-  let selected = if backend.len == 0: project.backend else: parseBackend(backend)
-  if selected == backendNative: fail("A3 native packaging not implemented")
-  let targets = if target == "all": @["linux", "macos", "windows"] else: @[target]
-  for item in targets:
-    if item notin ["linux", "macos", "windows"]: fail("unknown release target: " & item)
-  if target == "all" and binaryOverride.len > 0: fail("--binary requires a single target")
+  discard resolveBuild(project.backend, target = "windows", backend = backend)
+  if target != "windows":
+    fail("native packaging not implemented for " & target & "; supported targets: windows, android")
+  let targets = @["windows"]
   beginInterruptHandling()
   defer: endInterruptHandling()
   let files = collectFiles(project)
@@ -140,7 +138,8 @@ proc pack*(project: Project, target, output: string, binaryOverride = "", backen
     let appRoot = resources / "app"
     copyFiles(project, files, appRoot)
     writeFile(appRoot / "leaf.json", pretty(%*{"name": project.name, "identifier": project.identifier,
-      "version": project.version, "entry": project.entryRelative, "include": project.includedPaths}) & "\n")
+      "version": project.version, "entry": project.entryRelative, "backend": "native",
+      "include": project.includedPaths}) & "\n")
     let licenseRoot = resources / "licenses"
     collectLicenses(licenseRoot)
     for relative in implicitLicenses: copyLicenseTree(project, relative, licenseRoot / "application" / relative)
@@ -162,13 +161,9 @@ proc pack*(project: Project, target, output: string, binaryOverride = "", backen
     else:
       if not isAbsolute(binary): binary = absolutePath(project.root / binary)
       binary = checkBinarySource(project, binary)
-    let bridge = binary.parentDir / gpuiLibraryName(item)
-    if not fileExists(bridge): fail("application needs its GPUI bridge beside the binary: " & bridge)
-    let bridgeArchitecture = nativeBinary(bridge, item, library = true)
     let architecture = nativeBinary(binary, item)
-    if bridgeArchitecture != architecture: fail("GPUI bridge architecture differs from application")
+    if architecture != "x86_64": fail("native Windows packaging requires an x86_64 application")
     copyRegular(binary, executable)
-    copyRegular(bridge, executable.parentDir / gpuiLibraryName(item))
     when defined(posix): setFilePermissions(executable, {fpUserRead, fpUserWrite, fpUserExec, fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
     if settings.icon.len > 0:
       let icon = checkSource(project.root, settings.icon)
@@ -182,7 +177,7 @@ proc pack*(project: Project, target, output: string, binaryOverride = "", backen
     writeFile(resources / "README.txt", "Native Nim application: " & project.name & " " & project.version & "\n" &
       "Executable: " & (if item == "macos": "../MacOS/" else: "bin/") & executable.extractFilename & "\n" &
       "Assets are resolved relative to the executable; working directory is unrestricted.\n" &
-      "Desktop uses the bundled GPUI + GPUI Kit bridge and system graphics drivers/fonts.\n" &
+      "Desktop uses Windows system-native controls; no rendering bridge is bundled.\n" &
       "Headless --check and --headless require no display. See licenses/inventory.json.\n" &
       "Application signing/notarization is a separate release step.\n")
     if built: checkApplication(executable, stage)

@@ -1,16 +1,18 @@
 # Windows 原生表单开发与验收
 
-当前代码/CI 状态见[开发进度](progress.md)，当前七套 runner 的身份、日志和平台验收步骤见[Windows 当前版本验收](windows-acceptance.md)。下文日期化的五套/77 项等数字保留为历史开发证据，不表示当前源码已在 Windows 全量重验。2026-10-18 新持久环境首轮的 12 通过/4 失败已保留；修正四项测试夹具后，七套非提权交互开发自测及独立复验均为 96 通过/0 失败，详见[环境记录](windows-environment.md)。这不批准完整 A2 平台支持或关闭 H 门。
+**2026-10-24 当前入口：** Windows 默认使用 Win32，省略 backend 即可；`leaf pack --target windows` 生成无渲染桥接 DLL 的 ZIP，SDK 使用原生 schema 2。当前测试与发布状态见[进度](progress.md)，使用方法见[原生表单](../examples/native_forms/README.md)和[打包](packaging.md)。下文带日期的验收数字均保留其历史输入范围。
+
+当前代码/CI 状态见[开发进度](progress.md)；runner 动态收集现有18套，身份、日志和平台验收边界见[Windows 验收](windows-acceptance.md)。本轮18套仅完成代码生成检查，其中任务/清理所有权与SQLite两套另有现场执行证据，不称完整矩阵通过。下文日期化的五套/77 项等数字保留为历史开发证据，不表示当前源码已在 Windows 全量重验。2026-10-18 新持久环境首轮的 12 通过/4 失败已保留；修正四项测试夹具后，七套非提权交互开发自测及独立复验均为 96 通过/0 失败，详见[环境记录](windows-environment.md)。这不批准完整 A2 平台支持或关闭 H 门。
 
 同日后续[真实窗口补验](windows-window-validation.md)：GPUI ABI1/2 本批任务流程、native_forms 键盘与基础 UIA 通过，期间发现原生模型标签缺字、resize才恢复的视觉失败；现已补局部客户区失效与屏幕回归，八套97/0开发自测及独立复验通过，重建应用的原键盘路径自然态完整。原失败保留。真实 IME、物理混合双屏和完整辅助技术 H 门仍未关闭；下方历史 NotRun 表述保留其日期范围。
 
 ## 当前范围
 
-A2 提供 Windows x64 原生表单后端：column、row、text、button、input、checkbox、toggle、progress、tag、separator、spinner。toggle 使用系统 checkbox 语义。默认后端仍为 GPUI；项目可在 leaf.json 设置 `"backend": "native"`，命令行 `--backend` 优先。
+A2 提供 Windows x64 原生表单后端：column、row、text、button、input、checkbox、toggle、progress、tag、separator、spinner。toggle 使用系统 checkbox 语义。默认后端已为原生；项目可省略 backend，显式 `"backend": "native"` 仍有效，其他后端被拒绝。
 
 原生后端支持有限 DIP 线性布局、系统字体测量、稳定控件身份、输入事件排队、受控值结算和递增 `resetToken`。普通同值响应保留编辑选区；组合输入期间延后冲突模型；显式 reset 在接受模型后的安全 turn 取消组合并设置最终值。平台句柄不进入 DSL、JSON 或业务事件。
 
-颜色、字体等装饰受 capability 策略约束；required 能力不足在挂载前拒绝，compatible 可报告装饰降级。A2 不提供列表、导航、Canvas、Android、原生打包或发布能力。`leaf pack --backend native` 会明确拒绝。这些属于后续阶段，不能据此宣布原生迁移全部完成。
+颜色、字体等装饰受 capability 策略约束；required 能力不足在挂载前拒绝，compatible 可报告装饰降级。最早 A2 批次不含列表、导航或打包；后续已加入 Win32 列表、导航及本轮 Windows ZIP。Canvas 未实现，Android 保留独立原生入口。各自历史测试不代表完整 T2、资源预算、视觉或全平台验收通过。
 
 ## 构建和运行
 

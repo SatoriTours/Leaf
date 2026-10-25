@@ -1,7 +1,7 @@
 ## Backend-neutral style syntax validation and typed property conversion.
 ##
-## This module owns the public style vocabulary that used to live in the GPUI
-## bridge. It parses the legacy string `Styles` tables once, into typed values
+## This module owns the backend-neutral public style vocabulary. It
+## parses string `Styles` tables once, into typed values
 ## that every backend can consume without re-parsing arbitrary strings. It
 ## contains no platform capability decisions: whether a given decoration can be
 ## honoured is declared separately by each backend.

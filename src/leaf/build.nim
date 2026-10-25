@@ -1,6 +1,6 @@
 ## A build can be polled while the previous desktop process continues running.
 import std/[os, strutils, options]
-import ./[core, project, process_io, gpui_build, sdk]
+import ./[core, project, process_io, sdk]
 import ./orm_config
 import ./[android_build, android_job]
 when defined(windows): import ./[windows_paths, windows_manifest]
@@ -10,7 +10,6 @@ type BuildJob* = ref object
   binary*: string
   android: AndroidJob
   process*: ManagedProcess
-  bridge: string
 
 proc libraryPath*(): string =
   let installed = sdkRoot()
@@ -44,9 +43,6 @@ proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedCon
   createDir(directory)
   result = BuildJob(binary: if output.len == 0: directory / "app".addFileExt(ExeExt)
     else: absolutePath(output.addFileExt(ExeExt)))
-  if not selected.headlessOnly and selected.backend == backendGpui:
-    result.bridge = ensureGpui()
-    stageGpui(result.bridge, result.binary)
   var executable = compiler()
   var sources = libraryPath()
   var cache = directory / "cache"
@@ -62,7 +58,7 @@ proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedCon
   # Nim expands dollar variables in path switches independently of the shell.
   var args = compilerBase(sources, cache, binary, isolatedConfig)
   if selected.headlessOnly: args.add("-d:leafHeadlessOnly")
-  elif selected.backend == backendNative: args.add("-d:leafNativeWin32")
+  else: args.add("-d:leafNativeWin32")
   when defined(windows):
     let bundledGcc = sdkGcc()
     var gcc=bundledGcc
@@ -96,8 +92,7 @@ proc startBuild*(project: Project, output = "", cacheDirectory = "", isolatedCon
   result.process = startManaged(executable, args, project.root)
 
 proc startHeadlessBuild*(project: Project, entry, output, cacheDirectory: string): BuildJob =
-  ## Compile a maintenance program without the GPUI bridge, staging or graphical
-  ## manifest, so database work runs on machines without Rust or GUI tooling.
+  ## Compile a maintenance program without the graphical manifest or GUI backend.
   let directory = if cacheDirectory.len == 0: project.root / "target" / "leaf-db"
     else: absolutePath(cacheDirectory)
   createDir(directory)

@@ -8,7 +8,6 @@ import std/[unittest, tables, options, sets, algorithm, strutils]
 import leaf/[core, widgets, components, backend, backend_session, host_session, host_protocol,
   host_reconcile, managed_runtime, native_host_adapter]
 import leaf/component_description
-import leaf/gpui_ffi_v2
 import leaf/backends/headless
 
 proc makeHost(sessionId = 101'u64, mountGeneration = 1'u64): HostContext =
@@ -508,7 +507,7 @@ suite "row binding rejection happens before platform prepare":
 
   test "a legacy snapshot list without typed rows is still accepted":
     # Snapshot plans never produce typed row bindings; the managed-only rule
-    # must not turn the existing GPUI path into a rejection.
+    # must not turn the existing snapshot compatibility path into a rejection.
     let r = newHostReconciler(5)
     let listNode = virtualList("list", @["a", "b"],
       proc(index: int): Node = text($index, key = "row"),
@@ -521,7 +520,7 @@ suite "row binding rejection happens before platform prepare":
       @[mountedDescription(listNode, "list-node", rows)])
     let snapshot = Snapshot(title: "t", width: 640, height: 480,
       root: rootMounted)
-    let candidate = r.planSnapshot(snapshot, 1, gpuiCompatible)
+    let candidate = r.planSnapshot(snapshot, 1, hostCompatible)
     r.accept(candidate)
     check r.revision == 1
     # Two unbound list children are also accepted through a delta plan.
@@ -734,33 +733,6 @@ suite "row binding rejection happens before platform prepare":
       children: @[HostChildren(parent: first, children: @[]),
         HostChildren(parent: second, children: @[moving])]), 2))
     check r2.revision == 2
-
-  test "the GPUI ABI encoder ignores the Nim-only row sidecar":
-    let list = NodeHandle(4)
-    let rowRoot = NodeHandle(5)
-    let binding = NativeRowBinding(listHandle: list, sourceGeneration: 3,
-      itemIndex: 7, itemKey: "k/中文/🙂")
-    var ops = @[
-      HostOp(kind: HostOpKind.create, handle: rowRoot, parent: list,
-        nodeId: "row", nodeKind: text, props: HostProps(),
-        row: some(binding)),
-      HostOp(kind: HostOpKind.update, handle: rowRoot, parent: list,
-        nodeId: "row", nodeKind: text, props: HostProps(),
-        row: some(binding)),
-      HostOp(kind: HostOpKind.remove, handle: rowRoot)]
-    proc signature(batchOps: seq[HostOp]): string =
-      var data = encodeBatch(HostBatch(sessionId: 3, baseRevision: 1,
-        nextRevision: 2, ops: batchOps))
-      let raw = data.borrow()
-      result.add($data.wireBytes() & "|" & $raw.ops_len & "|" & $raw.children_len &
-        "|" & $raw.strings_len & "|")
-      for index in 0 ..< int(raw.ops_len):
-        result.add(repr(cast[ptr UncheckedArray[LeafOp]](raw.ops)[index]) & "|")
-      let text = cast[ptr UncheckedArray[char]](raw.strings)
-      for index in 0 ..< int(raw.strings_len): result.add(text[index])
-    let withRow = signature(ops)
-    for op in ops.mitems: op.row = none(NativeRowBinding)
-    check signature(ops) == withRow
 
 suite "row bindings survive publication and restore":
   test "acceptedDelta, full metadata and restore keep rows":

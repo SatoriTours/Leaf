@@ -1,6 +1,6 @@
 import ./cleanup_support
-import std/[unittest, os, json, strutils, tempfiles]
-import leaf/[core, project, headless, build, process_io]
+import std/[unittest, os, json, strutils, tempfiles, options]
+import leaf/[core, project, headless, build, process_io, targets]
 import ../../examples/counter
 when defined(windows) or defined(macosx): import std/strtabs
 
@@ -22,7 +22,7 @@ suite "Nim project and headless tooling":
     createDir(directory)
     let source = directory / "main.nim"
     writeFile(source, "echo \"native executable ready\"\n")
-    let binary = build(readProject(source))
+    let binary = build(readProject(source), selection=some(resolveBuild(backendNative, headlessOnly=not defined(windows))))
     check binary.extractFilename == (when defined(windows): "app.exe" else: "app")
     checkBuiltExecutable(binary)
 
@@ -31,7 +31,7 @@ suite "Nim project and headless tooling":
     createDir(directory)
     let source = directory / "main.nim"
     writeFile(source, "echo \"native executable ready\"\n")
-    let binary = build(readProject(source), directory / "published name")
+    let binary = build(readProject(source), directory / "published name", some(resolveBuild(backendNative, headlessOnly=not defined(windows))))
     check binary.extractFilename == (when defined(windows): "published name.exe" else: "published name")
     checkBuiltExecutable(binary)
 
@@ -40,7 +40,7 @@ suite "Nim project and headless tooling":
     createDir(directory)
     let source = directory / "main.nim"
     writeFile(source, "echo \"native executable ready\"\n")
-    let binary = build(readProject(source), directory / "published.bin")
+    let binary = build(readProject(source), directory / "published.bin", some(resolveBuild(backendNative, headlessOnly=not defined(windows))))
     check binary.extractFilename == "published.bin"
     checkBuiltExecutable(binary)
 

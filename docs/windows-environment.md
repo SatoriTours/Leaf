@@ -1,3 +1,12 @@
+# Windows 持久环境与历史结果
+
+> **当前范围（2026-10-24）：** Windows 默认使用系统原生控件；旧渲染桥接及其工具链已退出当前实现，Linux/macOS GUI 暂缓。下面保留旧快照的实际命令、失败和证据，**不是当前依赖安装说明，也不能作为本轮验收结果**。本轮进展见[开发进度](progress.md)，当前命令见[源码开发](development.md)。
+
+当前验证分为共享 Runtime/数据库/工具链测试，以及真实 Windows 默认入口、原生控件、打包和 SDK 检查。headless、代码生成和历史成功不能替代新的 Windows 运行证据；视觉、IME、物理输入、混合 DPI 与未关闭资源门分别报告。
+
+<details>
+<summary>展开历史记录（含已退役渲染器，不适用于当前构建）</summary>
+
 # Windows 持久验收环境与首轮结果
 
 记录日期：2026-10-18。用户已授权重建 Docker Windows；本页记录实际完成与失败，不将环境重建完成等同于平台验收通过。首轮失败已保留；四项测试修复后的开发自测与独立功能复验均完成七套、96 通过/0 失败。后续重绘缺陷修复另经八套97/0开发自测与独立验收通过，见本页后续章节；这些批次均不批准完整平台或 H 门。
@@ -152,3 +161,5 @@ python3 /home/jimxl/.local/share/leaf/windows-acceptance/control/run-win32-case.
 当前没有安装 Git、Cargo/Rust 或整套 GPUI Windows 源码开发依赖，未执行 102 个通用套件；现成 SDK 已足够完成上面的 GPUI ABI1/2 任务窗口子集。用户语言仅 en-US，中日文基本语言组件均 NotPresent；真实 IME、不同 DPI 物理双屏、完整辅助技术体验、长期内存与硬件性能仍未验收。**环境重建、原四项测试修复及后续重绘修复验收完成；当前八套97/0独立通过，但P1完整平台与H门仍未关闭。**
 
 相关入口：[当前进度](progress.md)、[Windows 验收步骤](windows-acceptance.md)、[Win32 范围与 H 门](native-win32-validation.md)。
+
+</details>

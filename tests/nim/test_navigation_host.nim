@@ -1,7 +1,7 @@
 ## Opt-in native outlet: legacy renderPage remains a transparent outlet.
 import std/[unittest, tables, options]
 import leaf/[core, widgets, components, backend, backend_session, host_protocol,
-  host_reconcile, native_host_adapter, native_layout, managed_runtime, gpui_ffi_v2,
+  host_reconcile, native_host_adapter, native_layout, managed_runtime,
   navigation_protocol]
 import leaf/component_description
 import leaf/backends/headless
@@ -123,13 +123,6 @@ suite "typed native navigation host":
     expect UiError: discard attachBackend(rt, recording.backend, HostContext(sessionId: 903, mountGeneration: 1, contentWidth: 400, contentHeight: 700, scale: 1))
     check recording.prepareCalls == 0
 
-  test "GPUI wire refuses native navigation without changing old ABI":
-    let f = fixture()
-    let nav = f.recording.navEntity()
-    let op = HostOp(kind: HostOpKind.create, handle: nav.handle,
-      nodeKind: NodeKind.navigation, props: HostProps(navigation: nav.navigation))
-    expect UiError: discard encodeBatch(HostBatch(sessionId: 901, nextRevision: 1, ops: @[op]))
-    f.session.dispose()
 
   test "native navigation layout arranges its active page inside its own bounds":
     let f = fixture()

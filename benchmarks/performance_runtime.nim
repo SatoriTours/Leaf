@@ -115,7 +115,7 @@ when isMainModule:
     requireRelease()
     let config = harnessConfig()
     runMeasurements(newRuntimeWorkloads(), config, "runtime",
-      %*{"scope": "individual operation callback/render/validation/viewport; excludes GPUI, verification and GC; resource window includes verification and GC"},
+      %*{"scope": "individual operation callback/render/validation/viewport; excludes native drawing, verification and GC; resource window includes verification and GC"},
       emitStdout)
   except CatchableError as error:
     stderr.writeLine("performance runtime: " & error.msg)

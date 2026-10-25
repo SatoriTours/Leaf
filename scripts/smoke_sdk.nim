@@ -129,7 +129,7 @@ proc smokeSdk*(sdkPath: string, headlessOnly = false) =
   let sdk = absolutePath(sdkPath)
   let cli = sdk / (when defined(windows): "bin/leaf.exe" else: "bin/leaf")
   let environment = processEnvironment()
-  for key in ["NIM", "LEAF_LIBRARY", "LEAF_GPUI_ROOT", "LEAF_GPUI_LIBRARY", "LEAF_SDK"]: environment.del(key)
+  for key in ["NIM", "LEAF_LIBRARY", "LEAF_SDK"]: environment.del(key)
   let root = createTempDir("leaf sdk smoke ", "")
   defer: removeDir(root)
   let project = root / "smoke-app"
@@ -154,7 +154,7 @@ proc smokeSdk*(sdkPath: string, headlessOnly = false) =
   require(within(report["library"].getStr, sdk), "Leaf library is outside relocated SDK: " & $report)
   when defined(windows):
     require(within(report["cc"].getStr, sdk), "C compiler is outside relocated SDK: " & $report)
-  if not headlessOnly: require(report["gpui"]["available"].getBool, "GPUI unavailable: " & $report["gpui"])
+  if not headlessOnly: require(report["host_available"].getBool, "Native GUI host unavailable: " & $report)
   discard run("g", "scaffold")
   discard run("g", "scaffold", "Note", "title:string", "archived:bool")
   let preview = parseJson(run("db", "migrate", "--dry-run", "--json"))

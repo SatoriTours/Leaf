@@ -80,7 +80,7 @@ suite "Nim development watch":
     createDir(directory)
     let entry = directory / "main.nim"
     writeFile(entry, readyProgram("first"))
-    let supervisor = newWatchSupervisor(readProject(entry), scanIntervalMs = 0, debounceMs = 0, startupTimeoutMs = 500)
+    let supervisor = newWatchSupervisor(readProject(entry), scanIntervalMs = 0, debounceMs = 0, startupTimeoutMs = 500, headlessOnly = true)
     defer: supervisor.close()
     supervisor.waitFor(proc(): bool = supervisor.current != nil)
     let oldPid = supervisor.current.pid
@@ -136,7 +136,7 @@ suite "Nim development watch":
     writeFile(dump, "{\"known\":\"good\"}")
     let d = newDiagnostics(dumpFile = dump)
     defer: d.close()
-    let s = newWatchSupervisor(readProject(entry), d, scanIntervalMs = 0, debounceMs = 0)
+    let s = newWatchSupervisor(readProject(entry), d, scanIntervalMs = 0, debounceMs = 0, headlessOnly = true)
     defer: s.close()
     s.waitFor(proc(): bool = s.current != nil)
     let old = s.current
@@ -156,7 +156,7 @@ suite "Nim development watch":
     let scanner: FileScanner = proc(path: string): FileSnapshot =
       if slowScan: sleep(200)
       scanFiles(path)
-    let s = newWatchSupervisor(readProject(entry), scanIntervalMs = 1000, debounceMs = 0, scanner = scanner)
+    let s = newWatchSupervisor(readProject(entry), scanIntervalMs = 1000, debounceMs = 0, scanner = scanner, headlessOnly = true)
     defer: s.close()
     s.waitFor(proc(): bool = s.current != nil)
     let oldPid = s.current.pid

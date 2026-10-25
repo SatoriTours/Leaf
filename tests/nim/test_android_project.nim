@@ -68,10 +68,10 @@ suite "Android project selection":
     check not read(root, desktop).android.enabled
 
   test "Android always selects native and rejects desktop-only execution modes":
-    let chosen=resolveBuild(backendGpui, "android")
+    let chosen=resolveBuild(backendNative, "android")
     check chosen.backend == backendNative
     check chosen.target == "android"
     chosen.validateHost()
     check resolveBuild(backendNative, "android", "native").backend == backendNative
-    expect UiError: discard resolveBuild(backendGpui, "android", "gpui")
-    expect UiError: discard resolveBuild(backendGpui, "android", headlessOnly=true)
+    expect UiError: discard resolveBuild(backendNative, "android", "gpui")
+    expect UiError: discard resolveBuild(backendNative, "android", headlessOnly=true)

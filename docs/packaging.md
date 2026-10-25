@@ -1,14 +1,33 @@
-# 发布 Nim + GPUI 应用
+# 打包 Windows 原生应用
 
-```sh
-cd my-app
-leaf pack --target linux --output dist
+[文档首页](README.md) · [开发环境](development.md)
+
+在项目目录执行：
+
+```powershell
+leaf pack --target windows
+# 或使用已编译的 Windows x64 应用：
+leaf pack --target windows --binary path/to/app.exe --output dist
 ```
 
-发布工具编译 Nim 入口，并将 GPUI + GPUI Kit 动态库放在可执行文件旁。Linux 为 tar.gz，macOS 为 .app ZIP，Windows 为 ZIP；生成 SHA256，包含业务资源、Nim 与 Rust 依赖许可证信息。
+默认打包会从暂存的 include 内容编译应用，再运行暂存产物的 `--check`；不允许编译器悄悄引用未打包模块。提供 `--binary` 时检查文件头及 x64 架构，**不运行这个外部产物**，应由提供者另行验证。
 
-跨平台打包不能用本机二进制替代目标构建。预构建应用必须配有同目录的目标桥接库：Linux `libleaf_gpui.so`、macOS `libleaf_gpui.dylib`、Windows `leaf_gpui.dll`。`--binary` 或 `leaf.json` 的平台 binary 字段指定应用路径。工具检查目标文件头，并拒绝缺少桥接库的包。
+## 你会得到什么
 
-资源与动态库均按程序位置解析，工作目录不影响运行。发布者应将包解压至其他目录，验证 `--check`、headless 事件及真实窗口启动。系统仍需安装图形驱动、字体和平台运行库。签名与公证根据目标平台单独执行。
+```text
+dist/
+  <slug>-<version>-windows-x86_64.zip
+  <slug>-<version>-windows-x86_64.zip.sha256
+```
 
-发布扫描拒绝链接、越界路径、冲突文件名和超限归档，已有产物不会被覆盖。任何构建、验证或写入失败都会清理本次暂存结果。
+ZIP 包含 `bin/<slug>.exe`、`app/` 中的资源与源文件、`licenses/` 和说明。不需要渲染桥接 DLL；控件来自 Windows，默认 SQLite 使用系统 `winsqlite3.dll`。自定义 SQLite 动态库或其他业务原生依赖需另行安排，不会自动收集。
+
+路径冲突、符号链接、输出覆盖 include/许可目录、已有发布文件都会被拒绝；整批暂存成功后才发布，不覆盖旧包。请保留 SHA256 和完整产物。
+
+## 边界
+
+- 从源码编译窗口及打包需要 Windows x64、Nim、MinGW 和 windres。
+- Linux/macOS GUI、对应应用包及 `--target all` 暂不支持。
+- Android 保留现有 `leaf pack --target android` 路径，需已有工具链；当前是 debug APK，不是商店签名发布。
+- 自动 `--check` 验证逻辑，不代表视觉、IME、混合 DPI 或完整设备验收。
+- 必须核对对应源码提交的 SDK 工作流和产物，不能以旧 SDK 产物代替新原生包。

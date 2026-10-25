@@ -1,5 +1,5 @@
 ## Release runtime evidence for the migrated real application workloads.
-## Includes events, render, validation and visible-row construction; excludes GPUI.
+## Includes events, render, validation and visible-row construction; excludes native drawing.
 import std/[monotimes, times, json, algorithm]
 import leaf
 import ../example/[stocks, reports, chat]
@@ -32,5 +32,5 @@ for scenario in [("stocks_240_candles", stocksApp(), "stock_tick", ""),
     "runtime": runtime.stats})
 stdout.writeLine(pretty(%*{"implementation": "nim", "compiler": NimVersion,
   "platform": hostOS, "architecture": hostCPU, "mode": "release_orc",
-  "scope": "runtime events/render/validation/10 visible rows; excludes GPUI layout and drawing",
+  "scope": "runtime events/render/validation/10 visible rows; excludes native layout and drawing",
   "results": results}))

@@ -1,3 +1,12 @@
+# 验证范围与历史记录
+
+> **当前范围（2026-10-24）：** Windows 默认使用系统原生控件；旧渲染桥接及其工具链已退出当前实现，Linux/macOS GUI 暂缓。下面保留旧快照的实际命令、失败和证据，**不是当前依赖安装说明，也不能作为本轮验收结果**。本轮进展见[开发进度](progress.md)，当前命令见[源码开发](development.md)。
+
+当前验证分为共享 Runtime/数据库/工具链测试，以及真实 Windows 默认入口、原生控件、打包和 SDK 检查。headless、代码生成和历史成功不能替代新的 Windows 运行证据；视觉、IME、物理输入、混合 DPI 与未关闭资源门分别报告。
+
+<details>
+<summary>展开历史记录（含已退役渲染器，不适用于当前构建）</summary>
+
 # 验证
 
 ## 当前汇总（2026-10-18）
@@ -157,3 +166,5 @@ NotRun：真实 Windows/macOS、完整 Windows PE 构建、系统 IME、跨屏 D
 新 SDK 以真实 `--commit 1a79640bbf4b69b0fdb02ba978612a61f88f8a1e`、新CLI/production库重新打包，包 SHA `0997f5ebf85e9d93dad4bf575cec6440d472288e053212861d7fa91d421fa43c`，仓库外 `/tmp/Leaf SDK 最终修复 搬迁 $ 1a79640b/leaf-sdk` 实际解包，210 个源码/头文件一致。清五项覆盖后 doctor、普通 build、完整 migration/CRUD/持久化 smoke、任务实际“后台完成”和公开 launcher 清理/重试 fixture 全部 EXIT0；后者断言重复headless/check/help/error退出的 State/dispose/线程回基线、workCalls=0，以及out/default拒绝后retry。Nim/source来自SDK自身，系统GCC与OS依赖库路径仍保留。旧三包不覆盖，a3包仅历史通过。
 
 本波没有重跑官方100套/4套或历史四native矩阵，也不把旧成功称本波新输入；本波具体argv/exit/输入/日志、每项复用差异和完整报告位于 `target/verification/component-async-lifecycle/final-fix-0159895`，空间外备份 `/tmp/leaf-component-async-final-fix-0159895`。所有旧报告与失败证据保留，协调专门verification不在本提交范围。真实Windows/macOS/PE/IME/DPI、内存工具/长期RSS、线程创建失败注入、原独立Snapshot-export/diagnostic异常/联合Snapshot+error/动态wrongthread仍NotRun；未采样GPU帧/FPS/renderer。不得据此宣称全平台或系统零泄漏；没有合并、推送或归档。
+
+</details>

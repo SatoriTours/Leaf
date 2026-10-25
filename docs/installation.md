@@ -1,58 +1,38 @@
-# 安装 Leaf SDK
+# 安装与使用 Leaf
 
-SDK 把 Leaf CLI、Leaf 源码、Nim 2.2.6 编译器与标准库、预编译 GPUI 桥接库放在一起。Windows 安装器会自动从 Nim 官方源下载并校验 MinGW；创建应用无需安装 Rust，也无需设置 NIM、LEAF_LIBRARY 或 LEAF_GPUI_LIBRARY。
+[文档首页](README.md) · [源码开发](development.md)
 
-以下下载命令在发布工作流推送到 GitHub 并首次成功运行后可用。正式版需要至少一个 `vX.Y.Z` tag；此前可以安装 beta。
+**本轮先支持 Windows x64。** 原生 SDK 包含 CLI、Leaf 源码、Nim 2.2.6 编译器和标准库；Windows 安装器下载并校验 MinGW。不包含渲染桥接库，也不需要 Rust。
 
-## Linux / macOS
+> native-only 已有本地 Windows 构建与 SDK 安装验证；远端 SDK 是否可用须核对对应提交的发布工作流，不能仅依据源码已推送判断。此前 SDK 属于旧渲染实现，不能作为本轮原生产物。新安装器要求 `schema: 2`、`backend: native`，会拒绝旧 SDK。现在请从源码运行；下述下载命令须等本次对应发布工作流成功后使用。
 
-安装最新正式版（默认渠道）：
+## 现在：Windows 源码运行
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/SatoriTours/Leaf/main/install.sh | sh
-```
-
-安装或切换到最新 beta：
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/SatoriTours/Leaf/main/install.sh | sh -s -- --channel beta
-```
-
-指定正式版本：
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/SatoriTours/Leaf/main/install.sh | sh -s -- --version v0.1.0
-```
-
-默认 SDK 目录是 `~/.local/share/leaf/versions/`，命令入口为 `~/.local/bin/leaf`。安装器会把命令目录加入 `.profile` 以及 Bash/Zsh 配置；安装完成后打开新终端。重复运行安装命令即更新，切换渠道使用同一个 `leaf` 入口。旧 SDK 保留在 versions 目录，可以在不运行相关构建时手动清理。
-
-自定义目录时先下载安装器，再执行：
-
-```sh
-sh install.sh --channel beta --prefix /path/to/leaf --bin-dir /path/to/bin --no-path
-```
-
-`--no-path` 禁止修改 shell 配置。`--download-base` 可配置 HTTPS 镜像或 `file://` 离线目录，镜像应保持 GitHub Release 的路径结构和校验文件。
-
-## Windows
-
-在 Windows PowerShell 5.1 或 PowerShell 7 中安装正式版：
+准备 Nim 2.2.6+ 与 MinGW（含 windres），在仓库根目录：
 
 ```powershell
-& ([scriptblock]::Create((Invoke-RestMethod 'https://raw.githubusercontent.com/SatoriTours/Leaf/main/install.ps1')))
+nim c -d:release --out:target/nim/leaf.exe src/leaf_cli.nim
+.\target\nim\leaf.exe doctor --json
+.\target\nim\leaf.exe init my-app
+cd my-app
+..\target\nim\leaf.exe run
 ```
 
-安装或切换到 beta：
+检查 `doctor` 的 `host_available`、Nim、C 编译器及 windres。可通过 `NIM` 指定编译器、`LEAF_LIBRARY` 指向当前 `src`；通常无需覆盖。
+
+## 新 SDK 发布后：安装 beta
+
+在 PowerShell 5.1 或 7 执行：
 
 ```powershell
 & ([scriptblock]::Create((Invoke-RestMethod 'https://raw.githubusercontent.com/SatoriTours/Leaf/main/install.ps1'))) -Channel beta
 ```
 
-指定正式版本：在上一条命令结尾使用 `-Channel release -Version v0.1.0`。
+正式版使用 `-Channel release`，指定已有版本使用 `-Version vX.Y.Z`。默认 SDK 位于 `%LOCALAPPDATA%\Leaf\versions`，入口为 `%LOCALAPPDATA%\Leaf\bin\leaf.cmd`。支持 `-Prefix`、`-BinDir`、`-NoPath`、`-DownloadBase`。
 
-默认 SDK 位于 `%LOCALAPPDATA%\Leaf\versions`，命令入口为 `%LOCALAPPDATA%\Leaf\bin\leaf.cmd`，安装器会配置用户 PATH 和当前 PowerShell PATH。重复运行即更新。可使用 `-Prefix`、`-BinDir`、`-NoPath` 和 `-DownloadBase` 自定义安装。
+安装器经 HTTPS 下载并核对同一 Release 的 SHA256，再核对原生 SDK 元数据；失败不切换已有入口。校验和检测损坏，来源信任仍依赖 GitHub 仓库与 HTTPS。
 
-## 创建应用
+## 创建完整应用
 
 ```sh
 leaf --version
@@ -63,48 +43,20 @@ leaf g scaffold
 leaf g scaffold Note title:string archived:bool
 leaf db migrate --dry-run
 leaf --check
-leaf
+leaf run
 ```
 
-默认 SQLite 数据库位于系统用户数据目录，可通过 `LEAF_DATABASE_PATH` 覆盖。`leaf --check` 会运行应用的初始化和迁移，所以也会创建数据库。
+默认数据库位于用户数据目录，`LEAF_DATABASE_PATH` 可覆盖。初始化、迁移和 `--check` 可能创建或修改数据库，请用测试路径验证。
 
-## 平台依赖
+## 平台范围
 
-首批 SDK 支持 Linux x86_64（Ubuntu 24.04 及同等或更新的 glibc 环境）、macOS Intel / Apple Silicon、Windows x86_64。Linux ARM、Windows ARM 原生包尚未提供。macOS 构建运行器分别为 macOS 15 Intel 与 macOS 14 ARM；对应系统作为首批支持基线。
+| 平台 | 当前范围 |
+| --- | --- |
+| Windows x64 | 系统原生控件、源码构建、ZIP 打包；SDK 发布链以该平台为目标 |
+| Linux / macOS | GUI 与应用打包未实现；共享逻辑可 headless 检查，不在本轮开发后端 |
+| Android | 保留原生 Views、现有构建入口；需现成 SDK/NDK/JDK/离线 Gradle |
+| iOS | 后置 |
 
-Unix 编译应用仍需要系统 C 编译器。macOS 安装 Xcode Command Line Tools：
+## 维护者发布
 
-```sh
-xcode-select --install
-```
-
-Ubuntu 24.04 安装编译器及运行库：
-
-```sh
-sudo apt-get update
-sudo apt-get install -y build-essential libsqlite3-0 libfontconfig1 libfreetype6 \
-  libxkbcommon0 libxkbcommon-x11-0 libxcb1 libx11-xcb1 libwayland-client0 \
-  libwayland-cursor0 libwayland-egl1 libvulkan1 fonts-noto-cjk
-```
-
-Windows 使用系统 `winsqlite3.dll`；Nim 随 SDK 提供，C 编译器由同一安装命令自动下载配置。所有平台打开窗口都需要系统图形驱动和可用桌面会话。Linux 的具体运行库依赖可通过 `ldd SDK/lib/libleaf_gpui.so` 查看；headless 编译检查不初始化窗口。
-
-安装器使用 HTTPS 下载并核对同一 Release 下的 SHA256；校验失败或版本不匹配时不切换现有入口。SHA256 用于发现传输/资产损坏，发布来源的信任来自 GitHub 仓库与 HTTPS。
-
-## 维护者：自动发布
-
-- 推送 `main`：四个平台构建、原生安装验证、SQLite 脚手架编译成功后，更新 `beta` tag 的预发布。版本为 `beta.<commit 前 12 位>`，不成为 GitHub latest。
-- 推送 `vX.Y.Z`：创建正式 Release；上传全部 SDK 与校验文件后才公开。GitHub 按版本规则选择 latest；已存在的正式版不会静默覆盖。
-- 其他分支只运行现有 CI。发布工作流可手动重新运行；beta 发布前会核对当前 main，跳过已经过时的构建。
-- 不需要个人访问令牌，发布 job 使用仓库 `GITHUB_TOKEN` 的 `contents: write` 权限。仓库应允许 Actions 创建 Release；如果组织策略禁用该权限，需要维护者调整仓库设置。
-- `.github/workflows/release.yml` 负责 SDK；原有应用打包 `leaf pack` 继续用于发布开发者自己的应用。
-
-例如完成验证后发布首个正式版本：
-
-```sh
-git tag v0.1.0
-git push origin main
-git push origin v0.1.0
-```
-
-beta 在滚动更新资产的短暂时间内可能发生校验失败；已有安装会保留，稍后重试即可。工作流没有完成时，安装命令不会自行回退到其他渠道。
+推送 `main` 后，既有工作流构建并验证 Windows SDK，再更新滚动 beta；版本为 `beta.<SHA 前 12 位>`。显式推送 `vX.Y.Z` 才创建正式版本。发布保持原有校验、渠道隔离和旧正式版本保护。工作流未成功不算已交付，不能用旧产物充当本次成功。

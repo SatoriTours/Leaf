@@ -1,10 +1,11 @@
 ## Transactional development supervisor. Build, launch, then replace on readiness.
-import std/[os, tables, strtabs, monotimes, times, tempfiles, json]
-import ./[project, build, process_io, diagnostics, watch_files, watch_ipc]
+import std/[os, tables, strtabs, monotimes, times, tempfiles, json, options]
+import ./[project, build, process_io, diagnostics, watch_files, watch_ipc, targets]
 
 type FileScanner* = proc(root: string): FileSnapshot {.closure.}
 type WatchSupervisor* = ref object
   project: Project
+  headlessOnly: bool
   diagnostics: Diagnostics
   sessionDir*, message*: string
   current*, candidate*: ManagedProcess
@@ -73,11 +74,12 @@ proc publishDump(s: WatchSupervisor) =
 
 proc newWatchSupervisor*(project: Project, diagnostics: Diagnostics = nil,
                          scanIntervalMs = 500, debounceMs = 200,
-                         startupTimeoutMs = 10_000, scanner: FileScanner = nil): WatchSupervisor =
+                         startupTimeoutMs = 10_000, scanner: FileScanner = nil,
+                         headlessOnly = false): WatchSupervisor =
   if scanIntervalMs < 0 or debounceMs < 0 or startupTimeoutMs <= 0:
     raise newException(ValueError, "invalid watch intervals")
   createDir(project.root / "target" / "nim")
-  result = WatchSupervisor(project: project, diagnostics: diagnostics,
+  result = WatchSupervisor(project: project, diagnostics: diagnostics, headlessOnly: headlessOnly,
     scanInterval: initDuration(milliseconds = scanIntervalMs),
     debounce: initDuration(milliseconds = debounceMs),
     startupTimeout: initDuration(milliseconds = startupTimeoutMs), dirty: true,
@@ -179,7 +181,8 @@ proc stepImpl(s: WatchSupervisor) =
     s.token = s.sessionDir.extractFilename & "-" & $s.generation
     s.status("")
     s.dirty = false
-    s.buildJob = startBuild(s.project, s.candidateDir / "app".addFileExt(ExeExt))
+    s.buildJob = startBuild(s.project, s.candidateDir / "app".addFileExt(ExeExt),
+      selection = some(resolveBuild(s.project.backend, headlessOnly = s.headlessOnly)))
     s.diagnostics.record("build", "start", %*{"generation": s.generation})
 
 proc step*(s: WatchSupervisor) =

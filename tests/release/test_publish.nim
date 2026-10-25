@@ -139,13 +139,13 @@ fi
       writeFile(archive, "abc")
       writeFile(archive & ".sha256", abcSha256 & "  " & archive.extractFilename() & "\n")
     let assets = checkedAssets(directory)
-    check assets.len == 8
-    check assets[6].endsWith("leaf-sdk-windows-x86_64.zip")
+    check assets.len == 2
+    check assets[0].endsWith("leaf-sdk-windows-x86_64.zip")
     writeFile(assets[0], "tampered")
     expect ValueError: discard checkedAssets(directory)
     writeFile(assets[0], "abc")
     writeFile(assets[1], "")
     expect ValueError: discard checkedAssets(directory)
     writeFile(assets[1], abcSha256)
-    removeFile(assets[7])
+    removeFile(assets[^1])
     expect ValueError: discard checkedAssets(directory)

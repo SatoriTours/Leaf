@@ -57,12 +57,12 @@ try {
     } finally { $zip.Dispose() }
     Expand-Archive -LiteralPath $archive -DestinationPath $staging
     $sdk = Join-Path $staging 'leaf-sdk'
-    foreach ($file in @('bin/leaf.exe', 'src/leaf.nim', 'sdk.json', 'lib/leaf_gpui.dll',
+    foreach ($file in @('bin/leaf.exe', 'src/leaf.nim', 'sdk.json',
                        'toolchain/nim/bin/nim.exe', 'toolchain/nim/lib/system.nim')) {
         if (-not (Test-Path -LiteralPath (Join-Path $sdk $file) -PathType Leaf)) { throw "SDK file missing: $file" }
     }
     $metadata = Get-Content -LiteralPath (Join-Path $sdk 'sdk.json') -Raw | ConvertFrom-Json
-    if ($metadata.schema -ne 1 -or $metadata.channel -ne $Channel -or $metadata.target -ne 'windows-x86_64' -or
+    if ($metadata.schema -ne 2 -or $metadata.backend -ne 'native' -or $metadata.channel -ne $Channel -or $metadata.target -ne 'windows-x86_64' -or
         ($Version -and $metadata.version -ne $Version)) { throw 'SDK metadata does not match the requested version or target.' }
     & (Join-Path $sdk 'bin/leaf.exe') --version
     if ($LASTEXITCODE -ne 0) { throw 'SDK executable cannot run on this system.' }

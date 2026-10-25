@@ -22,7 +22,7 @@ proc parseLinuxMemoryStatus*(status: string): MemoryStatus =
     except ValueError: discard
 
 proc observeProcess*(): ProcessObservation =
-  # Nim allocator counters describe this thread's managed heap, not native GPUI
+  # Nim allocator counters describe this thread's managed heap, not platform-native
   # allocations or the process resident set. Keep both measurements distinct.
   result.heapBytes = uint64(getOccupiedMem())
   result.reservedHeapBytes = uint64(getTotalMem())

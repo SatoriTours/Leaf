@@ -1,6 +1,72 @@
-# 应用架构与一键脚手架
+# 生成一个有数据的应用
 
-完整应用和业务资源使用同一套页面组与路由接口。`g` 是 `generate` 的别名。
+[文档首页](README.md) → **完整应用与 CRUD** → [Model](models.md) → [迁移](migrations.md)
+
+**不从空白开始搭导航、表单和数据库。** 一条命令生成完整应用，再用一条命令添加业务资源。
+
+## 1. 创建应用，加入 Note
+
+在空目录执行；已有未修改的 `leaf init` 模板也能升级：
+
+```sh
+mkdir my-app
+cd my-app
+leaf g scaffold
+leaf g scaffold Note title:string archived:bool
+leaf run
+```
+
+你会得到可运行的首页、搜索、设置和 **Notes 的列表 / 新建 / 编辑 / 详情**。已保存记录进入 SQLite，关闭重开仍在；未保存草稿不持久化。`g` 是 `generate` 的别名。
+
+> 启动会应用待执行迁移，`leaf --check` 也会初始化数据库。测试时用独立 `LEAF_DATABASE_PATH`，不要指向生产数据。
+
+## 2. 知道代码放在哪里
+
+```text
+app/
+├── models/note.nim          # 字段、校验、scope
+├── pages/notes/
+│   ├── page.nim            # 组装页面
+│   ├── logic.nim           # 用户动作和数据操作
+│   └── views/              # 列表、编辑器、详情
+└── generated/pages.nim     # 自动注册
+config/routes.nim           # 人工路由入口
+db/migrations/              # 表结构历史
+tests/test_notes.nim        # 生成的测试
+```
+
+```mermaid
+flowchart LR
+    U["用户操作"] --> L["logic.nim"]
+    L --> M["Model / SQLite"]
+    L --> S["页面 State"]
+    S --> V["views/"]
+```
+
+页面组共享自己的状态；View 描述界面，逻辑层调用 Model。生成器会注册页面、路由和导航，不必手写导入链。
+
+## 3. 用命令预览，不覆盖手写成果
+
+```sh
+leaf g scaffold Contact name:string active:bool --dry-run
+leaf db status
+leaf db migrate --dry-run
+```
+
+| 约定 | 你需要知道 |
+| --- | --- |
+| 字段 | `string`、`bool`、`int`、`float` |
+| 模型名 | 单数 PascalCase，例如 Note |
+| 表单 | 字符串必填并 trim；错误时保留输入；取消不保存 |
+| 路由 | 静态名称和路径；详情主键在页面状态中，不是动态 URL 参数 |
+| 冲突 | 已有文件、手改注册文件或清单不一致会拒绝，不静默覆盖 |
+| 命令位置 | 从当前目录向上找最近的 `leaf.json`；无旧 PROJECT / `--project` 参数 |
+
+## 按需要深入
+
+
+<details>
+<summary>生成文件全貌、页面组合与 include 顺序</summary>
 
 ## 创建完整应用
 
@@ -50,6 +116,12 @@ my-app/
 
 `page.nim` 预加载 Leaf、Model 与组件，并用 Nim `include` 组合本组的逻辑和 View 文件。这些文件无需重复导入依赖。新增本组 View 时，在 `page.nim` 添加 include，并保持被调用的子 View 先于组合 View 声明。任意用户新增文件的自动发现不在这一版本中。
 
+</details>
+
+
+<details>
+<summary>业务资源、字段校验、命名与稳定 key</summary>
+
 ## 在应用中生成业务资源
 
 ```sh
@@ -70,6 +142,12 @@ leaf generate scaffold Metric count:int amount:float
 字段支持 `string`、`bool`、`int`、`float`。字符串必填、最多 200 个 Unicode 码点，并去除两端空白；整数与浮点数在提交时解析；浮点数必须有限。创建和编辑失败会保留输入，取消编辑不会修改已保存数据。数据库只读或锁定等写入错误会显示在页面上，失败的完成或删除操作不会提前改变记录。输入 key 为 `notes_field_title`，按钮 key 为 `notes_new`、`notes_save` 等，列表操作 key 使用业务 id。
 
 模型名使用单数 PascalCase，文件名使用 snake_case。复数采用简单规则：辅音加 y 变 ies；s/x/z/ch/sh 加 es；其余加 s。没有完整英语词形还原。完整模板已有 Task 模型，重复生成会被拒绝。`leaf_schema_migrations` 和 `sqlite_` 开头的表名保留给存储层。
+
+</details>
+
+
+<details>
+<summary>路由与页面组：接口节选及事务边界</summary>
 
 ## 路由与页面组
 
@@ -95,6 +173,14 @@ renderPage(ctx, router)
 
 当前路由匹配静态名称和路径；资源详情和编辑使用页面组状态与业务 id，不提供动态 URL 参数。
 
+以上路由代码是接口节选，HomePage、viewIndex、ctx 等由应用提供；不是独立可运行程序。完整示例见 [component_pages.nim](../examples/component_pages.nim)。
+
+</details>
+
+
+<details>
+<summary>冲突保护、生成清单与文件归属</summary>
+
 ## 预览与冲突保护
 
 ```sh
@@ -110,6 +196,12 @@ leaf g scaffold Contact name:string active:bool --dry-run
 
 资源模式适用于完整脚手架应用。未修改的 `leaf init` 最小模板可先运行无参数 `leaf g scaffold` 升级；编辑过的模板不会被覆盖。自定义项目可用 `leaf db init` 安装配置，并按输出示例手动接入启动函数。
 
+</details>
+
+
+<details>
+<summary>数据库路径、初始化、资源包含和测试命令</summary>
+
 ## 数据与项目配置
 
 默认 Model 使用 SQLite，类型声明与公共持久化层共同负责校验和参数化读写；已保存记录在退出或 watch 替换进程后保留。草稿、搜索条件和显示设置属于页面状态，重启后重置。schema 2 的 int64 id 使用 INTEGER PRIMARY KEY，删除后可能复用；schema 1 继续使用原 service 与 AUTOINCREMENT。
@@ -122,7 +214,7 @@ leaf g scaffold Contact name:string active:bool --dry-run
 
 Leaf 提供显式的 `leaf/sqlite` 模块。Linux 默认使用 `libsqlite3.so.0`、macOS 使用 `libsqlite3.dylib`、Windows 使用系统 `winsqlite3.dll`；Android 将一个 SQLite 引擎静态链接进应用，Leaf、Norm 与 lowdb 共用它。没有导入存储模块的原有应用不增加此依赖。
 
-需要外部接口或后台工作时，将业务 API 适配放入 `app/clients/`、后台工作放入 `app/jobs/`、定时规则放入 `config/schedules.nim`、维护命令放入 `lib/tasks/`。后台执行与 UI 回传仍需实现；后台工作应使用自己的数据库连接，不跨线程共享页面连接。
+需要外部接口或后台工作时，将业务 API 适配放入 `app/clients/`、后台工作放入 `app/jobs/`、定时规则放入 `config/schedules.nim`、维护命令放入 `lib/tasks/`。后台执行与 UI 回传使用组件任务 API（见 `examples/component_tasks.nim`）；这些目录本身不提供调度服务。后台工作应使用自己的数据库连接，不跨线程共享页面连接。
 
 `leaf.json` 记录应用元数据、Nim 编译入口与发布包含路径；其中 `include` 是打包包含规则，不是模块导入规则。`.leaf/scaffold.json` 是生成器清单，二者用途不同。发布包包含运行源文件、资源和迁移，不包含 tests、target 或 scaffold 清单。
 
@@ -132,6 +224,15 @@ Leaf 提供显式的 `leaf/sqlite` 模块。Linux 默认使用 `libsqlite3.so.0`
 nim c -r --path:/path/to/leaf/src --nimcache:target/test-cache --out:target/test_home tests/test_home.nim
 nim c -r --path:/path/to/leaf/src --nimcache:target/test-cache --out:target/test_notes tests/test_notes.nim
 ```
+
+</details>
+
+## Android 入口
+
+新模板同时保留桌面和移动入口。需要已有 SDK / NDK / JDK / 离线 Gradle；当前生成 debug APK，**不等于商店发布或设备矩阵验收完成**。
+
+<details>
+<summary>移动入口、资源、Activity 重建与运行命令</summary>
 
 ## Android 入口
 
@@ -145,7 +246,13 @@ leaf pack --target android --output dist-android
 
 Android 工厂接收 `HostResources`，从应用 assets 读取资源，并在应用私有数据目录打开 `application.sqlite3`。Activity 重建保留 Runtime 和连接；普通 detach 不关闭应用。正常 Runtime dispose 会关闭应用自有连接，强制停止进程不证明优雅关闭。调用者注入的连接和 HostResources 仍由调用者或宿主拥有。
 
-Android 与 Windows 原生模板使用变量行纵向列表；Android 行内按钮纵向排列，以适应窄屏。桌面 GPUI 模板保留原有滚动布局。Android 编译需要预先安装的 SDK、NDK、JDK 与离线 Gradle 依赖；生成器不会安装工具。当前 pack 交付 debug APK，不是商店发布。
+Android 与 Windows 原生模板使用变量行纵向列表；Android 行内按钮纵向排列，以适应窄屏。Linux/macOS 仅可做 headless 检查；本轮不实现其 GUI。Android 编译需要预先安装的 SDK、NDK、JDK 与离线 Gradle 依赖；生成器不会安装工具。当前 pack 交付 debug APK，不是商店发布。
+
+</details>
+
+
+<details>
+<summary>Model、页面 Draft 与连接作用域</summary>
 
 ## Model 与连接作用域
 
@@ -179,6 +286,14 @@ transaction:
 
 页面 Draft 是独立值类型，编辑先查询完整 Model，再赋值及 save。校验失败返回 false，保留输入并显示 errors.fullMessages；数据库失败抛异常，页面显示错误。取消编辑不改变已存数据。详情和编辑主键为 int64。
 
+此处 Model 代码为生成应用内节选，application_record 与数据库作用域由应用提供；独立可运行示例见 [Model 入门](models.md)。
+
+</details>
+
+
+<details>
+<summary>维护旧应用：schema 1 的兼容与人工升级</summary>
+
 ## schema 1 兼容与人工升级
 
 已有 schema 1 清单继续生成原来的值模型、service、int id 和迁移；生成器不会自动升级或改写历史 SQL。schema 2 缺少 model_api/timestamps 或版本未知时拒绝生成。升级须先改应用基类、声明、页面和连接作用域，再核对生成注册文件与清单，最后用新迁移补齐旧表时间字段：
@@ -195,3 +310,9 @@ UPDATE tasks SET
 将新迁移放入 `db/migrations/`，catalog 自动发现；模型使用 Option[DateTime] 接收时间值，未来写入由框架补齐 UTC 时间。schema 2 新表的时间字段为 REAL NOT NULL。如需对旧表补 NOT NULL 约束，另建迁移重建表。新表用 INTEGER PRIMARY KEY，删除后的 id 可能重用；原 schema 1 AUTOINCREMENT 语义保持不变。
 
 完整 API 与事务失败语义见 [Model 文档](models.md)。
+
+</details>
+
+---
+
+下一步：[Model 查询与保存](models.md) · [数据库升级](migrations.md) · [打包应用](packaging.md)

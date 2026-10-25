@@ -33,9 +33,9 @@ if [ -n "$version" ]; then
     printf '%s\n' "$version" | LC_ALL=C grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail 'version must be vX.Y.Z'
 fi
 case "$(uname -s)-$(uname -m)" in
-    Linux-x86_64) target=linux-x86_64; bridge_name=libleaf_gpui.so;;
-    Darwin-x86_64) target=macos-x86_64; bridge_name=libleaf_gpui.dylib;;
-    Darwin-arm64|Darwin-aarch64) target=macos-aarch64; bridge_name=libleaf_gpui.dylib;;
+    Linux-x86_64) target=linux-x86_64;;
+    Darwin-x86_64) target=macos-x86_64;;
+    Darwin-arm64|Darwin-aarch64) target=macos-aarch64;;
     *) fail 'unsupported platform; supported: Linux x86_64, macOS Intel/Apple Silicon (Windows: install.ps1)';;
 esac
 for tool in curl tar mktemp; do command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"; done
@@ -71,9 +71,11 @@ done < "$staging/entries"
 tar -tvzf "$staging/$asset" > "$staging/details"
 if LC_ALL=C grep -Eq '^[lh]' "$staging/details"; then fail 'SDK archive must not contain links'; fi
 tar -xzf "$staging/$asset" -C "$staging"
-for file in bin/leaf src/leaf.nim toolchain/nim/bin/nim toolchain/nim/lib/system.nim sdk.json "lib/$bridge_name"; do
+for file in bin/leaf src/leaf.nim toolchain/nim/bin/nim toolchain/nim/lib/system.nim sdk.json; do
     [ -f "$staging/leaf-sdk/$file" ] || fail "SDK file missing: $file"
 done
+LC_ALL=C grep -Eq '"schema"[[:space:]]*:[[:space:]]*2([,[:space:]]|$)' "$staging/leaf-sdk/sdk.json" || fail 'native SDK schema 2 required'
+LC_ALL=C grep -Eq '"backend"[[:space:]]*:[[:space:]]*"native"' "$staging/leaf-sdk/sdk.json" || fail 'native SDK backend required'
 "$staging/leaf-sdk/bin/leaf" --verify-sdk "$channel" "$target" "$version" || fail 'SDK metadata or executable does not match this installation'
 "$staging/leaf-sdk/bin/leaf" --version || fail 'SDK executable cannot run on this system'
 installed=$prefix/versions/$channel-$(basename "$staging" | sed 's/^\.install\.//')

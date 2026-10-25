@@ -95,7 +95,7 @@ suite "atomic publication keeps accepted content":
     let xId = mounted.children[0].id
     let yId = mounted.children[1].id
     let first = r.planSnapshot(Snapshot(title: "memory", width: 320, height: 200, root: mounted),
-      1, gpuiCompatible)
+      1, hostCompatible)
     r.accept(first)
     r.finishPublish(first)
     let x = r.handleFor(xId)
@@ -107,7 +107,7 @@ suite "atomic publication keeps accepted content":
     let children = r.children(x)
     check r.revision == 1
     let second = r.planSnapshot(snap(column(@[text("changed", key = "x"), text("new", key = "z")], key = "root")),
-      2, gpuiCompatible)
+      2, hostCompatible)
     r.discard(second)
     check r.revision == 1
     check r.handleFor(xId) == x
@@ -118,7 +118,7 @@ suite "atomic publication keeps accepted content":
     # The discarded candidate does not poison the next attempt.
     let changed = mount(column(@[text("changed", key = "x"), text("new", key = "z")], key = "root"))
     let third = r.planSnapshot(Snapshot(title: "memory", width: 320, height: 200, root: changed),
-      2, gpuiCompatible)
+      2, hostCompatible)
     r.accept(third)
     r.finishPublish(third)
     check r.revision == 2
@@ -271,7 +271,7 @@ when defined(leafProtocolProbes):
       let dynamicId = "root/dynamic-" & $arbitraryInt & "/" & $321
       let candidate = r.planDelta(HostChanges(upserts: @[HostRecord(handle: handle,
         nodeId: dynamicId, kind: NodeKind.text,
-        props: normalizeHostProps(text("first"), gpuiCompatible))]), 1)
+        props: normalizeHostProps(text("first"), hostCompatible))]), 1)
       let before = allocCount()
       r.publish(candidate)
       checkpoint("host dynamic publish allocations=" & $(allocCount() - before))
@@ -279,7 +279,7 @@ when defined(leafProtocolProbes):
       r.finishPublish(candidate)
       let update = r.planDelta(HostChanges(upserts: @[HostRecord(handle: handle,
         nodeId: dynamicId, kind: NodeKind.text,
-        props: normalizeHostProps(text("second"), gpuiCompatible))]), 2)
+        props: normalizeHostProps(text("second"), hostCompatible))]), 2)
       r.publish(update)
       when defined(nimAllocStats): check hostPublishAllocations == 0
       r.finishPublish(update)

@@ -1,8 +1,72 @@
-# Model
+# SQLite Model：定义、查询、保存
 
-`leaf/model` 提供继承式 SQLite Model，基于锁定的 Norm 2.8.7、lowdb 0.3.0 和 db_connector 源码。业务对象继承 Leaf Record，Norm 只接收生成的独立存储对象。导入模块和声明模型都不打开数据库。Leaf 默认导入仍不包含 ORM。
+[文档首页](README.md) · [生成 CRUD](scaffolding.md) · [表结构迁移](migrations.md)
 
-## 定义与共同能力
+**Model 管数据，迁移管表结构。** 导入 `leaf/model` 不打开数据库，也不自动建表；普通 `import leaf` 不引入 ORM。
+
+## 先看一个完整例子
+
+以下是**可运行的独立示例**。在已创建的 Leaf 项目中替换 `src/main.nim`，在 Windows 执行 `leaf run`（其他桌面系统用 `leaf --headless`）；它只运行内存数据库示例，不打开窗口：
+
+```nim
+import leaf/[model, sqlite]
+
+type Task = ref object of TimestampedRecord
+  title: string
+  done: bool
+
+defineModel(Task, table = "tasks"):
+  validates title, presence = true, maxLength = 200
+  scope unfinished, it.done == false
+
+let db = openDatabase(":memory:")
+try:
+  db.executeScript("""
+    CREATE TABLE tasks (
+      id INTEGER PRIMARY KEY, title TEXT NOT NULL, done INTEGER NOT NULL,
+      created_at REAL NOT NULL, updated_at REAL NOT NULL
+    );
+  """)
+  withDatabase(db):
+    let task = Task.createOrRaise(title = "试试 Leaf")
+    echo Task.unfinished.count
+    task.done = true
+    task.saveOrRaise()
+    doAssert Task.find(task.id).done
+finally:
+  db.close()
+```
+
+真实应用把建表 SQL 换成[迁移](migrations.md)，在入口打开一次连接。完整脚手架已经接好连接作用域，不必在每个页面传 db。
+
+## 按任务选 API
+
+| 任务 | API | 注意 |
+| --- | --- | --- |
+| 先构造，稍后保存 | `Task.build(...)` → `save()` | bool 结果不能默默丢弃 |
+| 直接创建 | `Task.create(...)` / `createOrRaise(...)` | 校验错误与数据库错误不同 |
+| 查找 | `Task.find(id)`、`findBy(...)`、`first` | `first` 返回 Option；find 缺失抛异常 |
+| 筛选 | `Task.where(done = false).all` | 参数绑定，不拼 SQL |
+| 投影和计数 | `Task.pluck(it.title)`、`Task.count` | count / exists 忽略排序和分页 |
+| 更新和删除 | `update(...)`、`save()`、`destroy()` | 更新只写变化列，无乐观锁 |
+| 多步一起成功 | `transaction:` | 嵌套用 SAVEPOINT |
+| 展示字段错误 | `task.errors.fullMessages` | 校验失败保留用户输入 |
+
+## 最容易踩的四个边界
+
+| 情况 | 应该怎么做 |
+| --- | --- |
+| `save()` 返回 false | 展示校验错误或取消原因；数据库失败仍会抛异常 |
+| 编辑时想允许“取消” | 用独立值类型 Draft，别把 Model 别名当副本 |
+| 后台任务需要数据库 | worker 自开连接；不跨线程传 Model / Query / 连接 |
+| afterCommit 通知报错 | 数据已提交；处理成功后的 UI，再显示通知错误，别盲目重试创建 |
+
+## 深入参考
+
+按问题展开即可，不必先读完底层约束。基于锁定的 Norm 2.8.7、lowdb 0.3.0 与 db_connector；SDK 已附依赖，无需额外 nimble install。
+
+<details>
+<summary>定义与共同能力</summary>
 
 以下声明对应已编译的 `tests/nim/model_fixtures.nim`：
 
@@ -38,7 +102,10 @@ defineModel(Task, table = "tasks"):
 
 持久字段支持 string、bool、int、int64、float、DateTime 和它们的 Option。未支持字段、重复字段、未知校验字段和具体模型继承在编译期报错。`id` 是框架管理的只读 int64；TimestampedRecord 的 created_at/updated_at 是 Option[DateTime]，保存时框架维护 UTC 时间，SQLite 存储 REAL Unix 秒。构造/更新参数只能指定业务字段。
 
-## 配置与免 db 调用
+</details>
+
+<details>
+<summary>配置与免 db 调用</summary>
 
 迁移由现有 `leaf/sqlite` 管理，模型不自动建表。SQL 示例按上述字段建立表：
 
@@ -69,7 +136,10 @@ withDatabase 使用线程局部、同步的作用域；嵌套、异常及提前 
 
 直接用 Nim 编译时，提供 Leaf src 路径，并启用附带的 orm_config 参数；脚手架 config.nims 和 Leaf CLI 自动处理这些参数及 deepcopy。SDK 中已经包含全部依赖，无需 nimble install。
 
-## 创建、修改与错误
+</details>
+
+<details>
+<summary>创建、修改与错误</summary>
 
 ```nim
 withDatabase(db):
@@ -94,7 +164,10 @@ errors 每次校验重建，支持同一字段多个错误：`errors.forField("t
 
 reload 清 errors、dirty baseline 和 savedChanges；丢失行报 RecordNotFound。删除后不能再保存。删除新对象改变其生命周期但不执行 SQL，也不产生提交通知；新对象不能 reload。模型绑定到首次持久化的连接，跨库复制请使用 dupRecord。
 
-## where、scope 与首尾查询
+</details>
+
+<details>
+<summary>where、scope 与首尾查询</summary>
 
 ```nim
 withDatabase(db):
@@ -130,7 +203,10 @@ count/exists 统计筛选条件，忽略排序和分页。Query 是不可变描�
 
 rawQuery 是独立受控入口，调用方必须选齐所有持久列，且按模型声明映射顺序排列；按类型和列数校验结果。不要用它构造部分模型或拼接用户输入。
 
-## Dirty tracking 与编辑隔离
+</details>
+
+<details>
+<summary>Dirty tracking 与编辑隔离</summary>
 
 `task.changes` 比较当前业务字段与最后成功写入/加载的快照；changed 返回 bool，savedChanges 是上次成功保存的变化。每项有 field、before、after，Option[SqlValue] 区分不存在和 SQL NULL。
 
@@ -138,7 +214,10 @@ rawQuery 是独立受控入口，调用方必须选齐所有持久列，且按�
 
 Model 是引用对象，赋值别名共享状态；页面 Draft 使用独立 object 值类型，取消时直接放弃 Draft。dupRecord 复制业务字段，清除 id、时间和持久状态，下一次保存插入新行。
 
-## 回调与事务
+</details>
+
+<details>
+<summary>回调与事务</summary>
 
 声明支持 before/after Validation、Save、Create、Update、Destroy，以及 afterCommit/afterRollback。普通回调签名是 `proc(record: T)`，事件回调是 `proc(record: T, event: ModelEvent)`；`event.operation` 和 `event.eventChanges` 只读访问该次写入的信息。
 
@@ -160,3 +239,9 @@ withDatabase(db):
 首版不包括关联、自动 schema 建表、连接池、异步 ORM、批量写入及乐观锁；后续可以在当前 Record/Query 接口上增量增加。
 
 迁移声明、自动发现、历史校验和维护命令见[数据库迁移](migrations.md)。Model 声明仍不自动建表。
+
+</details>
+
+---
+
+下一步：[迁移与回滚](migrations.md) · [生成真实 CRUD 页面](scaffolding.md)

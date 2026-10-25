@@ -19,7 +19,7 @@ nim c -r --path:/path/to/leaf/src tests/test_home.nim
 - `page.nim` includes logic and Views. Add new View imports there.
 - `app/application.nim` opens and migrates one connection at startup. Its executionScope binds that connection for queries and callbacks. The root component closes its own connection on Runtime disposal; a connection explicitly passed by the caller remains borrowed and the caller closes it. Business methods need no database argument.
 - `mobile.nim` registers the same business application with HostResources. Android uses the host private `application.sqlite3` path; Activity recreation retains the Runtime and its connection. Detaching Views does not dispose the application. Process kill is not graceful Runtime disposal.
-- Android and Windows native templates use variable-height vertical lists; Android stacks row actions for narrow screens. Desktop GPUI keeps its existing scroll layout.
+- Android and Windows native templates use variable-height vertical lists; Android stacks row actions for narrow screens. Other desktop GUI backends are not implemented; headless checks remain available.
 - `config/routes.nim` is human owned. Generated pages, routes and `.leaf/scaffold.json` are generator owned; edited registries are never silently overwritten.
 
 Schema 3 manifests retain model_schema 2; these resources use int64 IDs, UTC created_at/updated_at timestamps, required trimmed strings (maximum 200 Unicode codepoints), and finite floats. Fields support string, bool, int and float. Timestamps are SQLite REAL Unix seconds; clean saves do not update timestamps. SQLite INTEGER PRIMARY KEY may reuse deleted IDs. Schema 1 applications continue generating their original service API until manually migrated.

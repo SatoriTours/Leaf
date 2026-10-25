@@ -99,7 +99,7 @@ type
       ## controls); move/remove never use it.
     row*: Option[NativeRowBinding]
       ## create/update/move carry the row binding of a list row root (`none`
-      ## otherwise). Nim-only sidecar: the GPUI wire encoder ignores it.
+      ## otherwise). The native host consumes this owned sidecar directly.
 
   RowSlotTable* = Table[NodeHandle, tuple[indexes: HashSet[int],
     keys: HashSet[string]]]

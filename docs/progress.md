@@ -1,5 +1,29 @@
 # 开发进度与下一步
 
+## 2026-10-24 Windows 原生去依赖：提交代码
+
+用户已明确授权本次提交代码：由原主控在现有 `wks_8912916759329604` / `/home/jimxl/projects/leaf` / main 统一提交本任务全部源码、测试、workflow与文档成果，整合并推送核实的远端默认分支，跟进新SHA全部相关Actions及Windows SDK；不打Tag、不新建空间、不派发Agent。现有145套分段回归及731文件Windows冻结证据复用，提交前后仅台账说明变化不重复全套。下节是提交前作者验证快照，不把本地SDK、历史CI或阶段性作者自测当成新SHA发布成功。交付SHA、Actions、SDK和空间清单最终结果保存在空间外 `~/.local/state/agent-artifacts/leaf/2026-10-24-remove-gpui/code-delivery.json`。当前保留历史17G诊断、完整Windows/SDK矩阵与资源/现场验收未完项，不为归档删除材料。
+
+## 2026-10-24 系统原生组件：Windows 优先去依赖（提交前作者验证快照）
+
+用户明确指出产品目标是系统原生组件，要求核实并彻底移除 GPUI。本轮文档改版中采用 GPUI 画廊截图的展示方向已暂停，不将这些未提交草稿作为原生迁移成果交付。
+
+用户已明确批准立即移除，随后限缩为“Linux 和 macOS 先不管，先搞定 Windows”：不等待 GTK4/AppKit，不开发这两个后端；没有原生 GUI 的系统明确不支持，不保留默认、可选或备用 GPUI。Android 保留现有实现，不扩展范围。由主控在当前空间亲自执行，不再派发，不自动提交或发布。
+
+实现：默认 backend/runner/build/doctor 均为 native；拒绝旧后端，Linux/macOS GUI 与打包明确未实现，headless 保留。Windows x64 ZIP 无渲染桥接；SDK schema 2/native 拒绝旧包，CI/发布转 Windows。删除 Rust workspace、GPUI Runtime/FFI/专用构建测试与旧截图，保留 Managed Runtime、State、SQLite、原生 Host、生命周期恢复和全部历史证据。README 改用真实 Windows 原生表单截图，当前安装、命令、API 与打包文档已校正。
+
+作者验证（不是独立验收）：
+- native-only 7 项先真实 RED→GREEN；共享官方入口及按失败点续跑，覆盖现存 **145 套 / 1228 OK 标记 / 0 最终失败 / 5 平台 skip**。不是一次未经中断的官方全绿：原日志保留性能 fixture 的已删除 Cargo.lock、Linux 纯编译 fixture 的默认 GUI、watch fixture 三次拒绝；分别改为原生源码/Nim 配置、显式 headless 编译、监督器显式 headless 选项后定向复验并续跑。后者只用于通用进程监督器，CLI 原生 watch 仍明确拒绝。覆盖映射见 `R/regression-coverage.json`，不为未变部分重复跑全套。
+- Windows Limited / Session1 / 96 DPI：冻结 730 文件，manifest `ef135203ea8d2d44270b2b5548feb1f56925f97117bc7d6afb96a40f0208f990`。默认 CLI 编译 9.976s、应用默认构建20.452s；真实 `leaf run` 20.779s 自然0，实际 Edit/Button/Static/progress 控件及模块清单、原始截图、WM_CLOSE 和空进程 postcheck 均留证。默认源码打包22.726s，自带 check，ZIP 无桥接。首次启动探针把重复编译算入20s窗口等待而提前判失败；原30s Native上限内按子进程/窗口事实复验通过，没有改产品来迎合探针。
+- 原生 Windows SDK 实际组装（9,415,982字节），PowerShell 5.1 离线安装到中文空格前缀、`-NoPath`、重复安装、实际 leaf.cmd、schema2验证及随包 Nim/MinGW/src doctor 全部检查；系统用户 PATH 未变。实际 SDK CLI 的项目 check、默认原生窗口启动/WM_CLOSE（12.434s）、损坏更新拒绝且原入口字节不变均通过。先前 oracle 的 PS5.1 默认 ANSI 读取 UTF-8，以及绕过 CLI 直接启动含 projectFile 的模板错误均保留，没有改产品掩盖 fixture 问题。
+- 清空 NIM/LEAF_LIBRARY/LEAF_SDK，PATH 仅系统目录，使用已安装 SDK 构建并运行独立 SQLite Model（输出1）及既有 SDK task fixture（`SDK_TASK_RESULT=后台完成`、显式5s任务界限及dispose断言），Native均自然0/stderr0，外层22.787s，postcheck Ready/0/owned[]。
+- 入门计数器实际两次回调后文本2，Model完整示例编译运行输出1；163个本地 Markdown 链接无缺失，6份 workflow YAML 语法解析成功。图片SHA `f3cda0a012467d581ff071f910d27e9fe2ef0530316499ef04729495b7c3d18d`，未合成或修改。
+
+- 最终 **731文件** 冻结：manifest `08307207d019b606405fb4c95343bcbe6fccc43b1f6455a1aa4ff9146adbb997`，源码ZIP `cc9f6be94b6ff27014a8d16accc3e661a0e686ec097312d245eab27f7e6922a7`。重新编译CLI、组装SDK、PS5.1中文前缀安装、随包doctor/verify、默认原生build及实际CLI check均自然0；原生CLI watch仍按契约exit1拒绝。新本地SDK `beta.native-final-08307207` / 9,416,060字节 / SHA256 `6e9deb1bbb2ee5a379741e642399b059b140520beb2b543916ef242d0564dfde`，保留在 `R/native-final-sdk-host-1024-08307207/guest/`。sdk.json的commit仍为旧HEAD，真正运行输入是本次dirty快照；它不是已提交或GitHub发布版本。
+- Windows入口核查先实际发现 ORM路径/deepcopy配置和测试probes未传入，原RED保留；runner已传入共享 `ormCompilerArgs` 与 `leafProtocolProbes`。最终18套测试及runner均通过Windows x64代码生成检查（不是运行）；另在最终冻结源码上现场运行 `test_component_tasks` **15OK**、`test_win32_sqlite_engine` **3OK**，各0FAIL/0SKIP，自然退出0，Native分别1.462s/0.862s。任务套件stderr553字节为预期拒绝清理/守卫故障注入诊断，不宣称全部运行stderr为零。包括原生Runtime/Host失败所有权保留与重试、普通任务turn、Norm/connector同一系统SQLite引擎、64位id和Unicode/NUL持久化。最终轮外层96.646s，Ready/lastResult0/owned[]、user PATH未变、无GPUI文件/残留进程。
+
+`R=~/.local/state/agent-artifacts/leaf/2026-10-24-remove-gpui/` 保存每轮 stdout/stderr/result/postcheck、输入hash与失败原文。最终731快照包含初轮后性能 provenance、headless监督器和测试入口修正；其后仅更新本节和验收说明，不更改运行源码。不把本地包称成最新发布物。当前仍无本轮 commit/push/Actions/Tag/发布/归档。Windows 完整18套与完整安装SDK CRUD/迁移smoke仍未执行；真实IME/物理混DPI/辅助技术、cold USER/GDI 原FAIL、M4及完整T2/T3不由这些作者切片关闭。以下旧 GPUI 记录均为历史。
+
 ## 2026-10-24 阶段代码交付
 
 用户下达“提交代码”，本次整合当前主会话及5个同任务子Agent在同一 local checkout 的全部阶段成果；仅 `wks_8912916759329604` / `/home/jimxl/projects/leaf` / main / `.git/index`，不另造分支或空间，不接管仓库地址问答空间及已结束历史批次。真实远端 `SatoriTours/Leaf`、默认分支main已核实，起点d132646与origin/main一致。产品/测试快照与既有302冻结包逐项一致，149套官方最终回归及限定Native证据沿用，不为收尾再跑同快照全套；source-pump与example仅作者自测，无独立验收，不冒称完整T2通过。

@@ -4,7 +4,7 @@
 import std/[os, json, strtabs, options]
 import leaf/android_run
 import leaf/[cli_options, core, project, project_context, build, doctor,
-  developer_options, diagnostics, watch, process_io, pack, scaffold, sdk, db_cli,
+  developer_options, diagnostics, process_io, pack, scaffold, sdk, db_cli,
   migrations, targets]
 export build
 
@@ -15,18 +15,18 @@ const HelpText = """Leaf Nim developer tools
                                    Add a resource with CRUD pages, routes and migrations
   leaf g migration NAME [--dry-run] Create a Nim migration in the current project
   leaf generate ...                Alias for leaf g ...
-  leaf build [--output EXE] [--target TARGET] [--backend native|gpui]
+  leaf build [--output EXE] [--target TARGET] [--backend native]
                                    Compile the current project
-  leaf run [--target TARGET] [--backend native|gpui] [--device SERIAL]
+  leaf run [--target TARGET] [--backend native] [--device SERIAL]
                                    Compile and open the current project
-  leaf pack --target TARGET [--binary EXE] [--output DIR] [--backend native|gpui]
-  leaf doctor [--json] [--target TARGET] [--backend native|gpui]
+  leaf pack --target TARGET [--binary EXE] [--output DIR] [--backend native]
+  leaf doctor [--json] [--target TARGET] [--backend native]
                                    Show the local build environment
   leaf --version                   Show SDK version and channel
   leaf --check [DIAGNOSTICS]       Compile and validate the current application
   leaf --headless [EVENTS] [DIAGNOSTICS] [--stats]
                                    Compile and run ordered events
-  leaf                             Compile and open the configured desktop backend
+  leaf                             Compile and open the Windows system-native controls
   leaf --watch [DIAGNOSTICS]       Rebuild and replace ready desktop windows
   leaf db init [--dry-run]         Install database configuration and catalog
   leaf db migrate [--to VERSION] [--dry-run] [--json]
@@ -39,7 +39,7 @@ const HelpText = """Leaf Nim developer tools
 
 Commands operate on the nearest project containing leaf.json; run them from the
 project directory or one of its subdirectories. Applications are native
-executables. TARGET: linux, macos, windows, android; all packages desktop targets.
+executables. TARGET: linux, macos, windows, android; packaging: windows or android; Linux/macOS GUI is not implemented.
 """
 
 proc execute(exe: string, args: seq[string], workingDir: string): int =
@@ -106,7 +106,7 @@ proc main*(args: seq[string]): int =
         stdout.writeLine(artifact)
       return 0
     of ccDoctor:
-      stdout.writeLine(doctorReport(some(resolveBuild(backendGpui,
+      stdout.writeLine(doctorReport(some(resolveBuild(backendNative,
         command.target, command.backend))).pretty())
       return 0
     of ccDatabase:
@@ -115,13 +115,7 @@ proc main*(args: seq[string]): int =
       return executeDatabaseCommand(project, command.request, command.dryRun,
         command.jsonOutput)
     of ccDeveloper:
-      let project = requireCurrentProject()
-      if project.backend == backendNative:
-        fail("native --watch is not supported in this batch")
-      let options = parseDeveloperOptions(command.runArgs, project.root)
-      let diagnostics = options.diagnostics()
-      defer: diagnostics.close()
-      return runWatch(project, diagnostics)
+      fail("native --watch is not supported in this batch")
     of ccRun:
       if command.runArgs.len == 0:
         let found = findCurrentProject()

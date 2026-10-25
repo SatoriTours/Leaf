@@ -31,22 +31,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
-            target: linux-x86_64
-            rust_target: x86_64-unknown-linux-gnu
-            bridge: target/release/libleaf_gpui.so
-          - runner: macos-15-intel
-            target: macos-x86_64
-            rust_target: x86_64-apple-darwin
-            bridge: target/release/libleaf_gpui.dylib
-          - runner: macos-14
-            target: macos-aarch64
-            rust_target: aarch64-apple-darwin
-            bridge: target/release/libleaf_gpui.dylib
           - runner: windows-2022
             target: windows-x86_64
-            rust_target: x86_64-pc-windows-msvc
-            bridge: target/x86_64-pc-windows-msvc/release/leaf_gpui.dll
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -57,30 +43,14 @@ jobs:
       NIM_SSL_VERSION: '3'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
       - uses: jiro4989/setup-nim-action@v2
         with:
           nim-version: '2.2.6'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Linux 系统依赖
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config cmake libssl-dev libclang-dev \
-            libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libxcb1-dev libx11-xcb-dev libwayland-dev libvulkan-dev libsqlite3-0
       - name: Windows C 编译链
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/prepare_windows_sdk.ps1
-      - name: macOS HTTPS 运行库
-        if: runner.os == 'macOS'
-        run: |
-          if ! brew list --versions openssl@3 >/dev/null 2>&1; then brew install openssl@3; fi
-          openssl_prefix=$(brew --prefix openssl@3)
-          test -f "$openssl_prefix/lib/libssl.3.dylib"
-          test -f "$openssl_prefix/lib/libcrypto.3.dylib"
-          echo "LEAF_OPENSSL_LIB=$openssl_prefix/lib" >> "$GITHUB_ENV"
       - name: Windows HTTPS 运行库和证书
         if: runner.os == 'Windows'
         shell: pwsh
@@ -90,58 +60,7 @@ jobs:
       - name: Model 与 headless 应用回归
         run: |
           nim c -r --out:target/nim/model_runner scripts/test.nim --model-only
-      - name: 构建和测试 Unix 桥接
-        if: runner.os != 'Windows'
-        run: |
-          cargo test --workspace --locked
-          cargo build --release --locked -p leaf-gpui
-      - name: 构建和测试 Windows 桥接
-        if: runner.os == 'Windows'
-        env:
-          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: '-C target-feature=+crt-static'
-        run: |
-          cargo test --workspace --locked --target x86_64-pc-windows-msvc
-          cargo build --release --locked -p leaf-gpui --target x86_64-pc-windows-msvc
-      - name: 收集当前平台依赖的许可证
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cargo metadata --format-version 1 --locked --filter-platform '${{ matrix.rust_target }}' > target/sdk-cargo-metadata.json
-          collector=target/nim/collect_sdk_notices
-          if [ '${{ runner.os }}' = Windows ]; then collector="$collector.exe"; fi
-          nim c -d:release -d:ssl -d:sslVersion="$NIM_SSL_VERSION" --out:"$collector" scripts/collect_sdk_notices.nim
-          if [ '${{ runner.os }}' = macOS ]; then
-            export DYLD_LIBRARY_PATH="$LEAF_OPENSSL_LIB${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-          fi
-          "$collector" --metadata target/sdk-cargo-metadata.json --output src/leaf/vendor/GPUI-NOTICES.json
-      - name: Windows 桥接加载诊断
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
-          & $dumpbin.FullName /dependents '${{ matrix.bridge }}'
-          Add-Type -TypeDefinition @'
-          using System;
-          using System.Runtime.InteropServices;
-          public static class LeafDllProbe {
-            [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-            public static extern IntPtr LoadLibrary(string path);
-            [DllImport("kernel32.dll")]
-            public static extern bool FreeLibrary(IntPtr module);
-          }
-          '@
-          $handle = [LeafDllProbe]::LoadLibrary((Resolve-Path '${{ matrix.bridge }}').Path)
-          if ($handle -eq [IntPtr]::Zero) {
-            $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-            Write-Host "Windows error ${code}: $([ComponentModel.Win32Exception]::new($code).Message)"
-          } else {
-            Write-Host 'GPUI DLL loads before packaging'
-            [LeafDllProbe]::FreeLibrary($handle) | Out-Null
-          }
       - name: 构建 CLI 与架构回归
-        env:
-          LEAF_GPUI_LIBRARY: ${{ github.workspace }}/${{ matrix.bridge }}
         run: |
           nim c -d:release --out:target/nim/leaf src/leaf_cli.nim
           nim c -r --out:target/nim/test_sdk tests/nim/test_sdk.nim
@@ -156,7 +75,7 @@ jobs:
           cli=target/nim/leaf
           if [ '${{ runner.os }}' = Windows ]; then cli="$cli.exe"; fi
           nim c -d:release -r --out:target/nim/package_sdk scripts/package_sdk.nim \
-            --nim-root .nim_runtime --cli "$cli" --bridge '${{ matrix.bridge }}' \
+            --nim-root .nim_runtime --cli "$cli" \
             --target '${{ matrix.target }}' --channel "$SDK_CHANNEL" --version "$SDK_VERSION" \
             --commit "$GITHUB_SHA" --output dist/sdk
       - name: 原生安装器与重定位验证

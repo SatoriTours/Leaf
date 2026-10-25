@@ -5,7 +5,7 @@ when defined(android):
   template run*(args:varargs[untyped]):untyped =
     {.error: "Android uses registerAndroidApplication(factory), not desktop run".}
 else:
-  ## Leaf's native Nim API. Headless mode does not load the GPUI desktop bridge.
+  ## Leaf's native Nim API. Headless mode links no desktop GUI backend.
   import leaf/[core, widgets, height_index, view, routing]
   import leaf/components
   export core, widgets, height_index, view, routing

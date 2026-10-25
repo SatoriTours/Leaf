@@ -1,6 +1,6 @@
 ## A hung observation tool must not hang the native suite or retain children.
 import std/[unittest, os, monotimes, times, tempfiles, strutils]
-import ./gpui_native
+import ./window_observer
 when defined(linux):
   suite "native close observation deadline":
     test "a late nonzero observer cannot bypass the shared deadline":

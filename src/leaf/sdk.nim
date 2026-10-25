@@ -8,7 +8,7 @@ proc sdkRoot*(executable = getAppFilename()): string =
     return ""
   try:
     let metadata = parseFile(root / "sdk.json")
-    if metadata{"schema"}.getInt == 1: return root
+    if metadata{"schema"}.getInt == 2 and metadata{"backend"}.getStr == "native": return root
   except CatchableError: discard
 
 proc sdkFile*(relative: string): string =
@@ -25,7 +25,8 @@ proc sdkVersion*(): string =
 proc verifySdk*(channel, target: string; version = ""; root = sdkRoot()) =
   if root.len == 0: raise newException(ValueError, "not an installed Leaf SDK")
   let metadata = parseFile(root / "sdk.json")
-  if metadata{"schema"}.getInt != 1 or metadata{"channel"}.getStr != channel or
+  if metadata{"schema"}.getInt != 2 or metadata{"backend"}.getStr != "native" or
+      metadata{"channel"}.getStr != channel or
       metadata{"target"}.getStr != target or
       (version.len > 0 and metadata{"version"}.getStr != version):
     raise newException(ValueError, "SDK metadata does not match requested channel, target or version")

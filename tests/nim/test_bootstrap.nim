@@ -4,23 +4,14 @@ import leaf/runner
 import ../fixture_app
 
 suite "Application launch dispatch":
-  test "headless check does not need a GPUI library or display":
-    let oldLibrary = getEnv("LEAF_GPUI_LIBRARY")
-    putEnv("LEAF_GPUI_LIBRARY", "/missing/gpui")
-    defer:
-      if oldLibrary.len == 0: delEnv("LEAF_GPUI_LIBRARY")
-      else: putEnv("LEAF_GPUI_LIBRARY", oldLibrary)
+  test "headless check needs no display":
     let app = fixtureApplication(proc(): Node = text("OK"), title = "No GUI", width = 320, height = 240)
     check run(app, @["--check"]) == 0
 
-  test "default launch reports a missing graphics dependency":
-    let oldLibrary = getEnv("LEAF_GPUI_LIBRARY")
-    putEnv("LEAF_GPUI_LIBRARY", "/missing/gpui")
-    defer:
-      if oldLibrary.len == 0: delEnv("LEAF_GPUI_LIBRARY")
-      else: putEnv("LEAF_GPUI_LIBRARY", oldLibrary)
-    let app = fixtureApplication(proc(): Node = text("OK"), title = "No GPUI", width = 320, height = 240)
-    check run(app, @[]) == 1
+  when not defined(windows):
+    test "unimplemented native desktop launch fails explicitly":
+      let app = fixtureApplication(proc(): Node = text("OK"), title = "Unsupported", width = 320, height = 240)
+      check run(app, @[]) == 1
 
   test "unknown desktop parameters fail instead of silently launching":
     let app = fixtureApplication(proc(): Node = text("OK"), title = "Bad flag", width = 320, height = 240)

@@ -4,7 +4,7 @@ import ../src/leaf/checksum
 when defined(posix): import std/posix
 when defined(windows): import std/winlean
 
-const Targets* = ["linux-x86_64", "macos-x86_64", "macos-aarch64", "windows-x86_64"]
+const Targets* = ["windows-x86_64"]
 
 type GithubCallback* = proc(args: seq[string], payload: JsonNode): JsonNode {.closure.}
 
@@ -84,7 +84,7 @@ proc publish*(info: JsonNode, repository: string, assets: seq[string],
     return false
   let title = "Leaf " & info["version"].getStr()
   let notes = "Leaf developer SDK (" & info["channel"].getStr() & ").\n\nCommit: `" &
-    commit & "`\n\nIncludes CLI, Leaf sources, Nim 2.2.6 and the native GPUI bridge. " &
+    commit & "`\n\nIncludes CLI, Leaf sources and Nim 2.2.6. Windows UI uses system-native controls. " &
     "The Windows installer also downloads MinGW. See docs/installation.md for system prerequisites and installation commands."
   let pages = gh(@["api", "--paginate", "--slurp", api & "/releases?per_page=100"], nil)
   var existing: JsonNode

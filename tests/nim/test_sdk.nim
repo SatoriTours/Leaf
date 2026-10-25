@@ -11,7 +11,7 @@ suite "SDK discovery":
     createDir(root / "bin")
     createDir(root / "src")
     writeFile(root / "src/leaf.nim", "discard")
-    writeFile(root / "sdk.json", $ %*{"schema": 1, "version": "v1.2.3", "channel": "release", "commit": "abcdef123"})
+    writeFile(root / "sdk.json", $ %*{"schema": 2, "backend": "native", "version": "v1.2.3", "channel": "release", "commit": "abcdef123"})
     check sdkRoot(root / "bin" / "leaf".addFileExt(ExeExt)) == root
     check sdkRoot(base / "uninstalled" / "leaf") == ""
 
@@ -22,6 +22,11 @@ suite "SDK discovery":
     check sdkRoot(root / "bin/leaf") == ""
     writeFile(root / "sdk.json", $ %*{"schema": 99})
     check sdkRoot(root / "bin/leaf") == ""
+    createDir(root / "src")
+    writeFile(root / "src/leaf.nim", "discard")
+    writeFile(root / "sdk.json", $ %*{"schema": 1})
+    check sdkRoot(root / "bin/leaf") == ""
+    expect ValueError: verifySdk("release", "windows-x86_64", root=root)
 
   test "explicit library and compiler overrides keep priority":
     let oldLibrary = getEnv("LEAF_LIBRARY")
@@ -39,7 +44,7 @@ suite "SDK discovery":
   test "installer checks requested channel target and exact version":
     let root = base / "verified"
     createDir(root)
-    writeFile(root / "sdk.json", $ %*{"schema": 1, "version": "v1.2.3",
+    writeFile(root / "sdk.json", $ %*{"schema": 2, "backend": "native", "version": "v1.2.3",
       "channel": "release", "target": "linux-x86_64"})
     verifySdk("release", "linux-x86_64", "v1.2.3", root)
     expect ValueError: verifySdk("beta", "linux-x86_64", "", root)

@@ -14,7 +14,7 @@ const
   EventBackMask* = 8'u32
 
 type
-  HostStylePolicy* = enum gpuiCompatible, nativeStrict
+  HostStylePolicy* = enum hostCompatible, nativeStrict
   HostProps* = object
     normalized*: NormalizedProps
     text*, placeholder*: string
@@ -39,7 +39,7 @@ type
     props*: HostProps
     row*: Option[NativeRowBinding]
       ## Nim-only typed row sidecar carried by create/update; never encoded by
-      ## the GPUI ABI (no HostOpKind, no C header, no Rust change).
+      ## a platform wire ABI; consumed directly by the native adapter.
     children*: seq[NodeHandle]
     boundary*: HostBoundary
     window*: HostWindow
@@ -51,7 +51,7 @@ type
     ops*, ffiBytes*, snapshotExports*: uint64
 
 proc compatibleNode(node: Node): Node =
-  # ABI 1 GPUI ignores unknown attributes and uses permissive widget defaults.
+  # Compatibility normalization ignores unknown attributes and uses permissive widget defaults.
   # Keep that behavior while converting recognized properties once.
   var attrs: Styles
   for name, value in node.attributes:

@@ -18,7 +18,8 @@ if args == @["--diagnostic-child"]:
   quit(23)
 if args.len == 2 and args[0] == "--cli-build":
   setCurrentDir(args[1])
-  leaf_cli.exitCli(leaf_cli.main(@["build"]))
+  # Exercise the shared compiler owner without requiring this host to have a GUI.
+  leaf_cli.exitCli(leaf_cli.main(@["--check"]))
 if args.len == 2 and args[0] == "--child":
   when defined(posix): discard posix.signal(SIGTERM, SIG_IGN)
   writeFile(args[1], $getCurrentProcessId())

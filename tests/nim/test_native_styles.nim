@@ -1,6 +1,6 @@
 import ../fixture_app
 import std/[unittest, options, math, tables, json]
-import leaf/[core, widgets, styles, gpui_styles, backend]
+import leaf/[core, widgets, styles, style_validation, backend]
 
 proc rejectsStyle(pairs: openArray[(string, string)]): bool =
   try:
@@ -223,7 +223,7 @@ suite "Native reset token signal":
     let snapshot = Snapshot(title: "t", width: 320, height: 200, root: mount(node))
     check snapshot.toJson()["root"]["attributes"] == %*{}
 
-  test "GPUI styles stay style-only and never enforce control attributes":
+  test "shared style validation never enforces control attributes":
     validateStyles(mount(ui(NodeKind.checkbox,
       attributes = style({"checked": "maybe"}))))
     expect UiError:

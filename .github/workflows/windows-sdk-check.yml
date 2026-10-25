@@ -1,25 +1,18 @@
-name: Windows SDK 快速验证
+name: Windows 原生 SDK 快速验证
 on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: 提供 Windows SDK 构建产物的 workflow run ID
+        description: 提供 Windows 原生 SDK 构建产物的 workflow run ID
         required: true
         type: string
-      repair_manifest:
-        description: 在临时 SDK 中验证 DLL manifest 修复
-        default: false
-        type: boolean
-      rebuild_cli:
-        description: 使用当前代码重新编译临时 SDK 的 CLI 与源码
-        default: false
-        type: boolean
 permissions:
   contents: read
   actions: read
 jobs:
   verify:
     runs-on: windows-2022
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: 准备编译链镜像
@@ -31,37 +24,16 @@ jobs:
           path: dist/sdk
           run-id: ${{ inputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: 检查 DLL manifest 与安装回归
+      - name: 检查原生 SDK 与安装回归
         shell: pwsh
-        env:
-          REPAIR_MANIFEST: ${{ inputs.repair_manifest }}
-          REBUILD_CLI: ${{ inputs.rebuild_cli }}
         run: |
           $ErrorActionPreference = 'Stop'
           $archive = Join-Path (Get-Location) 'dist/sdk/leaf-sdk-windows-x86_64.zip'
-          $work = Join-Path $env:RUNNER_TEMP 'leaf-sdk-check'
+          $work = Join-Path $env:RUNNER_TEMP 'leaf-native-sdk-check'
           Expand-Archive -LiteralPath $archive -DestinationPath $work
           $metadata = Get-Content (Join-Path $work 'leaf-sdk/sdk.json') -Raw | ConvertFrom-Json
-          $dll = Join-Path $work 'leaf-sdk/lib/leaf_gpui.dll'
-          $mt = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\mt.exe" | Sort-Object FullName -Descending | Select-Object -First 1
-          if ($env:REPAIR_MANIFEST -eq 'true') {
-            & $mt.FullName -nologo -manifest 'crates/leaf-gpui/resources/windows/leaf_gpui.manifest' "-outputresource:$dll;#2"
-            if ($LASTEXITCODE -ne 0) { throw 'DLL manifest update failed.' }
-          }
-          if ($env:REBUILD_CLI -eq 'true') {
-            Copy-Item (Join-Path $work 'leaf-sdk/src/leaf/vendor/GPUI-NOTICES.json') 'src/leaf/vendor/GPUI-NOTICES.json' -Force
-            Copy-Item 'src/*' (Join-Path $work 'leaf-sdk/src') -Recurse -Force
-            & (Join-Path $work 'leaf-sdk/toolchain/nim/bin/nim.exe') c -d:release "--out:$work/leaf-sdk/bin/leaf.exe" src/leaf_cli.nim
-            if ($LASTEXITCODE -ne 0) { throw 'CLI compilation failed.' }
-          }
-          if ($env:REPAIR_MANIFEST -eq 'true' -or $env:REBUILD_CLI -eq 'true') {
-            Compress-Archive -Path (Join-Path $work 'leaf-sdk') -DestinationPath $archive -Force
-            (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash | Set-Content "$archive.sha256" -Encoding ascii
-          }
-          & $mt.FullName -nologo "-inputresource:$dll;#2" "-out:$work/dll.manifest"
-          if ($LASTEXITCODE -ne 0) { throw 'DLL manifest resource 2 is missing.' }
-          Get-Content "$work/dll.manifest"
+          if ($metadata.schema -ne 2 -or $metadata.backend -ne 'native') { throw 'Native SDK schema 2 required' }
           & (Join-Path $work 'leaf-sdk/toolchain/nim/bin/nim.exe') c -d:release "--out:$work/verify_sdk_install.exe" scripts/verify_sdk_install.nim
-          if ($LASTEXITCODE -ne 0) { throw 'SDK verification tool compilation failed.' }
+          if ($LASTEXITCODE -ne 0) { throw 'SDK verification tool compilation failed' }
           & "$work/verify_sdk_install.exe" --target windows-x86_64 --channel $metadata.channel --version $metadata.version
-          if ($LASTEXITCODE -ne 0) { throw 'Native SDK verification failed.' }
+          if ($LASTEXITCODE -ne 0) { throw 'Native SDK verification failed' }

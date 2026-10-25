@@ -112,7 +112,7 @@ function AssertFixturePath($Actual, $Expected, $Message) {
   if fileExists(failureFile):result.output.add("\n" & readFile(failureFile))
 
 type Fixture = object
-  base, target, bridge, cli, nimRoot, output, extension: string
+  base, target, cli, nimRoot, output, extension: string
 
 proc fixture(): Fixture =
   result.base = createTempDir("leaf sdk test ", "")
@@ -128,12 +128,12 @@ proc fixture(): Fixture =
   result.cli = result.base / (when defined(windows): "leaf.exe" else: "leaf")
   writeFile(result.cli, "#!/bin/sh\necho 'Leaf v1.2.3 (release, abcdef)'\n")
   setFilePermissions(result.cli, {fpUserRead, fpUserWrite, fpUserExec, fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
-  result.bridge = result.base / bridgeName(result.target)
-  writeFile(result.bridge, "bridge")
+
+
   result.output = result.base / "downloads/releases/latest/download"
 
 proc packageOptions(f: Fixture, channel = "release"): PackageOptions =
-  PackageOptions(nimRoot: f.nimRoot, cli: f.cli, bridge: f.bridge, target: f.target,
+  PackageOptions(nimRoot: f.nimRoot, cli: f.cli, target: f.target,
     version: "v1.2.3", channel: channel, commit: "abcdef", output: f.output)
 
 proc package(f: Fixture, channel = "release"): string =
@@ -189,13 +189,13 @@ suite "SDK archive and native installer":
       let archive = f.package()
       let unpacked = f.base / "unpacked"
       extractTar(archive, unpacked)
-      for item in ["include/leaf_gpui_v2.h", "src/leaf/components.nim", "src/leaf/managed_runtime.nim", "src/leaf.nim", "src/leaf/templates/scaffold/main.nim", "LICENSE",
+      for item in ["include/leaf_native.h", "src/leaf/components.nim", "src/leaf/managed_runtime.nim", "src/leaf.nim", "src/leaf/templates/scaffold/main.nim", "LICENSE",
                    "toolchain/nim/lib/system.nim", "src/leaf/vendor/orm/lock.json",
                    "src/leaf/orm_config.nim", "src/leaf/orm_config.nims",
                    "src/leaf/migrations.nim", "src/leaf/migrations/catalog.nim",
                    "src/leaf/migrations/runner.nim", "src/leaf/db_cli.nim",
                    "licenses/orm/norm-LICENSE.txt", "licenses/orm/lowdb-LICENSE.txt",
-                   "licenses/orm/db_connector-LICENSE.txt", "licenses/inventory.json", "lib/" & bridgeName(f.target), "bin/leaf"]:
+                   "licenses/orm/db_connector-LICENSE.txt", "licenses/inventory.json", "bin/leaf"]:
         check fileExists(unpacked / "leaf-sdk" / item)
       check parseFile(unpacked / "leaf-sdk/sdk.json")["channel"].getStr == "release"
       check sha256File(archive) == readFile(archive & ".sha256").splitWhitespace()[0]
@@ -289,7 +289,7 @@ suite "SDK archive and native installer":
 
   test "CLI options preserve separated and equals forms":
     let options = parsePackageOptions(@["--nim-root", f.nimRoot, "--cli=" & f.cli,
-      "--bridge", f.bridge, "--target", f.target, "--version=v1.2.3", "--channel", "release",
+      "--target", f.target, "--version=v1.2.3", "--channel", "release",
       "--commit", "abcdef", "--output", f.output])
     check options.nimRoot == f.nimRoot
     check options.cli == f.cli
@@ -298,6 +298,7 @@ suite "SDK archive and native installer":
     check verify.target == f.target
     check verify.headlessOnly
     expect ValueError: discard parsePackageOptions(@["--target"])
+    expect ValueError: discard parsePackageOptions(@["--bridge", "removed.dll"])
     expect ValueError: discard parseVerifyOptions(@["--headless-only=yes"])
 
 
@@ -396,7 +397,7 @@ suite "Relocated SDK isolated fixture compile":
         if linked.exitCode!=0:
           raise newException(ValueError, "mingw junction failed: " & linked.output)
       var environment=processEnvironment()
-      for key in ["NIM", "LEAF_LIBRARY", "LEAF_GPUI_ROOT", "LEAF_GPUI_LIBRARY"]: environment.del(key)
+      for key in ["NIM", "LEAF_LIBRARY"]: environment.del(key)
       let command=isolatedFixtureCommand(sdk, project, "test_home")
       let compiled=runCommand(command.exe, command.args, project, environment)
       checkpoint compiled.output

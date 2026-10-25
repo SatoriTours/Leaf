@@ -84,7 +84,7 @@ proc commit(session:HostSession,accepted,candidate:Runtime)=
       wire=plan.batch
       wire.sessionId=session.sessionId
   else:
-    plan=session.reconciler.planSnapshot(candidate.snapshot,revision,gpuiCompatible)
+    plan=session.reconciler.planSnapshot(candidate.snapshot,revision,hostCompatible)
     session.reconciler.validate(plan)
     wire=plan.batch
   session.pending=plan

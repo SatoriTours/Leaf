@@ -16,19 +16,17 @@ when defined(leafHeadlessOnly):
     return 1
 else:
   import ./[developer_options, diagnostics]
-  when defined(leafNativeWin32):
+  when defined(windows):
     import ./backends/win32
-  else:
-    import ./desktop
 
   proc run*(app: Application, args: seq[string], cleanupOwner: ptr Runtime = nil): int =
     if cleanupOwner != nil and cleanupOwner[] != nil: fail("cleanup owner slot must be empty")
     if "--headless" in args or "--check" in args: return runHeadless(app, args, cleanupOwner)
     if args == @["--help"] or args == @["-h"]:
-      when defined(leafNativeWin32):
+      when defined(windows):
         stdout.writeLine("Without arguments, launch the Win32 native controls window.")
       else:
-        stdout.writeLine("Without arguments, launch the native GPUI + GPUI Kit desktop window.")
+        stdout.writeLine("Native GUI backend not implemented on this platform; use --headless or --check.")
       stdout.write(helpText())
       return 0
     try:
@@ -43,19 +41,19 @@ else:
           except CatchableError: discard
         else: diagnostics.close()
       try:
-        when defined(leafNativeWin32):
+        when defined(windows):
           return runNative(app, diagnostics = diagnostics, cleanupOwner = cleanupOwner)
         else:
-          return runDesktop(app, diagnostics = diagnostics, cleanupOwner = cleanupOwner)
+          fail("native GUI backend not implemented on this platform; use --headless or --check")
       except CatchableError as error:
         preservingOwner = error of RuntimeCleanupError and cast[ref RuntimeCleanupError](error).cleanupRuntime != nil
-        when defined(leafNativeWin32):
+        when defined(windows):
           if error of Win32RunError and cast[ref Win32RunError](error).cleanupHost != nil:
             preservingOwner = true
         raise
     except CatchableError as error:
       if error of RuntimeCleanupError and cast[ref RuntimeCleanupError](error).cleanupRuntime != nil: raise
-      when defined(leafNativeWin32):
+      when defined(windows):
         if error of Win32RunError and cast[ref Win32RunError](error).cleanupHost != nil: raise
       stderr.writeLine("leaf: " & error.msg)
       return 1

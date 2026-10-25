@@ -8,7 +8,7 @@ when defined(posix): import std/posix
 const PerformanceHelp* = """Usage: leaf-performance [options]
 Build: nim c -d:release --out:target/nim/leaf-performance scripts/performance.nim
 
-  --suite runtime|native|all       Default: runtime; native needs GPUI and graphics
+  --suite runtime|native|all       Default: runtime; native producer is not implemented
   --iterations N                 Measured operations per round (default 100)
   --warmup N                     Once per retained workload instance (default 100)
   --rounds N                     Rounds per scenario and cycle (default 3)
@@ -204,11 +204,11 @@ proc sourceIdentity(root: string): JsonNode =
       case kind
       of pcDir: visit(path, depth + 1)
       of pcFile:
-        if path.splitFile.ext.toLowerAscii in [".nim", ".nims", ".cfg", ".json", ".rs", ".toml", ".lock"]: files.add(path)
+        if path.splitFile.ext.toLowerAscii in [".nim", ".nims", ".cfg", ".json"]: files.add(path)
       else: reject("performance source cannot contain symbolic links: " & path)
-  for folder in ["src", "crates", "benchmarks", "examples", "example", "scripts"]:
+  for folder in ["src", "benchmarks", "examples", "example", "scripts"]:
     if dirExists(root / folder): visit(root / folder, 0)
-  for name in ["config.nims", "nim.cfg", "leaf.nimble", "Cargo.toml", "Cargo.lock"]:
+  for name in ["config.nims", "nim.cfg", "leaf.nimble"]:
     if fileExists(root / name): files.add(root / name)
   if files.len == 0: reject("no Nim performance sources found")
   files.sort()
@@ -249,7 +249,7 @@ proc machineEnvironment(config: PerformanceConfig, compiler: JsonNode): JsonNode
     for line in readFile("/proc/self/status").splitLines():
       if line.startsWith("Cpus_allowed_list:"): affinity = line.split(':', 1)[^1].strip()
   let graphics = newJObject()
-  for key in ["DISPLAY", "WAYLAND_DISPLAY", "LEAF_GPUI_LIBRARY", "VK_ICD_FILENAMES",
+  for key in ["DISPLAY", "WAYLAND_DISPLAY", "VK_ICD_FILENAMES",
       "LIBGL_ALWAYS_SOFTWARE", "GALLIUM_DRIVER", "MESA_LOADER_DRIVER_OVERRIDE",
       "PATH", "LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
       "FONTCONFIG_FILE", "FONTCONFIG_PATH", "LANG", "LC_ALL"]:
@@ -337,10 +337,8 @@ proc runPerformance*(config: PerformanceConfig,
   defer: endSignals()
   try:
     let names = groupNames(config)
-    if "native" in names:
-      when defined(linux):
-        if getEnv("DISPLAY").len == 0 and getEnv("WAYLAND_DISPLAY").len == 0:
-          reject("native suite requires a graphical session (DISPLAY or WAYLAND_DISPLAY)")
+    if "native" in names and not fileExists(root / "benchmarks/performance_native.nim"):
+      reject("native performance producer is not implemented; use --suite runtime")
     var affinityTool: string
     if config.cpu.isSome:
       when defined(linux): affinityTool = executable("taskset")

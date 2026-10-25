@@ -5,15 +5,8 @@ import ../src/leaf/[archives, checksum, licenses]
 const RepositoryRoot* = currentSourcePath().parentDir.parentDir
 const SdkTargets* = ["linux-x86_64", "macos-x86_64", "macos-aarch64", "windows-x86_64"]
 type PackageOptions* = object
-  nimRoot*, cli*, bridge*, output*, target*, channel*, version*, commit*: string
+  nimRoot*, cli*, output*, target*, channel*, version*, commit*: string
   root*: string
-
-proc bridgeName*(target: string): string =
-  case target
-  of "linux-x86_64": "libleaf_gpui.so"
-  of "macos-x86_64", "macos-aarch64": "libleaf_gpui.dylib"
-  of "windows-x86_64": "leaf_gpui.dll"
-  else: raise newException(ValueError, "unsupported SDK target: " & target)
 
 proc releaseVersion(version: string): bool =
   if not version.startsWith('v'): return false
@@ -41,10 +34,11 @@ proc packageSdk*(options: PackageOptions): string =
   let root = if options.root.len > 0: options.root else: RepositoryRoot
   let windows = options.target.startsWith("windows")
   let executable = if windows: ".exe" else: ""
-  let library = bridgeName(options.target)
+  if options.target notin SdkTargets:
+    raise newException(ValueError, "unsupported SDK target: " & options.target)
   if options.channel notin ["release", "beta"]:
     raise newException(ValueError, "channel must be release or beta")
-  for path in [options.cli, options.bridge, options.nimRoot / ("bin/nim" & executable),
+  for path in [options.cli, options.nimRoot / ("bin/nim" & executable),
                options.nimRoot / "lib/system.nim", options.nimRoot / "config/nim.cfg"]:
     if not fileExists(path): raise newException(ValueError, "SDK input is missing: " & path)
   if options.channel == "release" and not releaseVersion(options.version):
@@ -57,9 +51,8 @@ proc packageSdk*(options: PackageOptions): string =
   let temporary = createTempDir("leaf-sdk-package-", "")
   defer: removeDir(temporary)
   let sdk = temporary / "leaf-sdk"
-  for directory in ["bin", "lib", "toolchain/nim/bin", "licenses"]: createDir(sdk / directory)
+  for directory in ["bin", "toolchain/nim/bin", "licenses"]: createDir(sdk / directory)
   copyFileWithPermissions(options.cli, sdk / ("bin/leaf" & executable))
-  copyFileWithPermissions(options.bridge, sdk / "lib" / library)
   copyTree(root / "src", sdk / "src")
   copyTree(root / "include", sdk / "include")
   copyTree(root / "native/android/src/main", sdk / "native/android/src/main")
@@ -68,19 +61,19 @@ proc packageSdk*(options: PackageOptions): string =
   for directory in ["lib", "config"]: copyTree(options.nimRoot / directory, sdk / "toolchain/nim" / directory)
   collectLicenses(sdk / "licenses")
   let vendor = root / "src/leaf/vendor"
-  for filename in ["Nim-LICENSE.txt", "GPUI-NOTICES.json", "provenance.json"]:
+  for filename in ["Nim-LICENSE.txt", "provenance.json"]:
     copyFileWithPermissions(vendor / filename, sdk / "licenses" / filename)
   writeFile(sdk / "sdk.json", (%*{
-    "schema": 1, "version": options.version, "channel": options.channel,
+    "schema": 2, "backend": "native", "version": options.version, "channel": options.channel,
     "commit": options.commit, "target": options.target, "nim_version": "2.2.6"
   }).pretty & "\n")
   writeFile(sdk / "licenses/SDK-SOURCES.txt",
     "Leaf: https://github.com/SatoriTours/Leaf\n" &
     "Nim 2.2.6 (MIT): https://nim-lang.org/download/nim-2.2.6.tar.xz\n" &
     "ORM sources, MIT licenses and pinned commits: see orm/lock.json and inventory.json\n" &
-    "GPUI and dependencies: see GPUI-NOTICES.json and src/leaf/vendor\n" &
     "Windows installer downloads MinGW directly from https://nim-lang.org/download/mingw64.7z\n" &
-    "OS graphics libraries, C compiler on Unix and platform runtimes are system prerequisites.\n")
+    "Windows GUI uses system-native controls. Other desktop GUI backends are not implemented.\n" &
+    "Unix SDKs are headless developer tools only; a C compiler is a system prerequisite.\n")
   var entries = @[ArchiveEntry(source: sdk, name: "leaf-sdk", directory: true)]
   var paths: seq[string]
   for path in walkDirRec(sdk, yieldFilter = {pcFile, pcDir}): paths.add(path)
@@ -103,7 +96,7 @@ proc parsePackageOptions*(arguments: seq[string]): PackageOptions =
     case parser.kind
     of cmdEnd: break
     of cmdLongOption:
-      if parser.key notin ["nim-root", "cli", "bridge", "output", "target", "channel", "version", "commit"]:
+      if parser.key notin ["nim-root", "cli", "output", "target", "channel", "version", "commit"]:
         raise newException(ValueError, "unknown option: --" & parser.key)
       let option = parser.key
       var value = parser.val
@@ -113,15 +106,15 @@ proc parsePackageOptions*(arguments: seq[string]): PackageOptions =
         value = parser.key
       values[option] = value
     else: raise newException(ValueError, "unexpected argument: " & parser.key)
-  for key in ["nim-root", "cli", "bridge", "output", "target", "channel", "version", "commit"]:
+  for key in ["nim-root", "cli", "output", "target", "channel", "version", "commit"]:
     if key notin values: raise newException(ValueError, "required option: --" & key)
-  PackageOptions(nimRoot: values["nim-root"], cli: values["cli"], bridge: values["bridge"],
+  PackageOptions(nimRoot: values["nim-root"], cli: values["cli"],
     output: values["output"], target: values["target"], channel: values["channel"],
     version: values["version"], commit: values["commit"])
 
 when isMainModule:
   if "--help" in commandLineParams() or "-h" in commandLineParams():
-    echo "Usage: package_sdk --nim-root PATH --cli PATH --bridge PATH --output PATH --target TARGET --channel {release,beta} --version VERSION --commit SHA"
+    echo "Usage: package_sdk --nim-root PATH --cli PATH --output PATH --target TARGET --channel {release,beta} --version VERSION --commit SHA"
   else:
     try: echo packageSdk(parsePackageOptions(commandLineParams()))
     except CatchableError as error:

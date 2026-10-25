@@ -4,6 +4,16 @@
 >
 > 2026-10-24 当次覆盖：用户明确要求主控直接接手、不要再派发。source-pump 由主控完成、自测与自审；本片未做独立验收，不能冒称。新 probe320行/dfb28028，产品与旧294输入不变；原停滞不再续接。最终冻结295/manifest b4f15f1b、zip a16b0472、runner9087d54f，`native-s1t2-source-pump-final-dfb28028` 真实Windows compile21.621s0/native1.160s0/1PASS/0FAIL/0SKIP/runtime stderr0，7普通tick完成A20→B22前插→C20，desired/applied/accepted106，真实行a4..9→a2..7→a4..9与bar14→16→14、两个真实BUTTON回调exact1/queued/序1→2。无手动flush/drain/marker补tick，32native turn调用前守卫、10s退出timer；Session1非提权96DPI/Ready/owned[]。首次候选编译API拼错有完整失败raw、一次修正codegen通过；首Native过后自审仅前置预算guard，最终快照已重建实跑，旧证据保留。详情见progress顶部。此片自测通过不等于整个T2或迁移完成；独立验收、物理/视觉/混DPI、cold资源与M4均不冒称关闭，不自动Git/发布/归档。
 
+> **2026-10-24 最新范围覆盖：** 用户要求立即删除 GPUI，并明确 Linux/macOS 暂缓、先完成 Windows。先推进 Windows 默认原生启动、构建、打包、SDK 与去依赖；不等待也不实施 GTK4/AppKit。Android 只保留现有路径。原跨平台阶段次序由此调整，以下未完成事项仍是历史计划而非当前已实现能力。主控亲自执行，不再派发，不新建分支或空间；本轮尚无提交/发布授权。
+>
+> 本轮检查清单：
+> - [x] 原生默认/旧后端拒绝/doctor/不支持平台的真实 RED→GREEN。
+> - [x] Windows ZIP 无桥接的结构、资源、许可证与拒绝覆盖检查。
+> - [x] 移除 GPUI Runtime、FFI、Rust workspace、专用构建与测试。
+> - [x] SDK/安装切片、共享 Runtime 与数据库回归：145套覆盖（按失败点续跑），详见 progress；不是独立验收。
+> - [x] 真实 Windows 默认入口/原生ZIP/SDK安装与重定位、SQLite Model、任务切片；完整Windows矩阵仍未完成。
+> - [x] 当前文档/独立示例/本地链接/真实原生图片核对；历史证据与未关闭边界保留，不自动提交发布。
+
 **Goal:** Windows、Linux、macOS 与 Android 使用各自原生控件，迁移应用/SDK/工具链并最终移除 GPUI；iOS 后置，不是本阶段交付门。
 
 **Architecture:** 保留唯一 managed component Runtime、State 候选提交、HostBatch/HostSession 和 nativeHostConsumer/BackendSession。平台后端分别为 Win32、GTK4、AppKit、Android Views；跨语言适配器采用中立 C ABI，业务闭包只在平台 UI 线程进入 Nim。

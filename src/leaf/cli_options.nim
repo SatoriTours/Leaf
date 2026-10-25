@@ -163,7 +163,6 @@ proc parseBuildCommand(args: seq[string]): CliCommand =
     else: result.output = args[i + 1]
     i += 2
   if result.device.len > 0 and result.target != "android":fail("--device requires run --target android")
-  if result.target == "android" and result.backend == "gpui":fail("Android requires the native backend")
 
 proc parseDatabase(args: seq[string]): CliCommand =
   result.kind = ccDatabase

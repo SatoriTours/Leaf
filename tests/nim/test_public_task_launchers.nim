@@ -1,6 +1,6 @@
 ## Public launch boundaries must keep accepted owners reachable until cleanup.
-import std/[unittest, os, options, atomics, strutils, osproc]
-import leaf/[core, widgets, components, headless, runner, desktop, gpui_errors,
+import std/[unittest, os, options, atomics]
+import leaf/[core, widgets, components, headless, runner,
   managed_runtime, task_service, task_contracts, task_worker]
 var workerCalls: Atomic[int]
 proc work(input: string, ctx: WorkerContext): string {.nimcall, gcsafe.} =
@@ -108,59 +108,6 @@ suite "public headless final ownership":
         check workerCalls.load() == 0
     when defined(linux): check threadCount() == baseline
 
-proc launcherLibrary(status: int): string =
-  let directory = getTempDir() / ("leaf-public-launcher-" & $getCurrentProcessId())
-  createDir(directory)
-  let source = directory / ("launcher" & $status & ".c")
-  let framework = currentSourcePath().parentDir.parentDir.parentDir
-  writeFile(source, readFile(framework / "tests/ffi/gpui_v2_library.c")
-    .replace("../../include/leaf_gpui_v2.h", framework / "include/leaf_gpui_v2.h")
-    .replace("LeafGpuiApiV2 api={sizeof(api),2,0,run};", "LeafGpuiApiV2 api={sizeof(api),2,LEAF_CAP_TASK_PUMP,run};")
-    .replace("(void)ctx;return 0;", "(void)ctx;return " & $status & ";")
-    .replace("h->detach(ctx);return status;", "h->detach(ctx);return status==0 ? " & $status & " : status;"))
-  result = source.changeFileExt("so")
-  doAssert execCmd("gcc -shared -fPIC " & quoteShell(source) & " -o " & quoteShell(result)) == 0
-
-suite "public runner retry ownership":
-  test "both ABI integer results keep pending owner reachable through run":
-    let previousLibrary = getEnv("LEAF_GPUI_LIBRARY")
-    let previousAbi = getEnv("LEAF_GPUI_ABI")
-    defer:
-      if previousLibrary.len == 0: delEnv("LEAF_GPUI_LIBRARY")
-      else: putEnv("LEAF_GPUI_LIBRARY", previousLibrary)
-      if previousAbi.len == 0: delEnv("LEAF_GPUI_ABI")
-      else: putEnv("LEAF_GPUI_ABI", previousAbi)
-    for status in [0, 5]:
-      putEnv("LEAF_GPUI_LIBRARY", launcherLibrary(status))
-      for abi in ["2"]:
-        putEnv("LEAF_GPUI_ABI", abi)
-        var entries, disposed: int
-        var refuse = true
-        let execution: ExecutionScope = proc(body: proc()) =
-          inc entries
-          if entries > 2 and refuse: fail("public launcher cleanup refused")
-          body()
-        let Owner = defineComponent[int, int]("PublicRunnerOwner",
-          proc(ctx: MountContext, p: int): int =
-            ctx.onDispose(proc(e: LifecycleContext) = inc disposed)
-            p,
-          proc(ctx: ComponentContext, p, m: int): UiDescription = host(text("runner")))
-        var caught = false
-        var owner: Runtime
-        try: discard run(componentApplication(component(Owner, 0), "runner", executionScope = execution), @[])
-        except GpuiRunError as failure:
-          caught = true
-          check failure.msg == "public launcher cleanup refused"
-          check failure.exitStatus == some(status)
-          check failure.parent != nil and failure.parent.msg == failure.msg
-          owner = failure.cleanupRuntime
-        check caught and owner != nil and disposed == 0
-        if owner != nil:
-          refuse = false
-          owner.closeRuntime(); owner.closeRuntime()
-          check disposed == 1
-          owner = nil
-
 suite "headless pending cleanup transfer":
   test "normal status and original event error use out or explicit exception without retrying":
     for withOut in [false, true]:
@@ -218,54 +165,43 @@ suite "headless pending cleanup transfer":
 
 suite "construction transfer through launchers":
   test "constructor retry owner crosses each public launcher with one cleanup attempt":
-    let previousLibrary = getEnv("LEAF_GPUI_LIBRARY")
-    let previousAbi = getEnv("LEAF_GPUI_ABI")
-    defer:
-      if previousLibrary.len == 0: delEnv("LEAF_GPUI_LIBRARY")
-      else: putEnv("LEAF_GPUI_LIBRARY", previousLibrary)
-      if previousAbi.len == 0: delEnv("LEAF_GPUI_ABI")
-      else: putEnv("LEAF_GPUI_ABI", previousAbi)
-    putEnv("LEAF_GPUI_LIBRARY", launcherLibrary(0))
-    for abi in ["2"]:
-      putEnv("LEAF_GPUI_ABI", abi)
-      for boundary in ["headless", "desktop", "runner-headless", "runner-desktop"]:
-        var entries, entered, disposed: int
-        var refuse = true
-        var state: State[int]
-        let original = newException(UiError, "launcher constructor exit")
-        let execution: ExecutionScope = proc(body: proc()) =
-          inc entries
-          if entries > 1 and refuse: fail("constructor cleanup refused")
-          body()
-          if entries == 1: raise original
-        let Owner = defineComponent[int, State[int]]("LauncherConstructionOwner",
-          proc(ctx: MountContext, p: int): State[int] =
-            result = ctx.state(0); state = result
-            ctx.onMount(proc(e: LifecycleContext) = inc entered)
-            ctx.onDispose(proc(e: LifecycleContext) = inc disposed),
-          proc(ctx: ComponentContext, p: int, s: State[int]): UiDescription = host(text("constructor")))
-        let app = componentApplication(component(Owner, 0), boundary, executionScope = execution)
-        var owner: Runtime
-        var caught = false
-        try:
-          case boundary
-          of "headless": discard runHeadless(app, @["--check"], addr owner)
-          of "desktop": discard runDesktop(app, cleanupOwner=addr owner)
-          of "runner-headless": discard run(app, @["--check"], addr owner)
-          else: discard run(app, @[], addr owner)
-        except RuntimeCleanupError as error:
-          caught = true
-          check error.parent == original and error.msg == original.msg
-          check error.exitStatus.isNone
-          check owner == error.cleanupRuntime
-        check caught and owner != nil and entries == 2
-        check disposed == 0 and entered == 0
-        check state.set(1) == StateWriteResult.disposed
-        if owner != nil:
-          refuse = false
-          owner.closeRuntime(); owner.closeRuntime()
-          check disposed == 1 and entered == 0
-          owner = nil
+    for boundary in ["headless", "runner-headless"]:
+      var entries, entered, disposed: int
+      var refuse = true
+      var state: State[int]
+      let original = newException(UiError, "launcher constructor exit")
+      let execution: ExecutionScope = proc(body: proc()) =
+        inc entries
+        if entries > 1 and refuse: fail("constructor cleanup refused")
+        body()
+        if entries == 1: raise original
+      let Owner = defineComponent[int, State[int]]("LauncherConstructionOwner",
+        proc(ctx: MountContext, p: int): State[int] =
+          result = ctx.state(0); state = result
+          ctx.onMount(proc(e: LifecycleContext) = inc entered)
+          ctx.onDispose(proc(e: LifecycleContext) = inc disposed),
+        proc(ctx: ComponentContext, p: int, s: State[int]): UiDescription = host(text("constructor")))
+      let app = componentApplication(component(Owner, 0), boundary, executionScope = execution)
+      var owner: Runtime
+      var caught = false
+      try:
+        case boundary
+        of "headless": discard runHeadless(app, @["--check"], addr owner)
+        of "runner-headless": discard run(app, @["--check"], addr owner)
+        else: discard run(app, @[], addr owner)
+      except RuntimeCleanupError as error:
+        caught = true
+        check error.parent == original and error.msg == original.msg
+        check error.exitStatus.isNone
+        check owner == error.cleanupRuntime
+      check caught and owner != nil and entries == 2
+      check disposed == 0 and entered == 0
+      check state.set(1) == StateWriteResult.disposed
+      if owner != nil:
+        refuse = false
+        owner.closeRuntime(); owner.closeRuntime()
+        check disposed == 1 and entered == 0
+        owner = nil
 
   test "nonempty out is rejected before creating another owner at every public level":
     var initialized: int
@@ -283,37 +219,6 @@ suite "construction transfer through launchers":
     finally: owner.closeRuntime()
 
 suite "runner integer output and ordinary errors":
-  test "both ABI statuses with an output still require caller retry even for zero":
-    let previousLibrary = getEnv("LEAF_GPUI_LIBRARY")
-    let previousAbi = getEnv("LEAF_GPUI_ABI")
-    defer:
-      if previousLibrary.len == 0: delEnv("LEAF_GPUI_LIBRARY")
-      else: putEnv("LEAF_GPUI_LIBRARY", previousLibrary)
-      if previousAbi.len == 0: delEnv("LEAF_GPUI_ABI")
-      else: putEnv("LEAF_GPUI_ABI", previousAbi)
-    for status in [0, 5]:
-      putEnv("LEAF_GPUI_LIBRARY", launcherLibrary(status))
-      for abi in ["2"]:
-        putEnv("LEAF_GPUI_ABI", abi)
-        var entries, disposed: int
-        var refuse = true
-        let execution: ExecutionScope = proc(body: proc()) =
-          inc entries
-          if entries > 2 and refuse: fail("runner output cleanup refused")
-          body()
-        let Owner = defineComponent[int, int]("RunnerOutputOwner",
-          proc(ctx: MountContext, p: int): int =
-            ctx.onDispose(proc(e: LifecycleContext) = inc disposed)
-            p,
-          proc(ctx: ComponentContext, p, m: int): UiDescription = host(text("runner output")))
-        var owner: Runtime
-        check run(componentApplication(component(Owner, 0), "output", executionScope=execution), @[], addr owner) == status
-        check owner != nil and disposed == 0 and entries == 3
-        if owner != nil:
-          refuse = false
-          owner.closeRuntime(); owner.closeRuntime()
-          check disposed == 1
-          owner = nil
   test "ordinary errors without a pending owner keep the diagnostic integer contract":
     var initialized: int
     let Owner = defineComponent[int, int]("OrdinaryRunnerError",
@@ -321,53 +226,3 @@ suite "runner integer output and ordinary errors":
       proc(ctx: ComponentContext, p, m: int): UiDescription = host(text("unused")))
     check run(componentApplication(component(Owner, 0), "unused"), @["--invalid"]) == 1
     check initialized == 0
-
-  test "both ABI original capability rejection survives high level run with pending cleanup":
-    let directory = getTempDir() / ("leaf-public-old-" & $getCurrentProcessId())
-    createDir(directory)
-    let framework = currentSourcePath().parentDir.parentDir.parentDir
-    let source = directory / "old.c"
-    writeFile(source, readFile(framework / "tests/ffi/gpui_v2_library.c")
-      .replace("../../include/leaf_gpui_v2.h", framework / "include/leaf_gpui_v2.h"))
-    let library = source.changeFileExt("so")
-    doAssert execCmd("gcc -shared -fPIC " & quoteShell(source) & " -o " & quoteShell(library)) == 0
-    let previousLibrary = getEnv("LEAF_GPUI_LIBRARY")
-    let previousAbi = getEnv("LEAF_GPUI_ABI")
-    defer:
-      if previousLibrary.len == 0: delEnv("LEAF_GPUI_LIBRARY")
-      else: putEnv("LEAF_GPUI_LIBRARY", previousLibrary)
-      if previousAbi.len == 0: delEnv("LEAF_GPUI_ABI")
-      else: putEnv("LEAF_GPUI_ABI", previousAbi)
-    putEnv("LEAF_GPUI_LIBRARY", library)
-    for abi in ["2"]:
-      putEnv("LEAF_GPUI_ABI", abi)
-      var entries, disposed, entered: int
-      var refuse = true
-      var state: State[int]
-      let execution: ExecutionScope = proc(body: proc()) =
-        inc entries
-        if entries > 1 and refuse: fail("old capability cleanup refused")
-        body()
-      let Owner = defineComponent[int, State[int]]("HighLevelOldCapability",
-        proc(ctx: MountContext, p: int): State[int] =
-          discard ctx.taskScope()
-          result = ctx.state(0); state = result
-          ctx.onMount(proc(e: LifecycleContext) = inc entered)
-          ctx.onDispose(proc(e: LifecycleContext) = inc disposed),
-        proc(ctx: ComponentContext, p: int, s: State[int]): UiDescription = host(text("old")))
-      var owner: Runtime
-      var caught = false
-      try: discard run(componentApplication(component(Owner, 0), "old", executionScope=execution), @[])
-      except GpuiRunError as error:
-        caught = true
-        check "host does not support task pumping" in error.msg
-        check error.parent != nil and error.parent.msg == error.msg
-        check error.exitStatus.isNone
-        owner = error.cleanupRuntime
-      check caught and owner != nil and entries == 2
-      check disposed == 0 and entered == 0 and state.set(1) == StateWriteResult.disposed
-      if owner != nil:
-        refuse = false
-        owner.closeRuntime(); owner.closeRuntime()
-        check disposed == 1 and entered == 0
-        owner = nil

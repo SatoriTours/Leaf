@@ -1,8 +1,8 @@
 import ./cleanup_support
-import std/[unittest, os, osproc, tempfiles, json, strutils, times]
+import std/[unittest, os, osproc, tempfiles, json, strutils, times, options]
 import leaf
 import ../fixture_app
-import leaf/[diagnostics, build, doctor, project, gpui_build]
+import leaf/[diagnostics, build, doctor, project, targets]
 import ../../examples/counter
 
 let root = createTempDir("leaf-diagnostics-", "")
@@ -64,33 +64,6 @@ suite "Nim diagnostics and build pipeline":
     expect ValueError: discard newDiagnostics(logFile = assets / "trace.jsonl", projectRoot = root, watching = true)
     check not fileExists(assets / "trace.jsonl")
   when defined(posix):
-    test "Cargo discovery preserves the executable name of a multicall symlink":
-      let directory = root / "cargo shim"
-      createDir(directory)
-      let cargo = findExe("cargo", followSymlinks = false)
-      require cargo.len > 0
-      let shim = directory / "multicall"
-      writeFile(shim, "#!/bin/sh\n" &
-        "case \"${0##*/}\" in cargo) ;; *) exit 86 ;; esac\n" &
-        "exec " & quoteShell(cargo) & " \"$@\"\n")
-      setFilePermissions(shim, {fpUserRead, fpUserWrite, fpUserExec})
-      createSymlink(shim, directory / "cargo")
-      let previousPath = getEnv("PATH")
-      let hadCargo = existsEnv("CARGO")
-      let previousCargo = getEnv("CARGO")
-      let hadLibrary = existsEnv("LEAF_GPUI_LIBRARY")
-      let previousLibrary = getEnv("LEAF_GPUI_LIBRARY")
-      putEnv("PATH", directory & PathSep & previousPath)
-      delEnv("CARGO")
-      delEnv("LEAF_GPUI_LIBRARY")
-      defer:
-        putEnv("PATH", previousPath)
-        if hadCargo: putEnv("CARGO", previousCargo)
-        else: delEnv("CARGO")
-        if hadLibrary: putEnv("LEAF_GPUI_LIBRARY", previousLibrary)
-        else: delEnv("LEAF_GPUI_LIBRARY")
-      check fileExists(ensureGpui())
-      check "cargo " in doctorReport()["tools"]["cargo"].getStr
     test "a disguised symlink output still cannot overwrite Nim source":
       let source = root / "protected.nim"
       writeFile(source, "original")
@@ -110,7 +83,7 @@ suite "Nim diagnostics and build pipeline":
     createDir(directory)
     writeFile(directory / "main.nim", "static: echo \"compiler stdout\"\necho \"compiled\"\n")
     let project = readProject(directory / "main.nim")
-    let job = startBuild(project)
+    let job = startBuild(project, selection=some(resolveBuild(project.backend, headlessOnly=true)))
     defer: job.close()
     job.complete()
     check job.code == 0
@@ -122,7 +95,7 @@ suite "Nim diagnostics and build pipeline":
     writeFile(directory / "main.nim", "this is not valid Nim !!!")
     let binary = directory / "previous"
     writeFile(binary, "previous executable")
-    let job = startBuild(readProject(directory / "main.nim"), output = directory / "candidate")
+    let job = startBuild(readProject(directory / "main.nim"), output = directory / "candidate", selection=some(resolveBuild(backendNative, headlessOnly=true)))
     defer: job.close()
     job.complete()
     check job.code != 0
@@ -138,7 +111,7 @@ suite "Nim diagnostics and build pipeline":
     check job.output == failedOutput
     check readFile(binary) == "previous executable"
     writeFile(directory / "main.nim", "echo \"repaired\"\n")
-    let repaired = startBuild(readProject(directory / "main.nim"), output = directory / "candidate")
+    let repaired = startBuild(readProject(directory / "main.nim"), output = directory / "candidate", selection=some(resolveBuild(backendNative, headlessOnly=true)))
     defer: repaired.close()
     repaired.complete()
     check repaired.code == 0
@@ -151,6 +124,6 @@ suite "Nim diagnostics and build pipeline":
     let report = doctorReport()
     check report["implementation"].getStr == "nim"
     check "2.2.6" in report["tools"]["nim"].getStr
-    when defined(linux): check not report["graphical_session"].getBool
-    check report["desktop_backend"].getStr == "gpui"
-    check report["gpui_kit"].getStr == "0.7.0"
+    when not defined(windows): check not report["host_available"].getBool
+    check report["desktop_backend"].getStr == "native"
+    check not report.hasKey("gpui")

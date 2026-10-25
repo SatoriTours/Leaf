@@ -18,18 +18,16 @@ suite "explicit backend and headless toolchain selection":
     check not fileExists(root / "target/nim/leaf_gpui.dll")
     check not fileExists(root / "target/nim/libleaf_gpui.so")
 
-  test "default and explicit backend precedence remain strict":
-    check resolveBuild(backendGpui).backend == backendGpui
+  test "default native backend cannot be overridden by a removed backend":
     check resolveBuild(backendNative).backend == backendNative
-    check resolveBuild(backendNative, backend="gpui").backend == backendGpui
-    check resolveBuild(backendGpui, backend="native").backend == backendNative
-    expect UiError: discard resolveBuild(backendGpui, backend="unknown")
-    check resolveBuild(backendGpui, target="android").backend == backendNative
-    check resolveBuild(backendNative, target="android").target == "android"
-    expect UiError: discard resolveBuild(backendGpui, target="android", backend="gpui")
+    check resolveBuild(backendNative, backend="native").backend == backendNative
+    expect UiError: discard resolveBuild(backendNative, backend="gpui")
+    expect UiError: discard resolveBuild(backendNative, backend="unknown")
+    check resolveBuild(backendNative, target="android").backend == backendNative
+    expect UiError: discard resolveBuild(backendNative, target="android", backend="gpui")
     expect UiError: discard resolveBuild(backendNative, target="android", headlessOnly=true)
-    expect UiError: discard resolveBuild(backendGpui, target="unknown")
-  test "native configuration is strict and native packaging rejects before staging":
+    expect UiError: discard resolveBuild(backendNative, target="unknown")
+  test "native configuration is strict and unsupported packaging rejects before staging":
     let root = createTempDir("leaf-native-config-", "")
     defer: removeDir(root)
     writeFile(root / "main.nim", "discard")
@@ -37,7 +35,7 @@ suite "explicit backend and headless toolchain selection":
       "entry":"main.nim", "include":["main.nim"], "backend":"native"}
     writeFile(root / "leaf.json", $config)
     check readProject(root).backend == backendNative
-    expect UiError: discard pack(readProject(root), "windows", root / "dist")
+    expect UiError: discard pack(readProject(root), "macos", root / "dist")
     check not dirExists(root / "dist")
     config["backend"] = %false
     writeFile(root / "leaf.json", $config)

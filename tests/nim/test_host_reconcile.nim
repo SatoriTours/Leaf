@@ -10,9 +10,9 @@ proc tree(n: int, reverse = false): Node =
 suite "typed host reconciliation":
   test "same identity retains handle and removed property resets":
     let r = newHostReconciler(7)
-    let first = r.planSnapshot(snap(text("a",key="value",styles=style({"color":"#ffffff"}))),1,gpuiCompatible)
+    let first = r.planSnapshot(snap(text("a",key="value",styles=style({"color":"#ffffff"}))),1,hostCompatible)
     r.accept(first)
-    let second = r.planSnapshot(snap(text("b",key="value")),2,gpuiCompatible)
+    let second = r.planSnapshot(snap(text("b",key="value")),2,hostCompatible)
     let updates = second.batch.ops.filterIt(it.kind == HostOpKind.update)
     check updates.len == 1
     check updates[0].handle == first.batch.ops.filterIt(it.kind == HostOpKind.create)[0].handle
@@ -20,27 +20,27 @@ suite "typed host reconciliation":
     r.accept(second)
   test "ancestor replacement rebuilds descendants":
     let r = newHostReconciler(1)
-    let first = r.planSnapshot(snap(column(@[input("v",key="field")],key="panel")),1,gpuiCompatible)
+    let first = r.planSnapshot(snap(column(@[input("v",key="field")],key="panel")),1,hostCompatible)
     r.accept(first)
-    let second = r.planSnapshot(snap(row(@[input("v",key="field")],key="panel")),2,gpuiCompatible)
+    let second = r.planSnapshot(snap(row(@[input("v",key="field")],key="panel")),2,hostCompatible)
     check second.batch.ops.countIt(it.kind == HostOpKind.create) == 2
     check second.batch.ops.countIt(it.kind == HostOpKind.remove) == 2
   test "discard and foreign candidates cannot publish":
     let r = newHostReconciler(1)
     let other = newHostReconciler(1)
-    let candidate = r.planSnapshot(snap(text("a")),1,gpuiCompatible)
+    let candidate = r.planSnapshot(snap(text("a")),1,hostCompatible)
     expect UiError: other.accept(candidate)
     r.discard(candidate)
     expect UiError: r.accept(candidate)
-    let fresh = r.planSnapshot(snap(text("a")),1,gpuiCompatible)
+    let fresh = r.planSnapshot(snap(text("a")),1,hostCompatible)
     check fresh.batch.ops[0].handle != candidate.batch.ops[0].handle
     r.accept(fresh)
     expect UiError: r.accept(fresh)
   test "5000 reversed keys use one final order and retain all handles":
     let r = newHostReconciler(1)
-    let first = r.planSnapshot(snap(tree(5000)),1,gpuiCompatible)
+    let first = r.planSnapshot(snap(tree(5000)),1,hostCompatible)
     r.accept(first)
-    let candidate = r.planSnapshot(snap(tree(5000,true)),2,gpuiCompatible)
+    let candidate = r.planSnapshot(snap(tree(5000,true)),2,hostCompatible)
     check candidate.batch.ops.countIt(it.kind == HostOpKind.setChildren) == 1
     check candidate.batch.ops.countIt(it.kind in {HostOpKind.create,HostOpKind.remove}) == 0
     let before = first.batch.ops.filterIt(it.kind == HostOpKind.setChildren and it.children.len==5000)[0].children.toHashSet
@@ -49,11 +49,11 @@ suite "typed host reconciliation":
   test "delta visits only affected hosts and advances even without operations":
     for size in [100,5000]:
       let r = newHostReconciler(1)
-      let first = r.planSnapshot(snap(tree(size)),1,gpuiCompatible)
+      let first = r.planSnapshot(snap(tree(size)),1,hostCompatible)
       r.accept(first)
       let create = first.batch.ops.filterIt(it.kind == HostOpKind.create and it.nodeKind == NodeKind.text)[0]
       let next = r.planDelta(HostChanges(upserts: @[HostRecord(handle:create.handle,parent:create.parent,
-        nodeId:create.nodeId,kind:create.nodeKind,props:normalizeHostProps(text("changed"),gpuiCompatible))]),2)
+        nodeId:create.nodeId,kind:create.nodeKind,props:normalizeHostProps(text("changed"),hostCompatible))]),2)
       check next.batch.ops.len == 1
       check next.stats.visitedHosts <= 4
       r.validate(next)
@@ -64,7 +64,7 @@ suite "typed host reconciliation":
       check r.revision == 3
   test "malformed delta leaves accepted records intact":
     let r = newHostReconciler(1)
-    let first = r.planSnapshot(snap(tree(2)),1,gpuiCompatible)
+    let first = r.planSnapshot(snap(tree(2)),1,hostCompatible)
     r.accept(first)
     let parent=first.batch.ops.filterIt(it.kind == HostOpKind.create and it.parent == NoHandle)[0].handle
     expect UiError:
@@ -75,6 +75,6 @@ suite "typed host reconciliation":
     var node=text("leaf")
     for i in 0..<64:node=column(@[node])
     let r=newHostReconciler(22)
-    let accepted=r.planSnapshot(snap(node),1,gpuiCompatible)
+    let accepted=r.planSnapshot(snap(node),1,hostCompatible)
     r.accept(accepted)
     check r.revision==1

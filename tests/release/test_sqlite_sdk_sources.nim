@@ -17,11 +17,9 @@ suite "bundled SQLite SDK inputs":
     writeFile(nimRoot / "lib/system.nim", "discard")
     writeFile(nimRoot / "config/nim.cfg", "# fixture")
     let cli = temporary / "leaf"
-    let bridge = temporary / "bridge"
     writeFile(cli, "fixture CLI")
-    writeFile(bridge, "fixture bridge")
     var options = PackageOptions(root: root, nimRoot: nimRoot, cli: cli,
-      bridge: bridge, output: temporary / "output", target: "linux-x86_64",
+      output: temporary / "output", target: "linux-x86_64",
       channel: "release", version: "v1.2.3", commit: "abcdef")
   teardown:
     removeDir(temporary)
@@ -40,6 +38,12 @@ suite "bundled SQLite SDK inputs":
       check sha256File(sdk / "native/android/src/main" / name) ==
         sha256File(root / "native/android/src/main" / name)
     check fileExists(sdk / "src/leaf/mobile.nim")
+    check parseFile(sdk / "sdk.json")["schema"].getInt == 2
+    check parseFile(sdk / "sdk.json")["backend"].getStr == "native"
+    check not dirExists(sdk / "lib")
+    check not fileExists(sdk / "include/leaf_gpui_v2.h")
+    check not fileExists(sdk / "src/leaf/gpui_api.nim")
+    check not fileExists(sdk / "licenses/GPUI-NOTICES.json")
     check fileExists(sdk / "licenses/sqlite/LICENSE.txt")
     check parseFile(sdk / "licenses/inventory.json")["sqlite"]["version"].getStr == "3.54.1"
 
