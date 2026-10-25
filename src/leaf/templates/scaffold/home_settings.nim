@@ -2,8 +2,10 @@ proc renderSettings(state: HomeState): Node =
   view:
     column:
       styles: {"gap": "16"}
-      text "Settings"
+      text "Settings":
+        variant: "primary"
       checkbox("Hide completed tasks", state.hideCompleted):
         key: "hide_completed"
         onChange(e): state.setHideCompleted(e.checked)
-      text "Task records are saved in SQLite. View settings apply to this session."
+      text "Task records are saved in SQLite. View settings apply to this session.":
+        variant: "secondary"

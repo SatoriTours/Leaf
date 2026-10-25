@@ -4,7 +4,7 @@ proc renderTask(state: HomeState, item: Task): Node =
     checkbox("Done", item.done, key = "task_done_" & $id,
       onChange = proc(e: Event) = state.toggleTask(id, e.checked)),
     text(item.title, key = "task_title_" & $id),
-    button("Delete", key = "task_delete_" & $id,
+    button("Delete", key = "task_delete_" & $id, variant = "secondary",
       onClick = proc(e: Event) = state.removeTask(id))]
   when defined(android):
     column(children, key = "task_row_" & $id,
@@ -27,6 +27,7 @@ proc renderTasks(state: HomeState, query = ""): Node =
         styles: {"gap": "8", "flex_grow": "1"}
         text state.error:
           key: "task_error"
+          variant: "danger"
         if items.len == 0:
           emptyState("No matching tasks", "home_empty")
         else:
@@ -37,6 +38,7 @@ proc renderTasks(state: HomeState, query = ""): Node =
         styles: {"gap": "8", "overflow": "scroll", "flex_grow": "1"}
         text state.error:
           key: "task_error"
+          variant: "danger"
         if items.len == 0:
           emptyState("No matching tasks", "home_empty")
         for item in items:

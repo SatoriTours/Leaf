@@ -62,6 +62,31 @@ suite "W-MEASURE real system font theme and resource retry":
     m.close()
     check deletions == 1 # closing an already released owner never deletes twice
 
+  test "themed role fonts are measured consistently and failed deletion is retryable":
+    let h = owner()
+    defer: h.destroyHost()
+    var c = systemWin32Calls()
+    let realDelete = c.deleteObject
+    var failOnce = true
+    c.deleteObject = proc(obj: HGDIOBJ): BOOL =
+      if failOnce:
+        failOnce = false
+        return 0
+      realDelete(obj)
+    let m = newNativeMeasure(h.windowHandle, c, themed=true)
+    defer: m.close()
+    let body = m.measureText("同一段中文 😀")
+    let heading = m.measureText("同一段中文 😀", role=headingFont)
+    let caption = m.measureText("同一段中文 😀", role=captionFont)
+    check heading.height > body.height
+    check body.height > caption.height
+    check m.liveFonts == 3
+    expect UiError: m.close()
+    check m.liveFonts == 1
+    check m.clean()
+    m.close()
+    check m.liveFonts == 0
+
   test "push button size exactly matches a real same-font BUTTON ideal size":
     let h = owner()
     defer: h.destroyHost()

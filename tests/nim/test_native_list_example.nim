@@ -2,7 +2,7 @@
 ## UI edits stay local and unsaved until Save; scrolling must not write SQLite.
 import ./cleanup_support
 import std/[unittest, os, tempfiles, tables]
-import leaf/[core, widgets, components, sqlite]
+import leaf/[core, widgets, components, sqlite, native_theme]
 import ../../examples/native_list/[store, application]
 
 let base = createTempDir("leaf-native-list-", "")
@@ -58,6 +58,20 @@ suite "native list example SQLite storage":
     expect DatabaseError: discard storage.loadItem(5)
 
 suite "native list example managed application":
+  test "themed list retains bounded rows and semantic help without changing persistence":
+    let storage = openListStore(base / "theme.sqlite3")
+    defer: storage.close()
+    let app = nativeListApp(storage)
+    check app.nativeTheme == matsuLight
+    let runtime = newRuntime(app)
+    defer: runtime.closeRuntime()
+    discard runtime.materialize("items", 0, 2)
+    check runtime.find("heading").node.attributes.getOrDefault("variant") == "primary"
+    check runtime.find("help").node.attributes.getOrDefault("variant") == "secondary"
+    check runtime.find("description-0").node.attributes.getOrDefault("variant") == "secondary"
+    check runtime.find("items").children.len == 3
+    check storage.loadItem(0) == ListItem(id: 0)
+
   test "editing and checkbox stay local until explicit save then reopen by id":
     let path = base / "ui.sqlite3"
     let storage = openListStore(path)

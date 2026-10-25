@@ -245,10 +245,10 @@ proc decorationFromStyles(styles: Styles): DecorationProps =
 
 proc attributeAllowed(kind: NodeKind, name: string): bool =
   case kind
-  of NodeKind.button, NodeKind.tag: name == "variant"
+  of NodeKind.button, NodeKind.tag, NodeKind.text: name == "variant"
   of NodeKind.checkbox, NodeKind.toggle: name == "checked"
   of NodeKind.progress: name == "value"
-  of NodeKind.input: name == "input_reset_token"
+  of NodeKind.input: name in ["input_reset_token", "variant"]
   else: false
 
 proc parseResetToken(value: string): uint64 =
@@ -282,8 +282,13 @@ proc controlFrom(node: Node): ControlProps =
     result.label = some(node.text)
     if "variant" in node.attributes:
       result.variant = some(styleVariant(node.attributes["variant"]))
+  of NodeKind.text:
+    if "variant" in node.attributes:
+      result.variant = some(styleVariant(node.attributes["variant"]))
   of NodeKind.input:
     result.value = some(node.text)
+    if "variant" in node.attributes:
+      result.variant = some(styleVariant(node.attributes["variant"]))
     if node.placeholder.len > 0: result.placeholder = some(node.placeholder)
     result.enabled = some(not node.disabled)
     if "input_reset_token" in node.attributes:

@@ -9,10 +9,12 @@ type
     dc: HDC
     old: HGDIOBJ
     selected: bool
+  NativeFontRole* = enum defaultFont, headingFont, captionFont
   NativeMeasure* = ref object
     calls: Win32Calls
     parent: HWND
-    font: HFONT
+    fonts: array[NativeFontRole, HFONT]
+    themed: bool
     dpi: int
     pending: seq[PendingDC]
     themes: seq[HTHEME]
@@ -95,23 +97,30 @@ proc finish(m: NativeMeasure, primary: var ref CatchableError) =
   except CatchableError as e: remember(primary, e)
   if primary != nil: raise primary
 
-proc newNativeMeasure*(parent: HWND, calls: Win32Calls): NativeMeasure =
+proc newNativeMeasure*(parent: HWND, calls: Win32Calls, themed = false): NativeMeasure =
   let dpi = calls.dpi(parent)
   if dpi == 0: error("GetDpiForWindow")
-  NativeMeasure(parent: parent, calls: calls, dpi: int(dpi))
+  NativeMeasure(parent: parent, calls: calls, dpi: int(dpi), themed: themed)
 
-proc ensureFont*(m: NativeMeasure): HFONT =
-  if m.font == nil:
+proc ensureFont*(m: NativeMeasure, role = defaultFont): HFONT =
+  if m.fonts[role] == nil:
     var ncm: NONCLIENTMETRICSW
     ncm.cbSize = UINT(sizeof(ncm))
     if m.calls.systemParameters(SPI_GETNONCLIENTMETRICS, ncm.cbSize,
         addr ncm, 0, UINT(m.dpi)) == 0: error("SystemParametersInfoForDpi")
-    m.font = m.calls.createFont(addr ncm.lfMessageFont)
-    if m.font == nil: error("CreateFontIndirectW")
-  m.font
+    if m.themed:
+      let size = case role
+        of defaultFont: 14
+        of headingFont: 24
+        of captionFont: 12
+      ncm.lfMessageFont.lfHeight = -int32(round(float64(size * m.dpi) / 96))
+      ncm.lfMessageFont.lfWeight = if role == headingFont: 600 else: 400
+    m.fonts[role] = m.calls.createFont(addr ncm.lfMessageFont)
+    if m.fonts[role] == nil: error("CreateFontIndirectW")
+  m.fonts[role]
 
-proc fontDC(m: NativeMeasure): HDC =
-  let font = m.ensureFont()
+proc fontDC(m: NativeMeasure, role = defaultFont): HDC =
+  let font = m.ensureFont(role)
   result = m.calls.getDC(m.parent)
   if result == nil: error("GetDC")
   m.pending.add(PendingDC(window: m.parent, dc: result))
@@ -148,14 +157,15 @@ proc textPixels(m: NativeMeasure, dc: HDC, value: seq[WCHAR]): SIZE =
     error("GetTextExtentPoint32W")
   if result.cx < 0 or result.cy < 0: fail("invalid native text extent")
 
-proc measureText*(m: NativeMeasure, text: string, width = 0.0): DipSize =
+proc measureText*(m: NativeMeasure, text: string, width = 0.0,
+                  role = defaultFont): DipSize =
   let value = checkedWide(text)
   if classify(width) in {fcNan, fcInf, fcNegInf} or width < 0 or width > MaxStyleNumber:
     fail("native text width out of bounds")
   m.cleanResources()
   var primary: ref CatchableError
   try:
-    let dc = m.fontDC()
+    let dc = m.fontDC(role)
     var extent: SIZE
     if width > 0 and text.len > 0:
       let pixelWidth = max(1.0, round(width * float64(m.dpi) / 96.0))
@@ -216,7 +226,7 @@ proc measureInput*(m: NativeMeasure, value, placeholder: string,
         0, 0, 0, 0, m.parent, nil, GetModuleHandleW(nil), nil)
       if edit == nil: error("CreateWindowExW measurement EDIT")
       m.probes.add(edit)
-      discard m.calls.send(edit, WM_SETFONT, cast[WPARAM](m.font), 0)
+      discard m.calls.send(edit, WM_SETFONT, cast[WPARAM](m.fonts[defaultFont]), 0)
     let margins = cast[uint](m.calls.send(edit, EM_GETMARGINS, 0, 0))
     let horizontalMargins = float64((margins and 0xffff) + ((margins shr 16) and 0xffff))
     var border: RECT
@@ -294,14 +304,18 @@ proc close*(m: NativeMeasure) =
   try: m.cleanResources()
   except CatchableError as e: primary = e
   # Pending DCs/probes can still reference the font. Keep it until they are gone.
-  if m.font != nil and m.pending.len == 0 and m.probes.len == 0:
-    try:
-      if m.calls.deleteObject(cast[HGDIOBJ](m.font)) == 0: error("DeleteObject font")
-      m.font = nil
-    except CatchableError as e: remember(primary, e)
+  if m.pending.len == 0 and m.probes.len == 0:
+    for font in m.fonts.mitems:
+      if font == nil: continue
+      try:
+        if m.calls.deleteObject(cast[HGDIOBJ](font)) == 0: error("DeleteObject font")
+        font = nil
+      except CatchableError as e: remember(primary, e)
   if primary != nil: raise primary
 
-proc liveFonts*(m: NativeMeasure): int = ord(m.font != nil)
+proc liveFonts*(m: NativeMeasure): int =
+  for font in m.fonts:
+    if font != nil: inc result
 proc liveDCs*(m: NativeMeasure): int = m.pending.len
 proc liveThemes*(m: NativeMeasure): int = m.themes.len
 proc liveMeasureWindows*(m: NativeMeasure): int = m.probes.len

@@ -61,6 +61,8 @@ type
     overflows*: set[Overflow]
     decorations*: set[DecorationFeature]
     variants*: set[ControlVariant]
+    kindVariants*: array[NodeKind, set[ControlVariant]]
+      ## Additional variants supported only by a specific control kind.
     controls*: set[ControlFeature]
 
   MountedEntity* = object
@@ -229,6 +231,11 @@ proc fullCapabilities*(): BackendCapabilities =
       variantWarning, variantInfo, variantOutline, variantGhost, variantSecondary},
     controls: {cfInputReset})
 
+proc supportsVariant(capabilities: BackendCapabilities, variant: ControlVariant,
+                     kind: Option[NodeKind]): bool =
+  variant in capabilities.variants or
+    (kind.isSome and variant in capabilities.kindVariants[kind.get])
+
 proc checkTypedCapabilities*(nodeId:string,kind:NodeKind,props:NormalizedProps,capabilities:BackendCapabilities,mode=compatible):seq[CapabilityIssue]=
   var issues: seq[CapabilityIssue]
 
@@ -283,7 +290,8 @@ proc checkTypedCapabilities*(nodeId:string,kind:NodeKind,props:NormalizedProps,c
     report(nodeId, "font_size", "decoration not supported")
   if props.decoration.weight.isSome and dfWeight notin capabilities.decorations:
     report(nodeId, "weight", "decoration not supported")
-  if props.control.variant.isSome and props.control.variant.get notin capabilities.variants:
+  if props.control.variant.isSome and
+      not supportsVariant(capabilities, props.control.variant.get, some(kind)):
     report(nodeId, "variant", "variant not supported")
   # Required control behaviour: never degraded, even in compatible mode.
   if props.control.resetToken.isSome and props.control.resetToken.get != 0 and
@@ -308,11 +316,13 @@ proc checkCapabilities*(root: MountedNode, capabilities: BackendCapabilities,
   issues
 
 proc effectiveProps*(capabilities: BackendCapabilities,
-                     props: NormalizedProps): NormalizedProps =
+                     props: NormalizedProps,
+                     kind = none(NodeKind)): NormalizedProps =
   ## Typed capability adapter: remove decorations and variants this backend did
   ## not declare, so each backend applies its own effective properties without
   ## re-parsing strings. Required layout is left untouched and must already
-  ## have passed `checkCapabilities`.
+  ## have passed `checkCapabilities`. Omitted kind retains the legacy global-only
+  ## filtering contract; native adapters pass the real kind for scoped variants.
   result = props
   if dfColor notin capabilities.decorations: result.decoration.color = none(Rgba)
   if dfBackground notin capabilities.decorations: result.decoration.background = none(Rgba)
@@ -323,5 +333,5 @@ proc effectiveProps*(capabilities: BackendCapabilities,
   if dfFontSize notin capabilities.decorations: result.decoration.fontSize = none(float64)
   if dfWeight notin capabilities.decorations: result.decoration.weight = none(FontWeight)
   if result.control.variant.isSome and
-      result.control.variant.get notin capabilities.variants:
+      not supportsVariant(capabilities, result.control.variant.get, kind):
     result.control.variant = none(ControlVariant)

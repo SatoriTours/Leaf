@@ -1,13 +1,14 @@
 ## Owned Unicode top-level Host. WndProc never calls business or disposes a
 ## Session; all such work runs after native dispatch at an ordinary Nim boundary.
 import std/[tables, unicode, math, atomics]
-import ../../[core, backend, backend_session, native_layout, windows_dpi]
-import ./[api, calls, host_state, host_bridge, navigation_input]
+import ../../[core, backend, backend_session, native_layout, windows_dpi, native_theme]
+import ./[api, calls, host_state, host_bridge, navigation_input, skin]
 export host_bridge
 
 type
   Win32Host* = ref object
     owner: DWORD
+    theme: NativeTheme
     cookie: uint
     window: HWND
     instance: HINSTANCE
@@ -206,6 +207,8 @@ proc windowProc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.
     host.ownerCheck()
     inc host.dispatchDepth
     try:
+      var paintReply: LRESULT
+      if skinMessage(host.theme, window, message, wp, lp, paintReply): return paintReply
       case message
       of WM_NCCREATE:
         setLastError(0)
@@ -239,7 +242,10 @@ proc windowProc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.
         host.wake()
         return 0
       of WM_SETTINGCHANGE, WM_THEMECHANGED:
+        syncCaptionTheme(host.theme, window)
         if host.lease != nil: host.bridge.invalidate(host.ctx, {fontChanged, themeChanged})
+        if host.theme != systemTheme and refreshSkin(window) == 0:
+          nativeError("RedrawWindow skin setting change")
         host.wake()
       of WM_COMMAND, BackSysKeyDown, BackAppCommand:
         if host.lease != nil and host.session != nil and not host.close.pending and
@@ -407,7 +413,7 @@ proc safeTurn(host: Win32Host) =
   if primary != nil: raise primary
 
 proc createHost*(title: string, size: DipSize,
-                 calls: Win32Calls = systemWin32Calls()): Win32Host =
+                 calls: Win32Calls = systemWin32Calls(), theme = systemTheme): Win32Host =
   let owner = GetCurrentThreadId()
   let titleW = wide(title)
   finiteSize(size.width); finiteSize(size.height)
@@ -425,7 +431,7 @@ proc createHost*(title: string, size: DipSize,
   if width <= 0 or height <= 0 or width > high(int32) or height > high(int32):
     fail("Win32 Host frame size overflows")
   let cookie = reserveCookie()
-  let host = Win32Host(owner: owner, cookie: cookie, taskCookie: reserveCookie(), calls: calls)
+  let host = Win32Host(owner: owner, theme: theme, cookie: cookie, taskCookie: reserveCookie(), calls: calls)
   host.className = wide("LeafHost-" & $owner & "-" & $cookie)
   host.ctx = HostContext(sessionId: uint64(cookie),
                          mountGeneration: 1, scale: scale)
@@ -448,6 +454,7 @@ proc createHost*(title: string, size: DipSize,
     host.geometry()
     if host.ctx.contentWidth <= 0 or host.ctx.contentHeight <= 0:
       fail("new Win32 Host has no content")
+    syncCaptionTheme(theme, window)
     discard host.calls.showWindow(window, SW_SHOW)
     host.checkCallback()
     result = host
@@ -460,6 +467,10 @@ proc createHost*(title: string, size: DipSize,
       failure.cleanupHost = host
       raise failure
     raise primary
+
+proc nativeTheme*(host: Win32Host): NativeTheme =
+  host.ownerCheck()
+  host.theme
 
 proc context*(host: Win32Host): HostContext =
   host.liveCheck()

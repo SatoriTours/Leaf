@@ -5,7 +5,8 @@ proc navButton(ctx: ComponentContext, router: ComponentRouter,
   componentView:
     button destination.name:
       key: "nav_" & destination.name
-      variant: (if currentRoute(ctx, router).name == destination.name: "primary" else: "ghost")
+      variant: (if currentRoute(ctx, router).name == destination.name: "primary" else: "secondary")
+      styles: {"width": "full", "height": "32"}
       onClick(e): discard navigate(router, destination.name)
 
 proc renderShell*(ctx: ComponentContext, router: ComponentRouter,
@@ -16,7 +17,8 @@ proc renderShell*(ctx: ComponentContext, router: ComponentRouter,
       column:
         key: "navigation"
         styles: {"gap": "12", "width": "160"}
-        text "Leaf"
+        text "Leaf":
+          variant: "primary"
         for i in 0 ..< router.routes.len:
           navButton(ctx, router, router.routes[i])
       column:

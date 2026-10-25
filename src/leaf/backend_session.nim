@@ -198,7 +198,7 @@ proc adapterFor(session: BackendSession): PropsAdapter =
   ## `reconcile.plan` API is unchanged.
   let capabilities = session.backend.capabilities
   result = proc(node: Node): NormalizedProps =
-    effectiveProps(capabilities, normalizeProps(node))
+    effectiveProps(capabilities, normalizeProps(node), some(node.kind))
 
 proc recover(session: BackendSession,
              previous: Table[NodeHandle, MountedEntity]): string =

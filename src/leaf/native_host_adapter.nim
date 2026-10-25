@@ -76,7 +76,7 @@ proc nativeHostConsumer*(backend:Backend,sessionId=0'u64,
         pendingIssues.add(checkTypedCapabilities(op.nodeId,op.nodeKind,op.props.normalized,backend.capabilities,mode))
         var entity=entities.getOrDefault(op.handle)
         entity.handle=op.handle;entity.parent=op.parent;entity.nodeId=op.nodeId;entity.kind=op.nodeKind
-        entity.props=effectiveProps(backend.capabilities,op.props.normalized)
+        entity.props=effectiveProps(backend.capabilities,op.props.normalized,some(op.nodeKind))
         entity.navigation=op.props.navigation
         entity.list=op.props.list
         entity.row=op.row

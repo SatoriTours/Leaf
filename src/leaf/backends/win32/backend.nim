@@ -1,9 +1,9 @@
 ## Owned Unicode controls, incremental updates and native event capture.
 import std/[tables, options, algorithm, widestrs, sets]
 import ../../[core, styles, backend, backend_session, native_layout, native_edit, native_measure_cache,
-  height_index, native_list_layout]
+  height_index, native_list_layout, native_theme]
 import ./[api, calls, host, capabilities, measure, control_ids, list_host, row_pool,
-  resource_owner, navigation_input]
+  resource_owner, navigation_input, skin]
 
 type
   Win32Diagnostics* = object
@@ -34,6 +34,7 @@ type
     capture: proc(control: NativeControl, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.closure.}
   Win32Backend* = ref object
     host: Win32Host
+    theme: NativeTheme
     calls: Win32Calls
     owner: DWORD
     lease: HostBackendLease
@@ -218,6 +219,15 @@ proc retireBinding(win: Win32Backend, entry: ResEntry) =
   win.unbindControl(entry.token)
   entry.token = 0
 
+proc fontRole(win: Win32Backend, entity: MountedEntity): NativeFontRole =
+  if win.theme != systemTheme and entity.kind == NodeKind.button: return captionFont
+  if win.theme != systemTheme and entity.kind == NodeKind.text:
+    case entity.props.control.variant.get(variantDefault)
+    of variantPrimary: return headingFont
+    of variantSecondary: return captionFont
+    else: discard
+  defaultFont
+
 proc controlProc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM,
                  id: UINT_PTR, data: DWORD_PTR): LRESULT {.stdcall, raises: [].} =
   let control = controlsByCookie.getOrDefault(data)
@@ -257,6 +267,11 @@ proc listProc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM,
       listsByCookie.del(data)
   {.cast(raises: []).}:
     try:
+      let paintControl = controlsByCookie.getOrDefault(data)
+      if paintControl != nil:
+        var paintReply: LRESULT
+        if skinMessage(paintControl.owner.theme, window, message, wp, lp, paintReply):
+          return paintReply
       if message == BackSysKeyDown or message == BackAppCommand:
         let control = controlsByCookie.getOrDefault(data)
         if control != nil: return control.capture(control, message, wp, lp)
@@ -712,9 +727,36 @@ proc releaseControlTree(win: Win32Backend, root: NativeControl): ref CatchableEr
   if root.viewport: owner = root.entity.handle.raw
   win.releaseResources(owner, false, extra)
 
+proc syncFocusedListTraversal(win: Win32Backend, focus: HWND) =
+  # WS_EX_CONTROLPARENT makes USER32's dialog/default-button search safe when
+  # focus is *inside* a row. Keeping it on globally would skip the viewport's
+  # own Tab/arrow entry. Change it before native focus handlers run, using the
+  # incoming focus (WM_KILLFOCUS.wParam), not a stale GetFocus() observation.
+  for list in win.lists.values:
+    var childFocus = false
+    var parent = if focus != nil: GetParent(focus) else: nil
+    var depth = 0
+    while parent != nil and depth <= MaxDepth:
+      if parent == list.window:
+        childFocus = true
+        break
+      parent = GetParent(parent)
+      inc depth
+    let current = GetWindowLongW(list.window, -20)
+    let desired = if childFocus: current or 0x00010000
+      else: current and not 0x00010000
+    if desired != current:
+      setLastError(0)
+      if win.calls.setWindowData(list.window, -20, int(desired)) == 0 and lastError() != 0:
+        nativeError("SetWindowLongPtrW viewport focus traversal")
+
 proc captureControl(win: Win32Backend, control: NativeControl, message: UINT,
                     wp: WPARAM, lp: LPARAM): LRESULT =
   try:
+    if message == 0x0007: win.syncFocusedListTraversal(control.window) # WM_SETFOCUS
+    elif message == 0x0008: win.syncFocusedListTraversal(cast[HWND](wp)) # WM_KILLFOCUS
+    var paintReply: LRESULT
+    if skinMessage(win.theme, control.window, message, wp, lp, paintReply): return paintReply
     if win.captureNavigation(message, wp, lp):
       return if message == BackAppCommand: 1 else: 0
     if message == WM_COMMAND and win.command(control.window, wp, lp): return 0
@@ -998,7 +1040,7 @@ proc attachParkedRow(win: Win32Backend, root: NodeHandle): bool =
       noteSubclassInstalled(entry, control.cookie, cast[uint](controlProc))
       control.subclassed = true
       discard win.calls.send(control.window, WM_SETFONT,
-        cast[WPARAM](win.measurement.ensureFont()), 0)
+        cast[WPARAM](win.measurement.ensureFont(win.fontRole(control.entity))), 0)
       # ShowWindow returns the previous visibility; only a raise is a failure.
       discard win.calls.showWindow(control.window, SW_HIDE)
   except CatchableError as error:
@@ -1034,7 +1076,12 @@ proc makeControl(win: Win32Backend, entity: MountedEntity): NativeControl =
     style = style or WS_VSCROLL or WS_CLIPCHILDREN or WS_TABSTOP
   of NodeKind.text, NodeKind.tag: style = style or SS_NOPREFIX
   of NodeKind.button: className = "BUTTON"; style = style or WS_TABSTOP
-  of NodeKind.input: className = "EDIT"; style = style or WS_TABSTOP or WS_BORDER or 0x80'u32
+  of NodeKind.input:
+    className = "EDIT"
+    style = style or WS_TABSTOP or 0x80'u32
+    # EDIT snapshots WS_BORDER into internal state at creation, then clears the
+    # public bit. Removing it later does not remove its client-area border.
+    if win.theme == systemTheme or highContrastActive(): style = style or WS_BORDER
   of NodeKind.checkbox, NodeKind.toggle:
     className = "BUTTON"; style = style or WS_TABSTOP or BS_AUTOCHECKBOX
   of NodeKind.progress: className = "msctls_progress32"
@@ -1084,7 +1131,8 @@ proc makeControl(win: Win32Backend, entity: MountedEntity): NativeControl =
       nativeError("SetWindowSubclass")
     noteSubclassInstalled(entry, control.cookie, cast[uint](controlProc))
   control.subclassed = true
-  discard win.calls.send(control.window, WM_SETFONT, cast[WPARAM](win.measurement.ensureFont()), 0)
+  discard win.calls.send(control.window, WM_SETFONT,
+    cast[WPARAM](win.measurement.ensureFont(win.fontRole(entity))), 0)
   win.arm(control)
   control.armed = false
   if entity.kind == NodeKind.input and entity.props.control.resetToken.isSome:
@@ -1096,6 +1144,28 @@ proc properties(win: Win32Backend, control: NativeControl, entity: MountedEntity
   let old = control.entity
   inc control.setterDepth
   defer: dec control.setterDepth
+  if win.theme != systemTheme and entity.kind in {NodeKind.checkbox, NodeKind.toggle} and
+      not checkColorsPrepared(control.window):
+    if entity.kind == NodeKind.toggle:
+      # Keep v6 theming enabled: classic BUTTON does not send NM_CUSTOMDRAW.
+      if setToggleSkin(control.window) == 0: nativeError("SetPropW native toggle")
+    else:
+      let status = useSystemCheckColors(control.window)
+      if status < 0: fail("SetWindowTheme check colors failed: " & $status)
+  if win.theme != systemTheme and entity.kind == NodeKind.button and
+      (entity.props.control.variant.get(variantDefault) == variantPrimary) !=
+        primaryButton(control.window):
+    if setPrimaryButton(control.window,
+        entity.props.control.variant.get(variantDefault) == variantPrimary) == 0:
+      nativeError("SetPropW native button variant")
+    if win.calls.invalidate(control.window, nil, 1) == 0: nativeError("InvalidateRect button variant")
+  if win.theme != systemTheme and entity.kind in {NodeKind.text, NodeKind.input}:
+    let variant = entity.props.control.variant.get(variantDefault)
+    if semanticVariant(control.window) != variant:
+      if setSemanticVariant(control.window, variant) == 0: nativeError("SetPropW semantic variant")
+      discard win.calls.send(control.window, WM_SETFONT,
+        cast[WPARAM](win.measurement.ensureFont(win.fontRole(entity))), 1)
+      discard refreshSkin(control.window)
   if entity.kind == NodeKind.input:
     # Native edits pending settlement and active IME are never overwritten by
     # an earlier accepted event. Settlement handles no-diff rejection too.
@@ -1138,13 +1208,15 @@ proc properties(win: Win32Backend, control: NativeControl, entity: MountedEntity
 
 proc measureControl*(win: Win32Backend, entity: MountedEntity, available: DipSize): DipSize =
   win.checkLive()
-  if win.measurement == nil: win.measurement = newNativeMeasure(win.host.windowHandle, win.calls)
+  if win.measurement == nil:
+    win.measurement = newNativeMeasure(win.host.windowHandle, win.calls, win.theme != systemTheme)
   let label = entity.label
   let hint = entity.props.control.placeholder.get("")
   let checked = entity.props.control.checked.get(false)
   let enabled = entity.props.control.enabled.get(true)
   let key: MeasureKey = (entity.kind, label, hint,
-    uint8(ord(checked) or (ord(enabled) shl 1)), available.width, available.height)
+    uint8(ord(checked) or (ord(enabled) shl 1) or
+      (ord(entity.props.control.variant.get(variantDefault)) shl 2)), available.width, available.height)
   let cached = win.cache.get(key)
   if cached.isSome:
     inc win.measureCacheHits
@@ -1164,13 +1236,25 @@ proc measureControl*(win: Win32Backend, entity: MountedEntity, available: DipSiz
       if control == nil: nil else: control.window)
   of NodeKind.checkbox, NodeKind.toggle:
     result = win.measurement.measureCheckbox(label, checked, not enabled)
+    if win.theme != systemTheme and entity.kind == NodeKind.toggle:
+      let caption = win.measurement.measureText(label)
+      result.width = max(result.width, caption.width + 48)
+      result.height = max(result.height, 40)
   of NodeKind.progress, NodeKind.spinner: result = win.measurement.measureProgress()
   of NodeKind.separator: result = win.measurement.measureSeparator()
   of NodeKind.button:
-    result = win.measurement.measureButton(label, enabled)
+    if win.theme == systemTheme:
+      result = win.measurement.measureButton(label, enabled)
+    else:
+      # The stock ideal size has different padding from the skinned painter.
+      # Measure the same native font, then reserve the painter's insets/border.
+      result = win.measurement.measureText(label, role=captionFont)
+      result.width += 2 * NativeButtonInset + 2
+      result.height = max(NativeButtonHeight, result.height + 8)
   else:
     result = win.measurement.measureText(if label.len == 0: "Mg" else: label,
-      if entity.kind == NodeKind.text: available.width else: 0.0)
+      if entity.kind == NodeKind.text: available.width else: 0.0,
+      role=win.fontRole(entity))
   win.cache.put(key, result)
 
 proc publishPendingFrames(win: Win32Backend) {.raises: [].}
@@ -1557,7 +1641,8 @@ proc prepare(win: Win32Backend, batch: UpdateBatch) =
           list.acceptedFrame, list.desiredOffset, list.intentGeneration))
   if batch.isDelta:
     win.candidate.clear()
-    if win.measurement==nil:win.measurement=newNativeMeasure(win.host.windowHandle,win.calls)
+    if win.measurement==nil:
+      win.measurement=newNativeMeasure(win.host.windowHandle,win.calls,win.theme != systemTheme)
     inc win.depth
     defer:dec win.depth
     # Pass 1: the complete candidate entity view (a reused row needs its whole
@@ -1604,7 +1689,8 @@ proc prepare(win: Win32Backend, batch: UpdateBatch) =
     win.prepareModels()
     return
   win.candidate = win.current
-  if win.measurement == nil: win.measurement = newNativeMeasure(win.host.windowHandle, win.calls)
+  if win.measurement == nil:
+    win.measurement = newNativeMeasure(win.host.windowHandle, win.calls, win.theme != systemTheme)
   inc win.depth
   defer: dec win.depth
   for op in batch.ops:
@@ -1947,12 +2033,12 @@ proc nativeTurn(win: Win32Backend) =
   win.reportError()
   for list in win.lists.values: list.beginGeometryTurn()
   if win.fontDirty:
-    let fresh = newNativeMeasure(win.host.windowHandle, win.calls)
-    let font = fresh.ensureFont()
+    let fresh = newNativeMeasure(win.host.windowHandle, win.calls, win.theme != systemTheme)
+    discard fresh.ensureFont()
     win.retiredMeasures.add(win.measurement)
     win.measurement = fresh
     for control in win.controls.values:
-      discard win.calls.send(control.window, WM_SETFONT, cast[WPARAM](font), 1)
+      discard win.calls.send(control.window, WM_SETFONT, cast[WPARAM](fresh.ensureFont(win.fontRole(control.entity))), 1)
     inc win.fontEpoch
     win.fontDirty = false
     win.cache.clear()
@@ -2000,8 +2086,8 @@ proc dispose(win: Win32Backend) =
   win.closed = true
 proc newWin32Backend*(host: Win32Host, calls: Win32Calls = systemWin32Calls()): Win32Backend =
   discard host.context
-  let win = Win32Backend(host: host, calls: calls, owner: GetCurrentThreadId())
-  win.protocol = Backend(capabilities: win32Capabilities())
+  let win = Win32Backend(host: host, theme: host.nativeTheme, calls: calls, owner: GetCurrentThreadId())
+  win.protocol = Backend(capabilities: win32Capabilities(win.theme))
   win.protocol.prepare = proc(batch: UpdateBatch) = win.prepare(batch)
   win.protocol.apply = proc(batch: UpdateBatch) = win.apply(batch)
   win.protocol.discardPrepared = proc() = win.discardPrepared()

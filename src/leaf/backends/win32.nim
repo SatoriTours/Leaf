@@ -23,7 +23,8 @@ proc runNative*(app: Application, diagnostics: Diagnostics = nil,
   var primary: ref CatchableError
   var status = none(int)
   try:
-    window = createHost(app.title, DipSize(width: float64(app.width), height: float64(app.height)))
+    window = createHost(app.title, DipSize(width: float64(app.width), height: float64(app.height)),
+      theme = app.nativeTheme)
     window.setStartupScope(proc(): bool = activity.busy or runtime.installingUpdate or runtime.installingHook)
     let native = newWin32Backend(window)
     let session = native.attachWin32Backend(runtime)

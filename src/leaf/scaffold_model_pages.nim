@@ -25,7 +25,7 @@ proc listCode(resource: ResourceSpec): string =
   result = "proc renderRecord(state: State, item: " & "record_model." & resource.model & "): Node =\n  let id = item.id\n  view:\n    column:\n      key: \"" & p & "_row_\" & $id\n      styles: {\"gap\": \"8\", \"padding\": \"12\"}\n"
   for field in resource.fields:
     result.add("      text " & (if field.kind == "string": "" else: "$") & "item." & field.name & ":\n        key: \"" & p & "_" & field.name & "_\" & $id\n")
-  let actions = "      row:\n        styles: {\"gap\": \"8\"}\n        button \"View\":\n          key: \"" & p & "_show_\" & $id\n          onClick(e): state.show(id)\n        button \"Edit\":\n          key: \"" & p & "_edit_\" & $id\n          onClick(e): state.beginEdit(id)\n        button \"Delete\":\n          key: \"" & p & "_delete_\" & $id\n          onClick(e): state.remove(id)\n\n"
+  let actions = "      row:\n        styles: {\"gap\": \"8\"}\n        button \"View\":\n          key: \"" & p & "_show_\" & $id\n          variant: \"secondary\"\n          styles: {\"height\": \"32\"}\n          onClick(e): state.show(id)\n        button \"Edit\":\n          key: \"" & p & "_edit_\" & $id\n          variant: \"secondary\"\n          styles: {\"height\": \"32\"}\n          onClick(e): state.beginEdit(id)\n        button \"Delete\":\n          key: \"" & p & "_delete_\" & $id\n          variant: \"secondary\"\n          styles: {\"height\": \"32\"}\n          onClick(e): state.remove(id)\n\n"
   result.add("      when defined(android):\n")
   for line in actions.replace("      row:", "      column:").splitLines():
     if line.len > 0: result.add("  " & line & "\n")
@@ -33,7 +33,7 @@ proc listCode(resource: ResourceSpec): string =
   for line in actions.splitLines():
     if line.len > 0: result.add("  " & line & "\n")
 
-  let desktopList = "proc renderList(state: State): Node =\n  let items = record_model." & resource.model & ".all\n  view:\n    column:\n      styles: {\"gap\": \"12\", \"overflow\": \"scroll\", \"flex_grow\": \"1\"}\n      button \"New " & resource.model & "\":\n        key: \"" & p & "_new\"\n        onClick(e): state.beginNew()\n      text state.error:\n        key: \"" & p & "_error\"\n      if items.len == 0:\n        emptyState(\"No records yet\", \"" & p & "_empty\")\n      for item in items:\n        renderRecord(state, item)\n"
+  let desktopList = "proc renderList(state: State): Node =\n  let items = record_model." & resource.model & ".all\n  view:\n    column:\n      styles: {\"gap\": \"12\", \"overflow\": \"scroll\", \"flex_grow\": \"1\"}\n      button \"New " & resource.model & "\":\n        key: \"" & p & "_new\"\n        onClick(e): state.beginNew()\n      text state.error:\n        key: \"" & p & "_error\"\n        variant: \"danger\"\n      if items.len == 0:\n        emptyState(\"No records yet\", \"" & p & "_empty\")\n      for item in items:\n        renderRecord(state, item)\n"
   let nativeList = """  when defined(android) or defined(windows):
     var keys: seq[string]
     for item in items: keys.add($item.id)
@@ -49,6 +49,7 @@ proc listCode(resource: ResourceSpec): string =
           onClick(e): state.beginNew()
         text state.error:
           key: "@P@_error"
+          variant: "danger"
         if items.len == 0:
           emptyState("No records yet", "@P@_empty")
         else:
@@ -63,21 +64,21 @@ proc listCode(resource: ResourceSpec): string =
 
 proc editorCode(resource: ResourceSpec): string =
   let p = resource.plural
-  result = "proc renderEditor(state: State): Node =\n  view:\n    column:\n      styles: {\"gap\": \"12\"}\n      text (if state.editingId == 0: \"Create " & resource.model & "\" else: \"Edit " & resource.model & "\")\n"
+  result = "proc renderEditor(state: State): Node =\n  view:\n    column:\n      styles: {\"gap\": \"12\"}\n      text (if state.editingId == 0: \"Create " & resource.model & "\" else: \"Edit " & resource.model & "\"):\n        variant: \"primary\"\n"
   for field in resource.fields:
-    result.add("      text " & field.name.escape & "\n")
+    result.add("      text " & field.name.escape & ":\n        variant: \"secondary\"\n")
     if field.kind == "bool":
       result.add("      checkbox(" & field.name.escape & ", state.draft." & field.name & "):\n        key: \"" & p & "_field_" & field.name & "\"\n        onChange(e): state.edit(proc(v: var State) = v.draft." & field.name & " = e.checked)\n")
     else:
-      result.add("      input state.draft." & field.name & ":\n        key: \"" & p & "_field_" & field.name & "\"\n        onChange(e): state.edit(proc(v: var State) = v.draft." & field.name & " = e.value)\n")
-  result.add("      text state.error:\n        key: \"" & p & "_error\"\n      row:\n        styles: {\"gap\": \"8\"}\n        button \"Save\":\n          key: \"" & p & "_save\"\n          onClick(e): state.submit()\n        button \"Cancel\":\n          key: \"" & p & "_cancel\"\n          onClick(e): state.back()\n")
+      result.add("      input state.draft." & field.name & ":\n        key: \"" & p & "_field_" & field.name & "\"\n        styles: {\"width\": \"full\", \"height\": \"40\"}\n        onChange(e): state.edit(proc(v: var State) = v.draft." & field.name & " = e.value)\n")
+  result.add("      text state.error:\n        key: \"" & p & "_error\"\n        variant: \"danger\"\n      row:\n        styles: {\"gap\": \"8\"}\n        button \"Save\":\n          key: \"" & p & "_save\"\n          styles: {\"width\": \"96\", \"height\": \"32\"}\n          onClick(e): state.submit()\n        button \"Cancel\":\n          key: \"" & p & "_cancel\"\n          variant: \"secondary\"\n          styles: {\"width\": \"96\", \"height\": \"32\"}\n          onClick(e): state.back()\n")
 
 proc detailCode(resource: ResourceSpec): string =
   let p = resource.plural
-  result = "proc renderDetail(state: State): Node =\n  let item = record_model." & resource.model & ".find(state.selectedId)\n  view:\n    column:\n      styles: {\"gap\": \"12\"}\n      text \"" & resource.model & " #\" & $item.id\n"
+  result = "proc renderDetail(state: State): Node =\n  let item = record_model." & resource.model & ".find(state.selectedId)\n  view:\n    column:\n      styles: {\"gap\": \"12\"}\n      text \"" & resource.model & " #\" & $item.id:\n        variant: \"primary\"\n"
   for field in resource.fields:
     result.add("      text " & field.name.escape & "\n      text " & (if field.kind == "string": "" else: "$") & "item." & field.name & ":\n        key: \"" & p & "_detail_" & field.name & "\"\n")
-  result.add("      button \"Back\":\n        key: \"" & p & "_back\"\n        onClick(e): state.back()\n")
+  result.add("      button \"Back\":\n        key: \"" & p & "_back\"\n        variant: \"secondary\"\n        styles: {\"height\": \"32\"}\n        onClick(e): state.back()\n")
 
 proc resourceFilesV2*(resource: ResourceSpec): seq[ScaffoldFile] =
   let p = resource.plural

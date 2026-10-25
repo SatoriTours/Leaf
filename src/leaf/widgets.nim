@@ -1,5 +1,5 @@
 ## Typed Nim constructors for native controls and layout descriptions.
-import std/math
+import std/[math, tables]
 import ./core
 export core
 
@@ -7,18 +7,20 @@ proc column*(children: seq[Node], key = "", styles: Styles = default(Styles)): N
   ui(NodeKind.column, key = key, children = children, styles = styles)
 proc row*(children: seq[Node], key = "", styles: Styles = default(Styles)): Node =
   ui(NodeKind.row, key = key, children = children, styles = styles)
-proc text*(value: string, key = "", styles: Styles = default(Styles)): Node =
-  ui(NodeKind.text, key = key, text = value, styles = styles)
+proc text*(value: string, key = "", styles: Styles = default(Styles), variant = "default"): Node =
+  ui(NodeKind.text, key = key, text = value, styles = styles,
+    attributes = (if variant == "default": default(Styles) else: style({"variant":variant})))
 proc button*(label: string, onClick: Callback = nil, key = "", disabled = false,
              styles: Styles = default(Styles), variant = "primary"): Node =
   ui(NodeKind.button, key = key, text = label, onClick = onClick,
      disabled = disabled, styles = styles, attributes = style({"variant": variant}))
 proc input*(value: string, onChange: Callback = nil, key = "", placeholder = "",
             onSubmit: Callback = nil, disabled = false,
-            styles: Styles = default(Styles), resetToken: uint64 = 0): Node =
+            styles: Styles = default(Styles), resetToken: uint64 = 0, variant = "default"): Node =
   var attributes = default(Styles)
+  if variant != "default": attributes["variant"] = variant
   if resetToken != 0:
-    attributes = style({"input_reset_token": $resetToken})
+    attributes["input_reset_token"] = $resetToken
   ui(NodeKind.input, key = key, text = value, placeholder = placeholder,
     onChange = onChange, onSubmit = onSubmit, disabled = disabled, styles = styles,
     attributes = attributes)

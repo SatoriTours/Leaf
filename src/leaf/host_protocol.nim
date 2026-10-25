@@ -57,7 +57,7 @@ proc compatibleNode(node: Node): Node =
   for name, value in node.attributes:
     case name
     of "variant":
-      if node.kind in {NodeKind.button, NodeKind.tag}:
+      if node.kind in {NodeKind.button, NodeKind.tag, NodeKind.text, NodeKind.input}:
         attrs[name] = if value in ["default", "primary", "danger", "success",
           "warning", "info", "outline", "ghost", "secondary"]: value
           else: "default"

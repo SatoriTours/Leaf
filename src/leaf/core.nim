@@ -4,6 +4,7 @@ import std/[tables, sets, json, math, unicode, algorithm, options]
 import ./diagnostics
 import ./task_contracts
 import ./navigation_protocol
+import ./native_theme
 
 const
   MaxNodes* = 10_000
@@ -65,6 +66,7 @@ type
   Application* = object
     title*: string
     width*, height*: int
+    nativeTheme*: NativeTheme
     executionScope*: ExecutionScope
     driverFactory: proc(owner:Runtime):RuntimeDriver {.closure.}
   RuntimeDriver* = ref object of RootObj
@@ -118,6 +120,11 @@ type
 # while application code is executing in another runtime's scope.
 var nextRuntimeId {.threadvar.}:uint64
 var executingRuntimeId {.threadvar.}:uint64
+proc withNativeTheme*(app: Application, theme: NativeTheme): Application =
+  ## Copy configuration; does not mutate the original or change headless behavior.
+  result = app
+  result.nativeTheme = theme
+
 proc runtimeIdentity*(runtime:Runtime):uint64=runtime.executionId
 proc executionRuntimeIdentity*():uint64=executingRuntimeId
 

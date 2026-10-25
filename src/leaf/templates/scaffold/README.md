@@ -2,6 +2,8 @@
 
 This Leaf application uses page groups, shared models and services, and independent route configuration.
 
+The generated application explicitly opts into `matsuLight` on Win32 (the framework itself still defaults to system controls). To choose `matsuDark` or `systemTheme`, apply `.withNativeTheme(...)` to `createApplication()` at the entry point. This selects startup appearance, not a live theme switch. Active navigation, secondary actions and validation text use the same native semantic skin; arbitrary font/colour decorations are not enabled.
+
 ```sh
 leaf --check
 leaf --watch

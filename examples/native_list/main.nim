@@ -17,7 +17,10 @@ proc main(): int =
     let storage = openListStore(path)
     try:
       echo "SQLite: ", absolutePath(path)
-      result = run(nativeListApp(storage), args)
+      const theme = when defined(leafSystemTheme): systemTheme
+                    elif defined(leafDarkTheme): matsuDark
+                    else: matsuLight
+      result = run(nativeListApp(storage).withNativeTheme(theme), args)
     finally:
       storage.close()
   except CatchableError as error:

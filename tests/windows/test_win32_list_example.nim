@@ -11,6 +11,9 @@ import ../../examples/native_list/[store, application]
 proc GetWindowRgnBox(window: HWND, rect: ptr RECT): int32 {.
   stdcall, dynlib: "user32.dll", importc, raises: [].}
 
+proc GetNextDlgTabItem(dialog, control: HWND, previous: BOOL): HWND {.
+  stdcall, dynlib: "user32.dll", importc, raises: [].}
+
 type TestFailure = object of CatchableError
 proc require(ok: bool, why: string) =
   if not ok: raise newException(TestFailure, why)
@@ -53,7 +56,8 @@ proc deadline(window: HWND, message: UINT, timer: UINT_PTR,
 
 proc runWindow(storage: ListStore, reopen: bool) =
   let activity = newUiScopeActivity()
-  let runtime = newRuntime(guardUiApplication(nativeListApp(storage),
+  let app = nativeListApp(storage)
+  let runtime = newRuntime(guardUiApplication(app,
     proc(): uint64 = uint64(GetCurrentThreadId()), activity))
   var h: Win32Host
   var primary, secondary: ref CatchableError
@@ -61,7 +65,7 @@ proc runWindow(storage: ListStore, reopen: bool) =
   var ticks, phase: int
   var complete = false
   try:
-    h = createHost("Leaf Native List", DipSize(width: 1000, height: 620))
+    h = createHost("Leaf Native List", DipSize(width: 1000, height: 620), theme=app.nativeTheme)
     h.setStartupScope(proc(): bool = activity.busy or runtime.installingUpdate or
       runtime.installingHook)
     let win = newWin32Backend(h)
@@ -148,6 +152,18 @@ proc runWindow(storage: ListStore, reopen: bool) =
         edit = control(row, "EDIT", "", false)
         check = control(row, "BUTTON", "完成")
         save = control(row, "BUTTON", "保存 0")
+        # IsDialogMessage/GetNextDlgTabItem can loop inside USER32 when focus is
+        # inside a descendant of a viewport missing WS_EX_CONTROLPARENT. Fail
+        # the premise first, instead of hanging this in-process test forever.
+        discard SetFocus(edit)
+        require(GetFocus() == edit, "focus actual row EDIT")
+        require((GetWindowLongW(port, -20) and 0x00010000) != 0,
+          "row focus must enable recursive native dialog traversal")
+        require(GetNextDlgTabItem(h.windowHandle, edit, 0) == check,
+          "real dialog traversal reaches the next row control without looping")
+        var editBounds: RECT
+        require(GetWindowRect(edit, addr editBounds) != 0 and
+          editBounds.bottom-editBounds.top == 40, "themed list uses full 40px EDIT")
         if reopen:
           require(caption(edit) == "x" and SendMessageW(check, 0x00F0, 0, 0) == 1,
             "fresh native window displays the SQLite values")
@@ -180,6 +196,8 @@ proc runWindow(storage: ListStore, reopen: bool) =
         # for an unbounded visible range or inject an artificial extra turn.
         discard SetFocus(h.windowHandle)
         require(GetFocus() == h.windowHandle, "focus outside the list")
+        require((GetWindowLongW(port, -20) and 0x00010000) == 0,
+          "leaving row focus restores the viewport keyboard entry")
         phase = 4
         post(port, WM_VSCROLL, WPARAM(SB_BOTTOM), "bottom")
       elif phase == 4:

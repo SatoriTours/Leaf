@@ -6,9 +6,9 @@ when defined(android):
     {.error: "Android uses registerAndroidApplication(factory), not desktop run".}
 else:
   ## Leaf's native Nim API. Headless mode links no desktop GUI backend.
-  import leaf/[core, widgets, height_index, view, routing]
+  import leaf/[core, widgets, height_index, view, routing, native_theme]
   import leaf/components
-  export core, widgets, height_index, view, routing
+  export core, widgets, height_index, view, routing, native_theme
   export components
   import leaf/runner
   export runner

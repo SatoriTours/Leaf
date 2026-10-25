@@ -4,6 +4,10 @@
 
 当前验证分为共享 Runtime/数据库/工具链测试，以及真实 Windows 默认入口、原生控件、打包和 SDK 检查。headless、代码生成和历史成功不能替代新的 Windows 运行证据；视觉、IME、物理输入、混合 DPI 与未关闭资源门分别报告。
 
+## 当前按需启停约定（2026-10-26）
+
+用户已明确授权：后续 Windows 测试可直接 `docker start leaf-a2-windows`，复用原磁盘／SDK；测试完成或受阻后，先保存证据，确认其他任务／用户不再使用，再 `docker stop leaf-a2-windows` 并核实已退出。stop timeout 保持原有 120 秒，不删除环境或缓存。不采用仍占用 RAM 的普通 pause；只有已验证可落盘并释放 RAM 的保存状态机制才可替代关机。若存在其他使用者则保留并报告。操作与就绪检查详见持久根的 `README.md`；不改认证、不重建容器，不默认启动额外后台服务。
+
 <details>
 <summary>展开历史记录（含已退役渲染器，不适用于当前构建）</summary>
 
