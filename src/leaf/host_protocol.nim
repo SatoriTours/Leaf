@@ -1,7 +1,7 @@
 ## Backend-neutral, owned host data. No callbacks or platform objects cross
 ## this boundary; platform-specific interpretation remains in the adapter.
 import std/[options, tables, strutils, math]
-import ./[core, styles, backend, list_protocol, navigation_protocol]
+import ./[core, styles, backend, list_protocol, navigation_protocol, graphics]
 export backend.NodeHandle, backend.NoHandle
 # The pure list types live in `list_protocol`; re-exported here so existing
 # `host_protocol` call sites, field names and enum meanings stay unchanged.
@@ -12,6 +12,7 @@ const
   EventChangeMask* = 2'u32
   EventSubmitMask* = 4'u32
   EventBackMask* = 8'u32
+  EventCanvasInputMask* = 16'u32
 
 type
   HostStylePolicy* = enum hostCompatible, nativeStrict
@@ -21,6 +22,7 @@ type
     eventMask*: uint32
     list*: Option[HostListProps]
     navigation*: Option[HostNavigationProps]
+    canvas*: Option[CanvasFrame]
   HostBoundary* = object
     id*: uint64
     root*: NodeHandle
@@ -77,8 +79,8 @@ proc compatibleNode(node: Node): Node =
   ui(node.kind, key=node.key, text=node.text, placeholder=node.placeholder,
     disabled=node.disabled, styles=node.styles, attributes=attrs,
     onClick=node.handler(click), onChange=node.handler(change),
-    onSubmit=node.handler(submit), onBack=node.handler(back),
-    navigation=node.navigationProps)
+    onSubmit=node.handler(submit), onBack=node.handler(back), onCanvasInput=node.handler(canvasInput),
+    navigation=node.navigationProps, canvas=node.canvasFrame)
 
 proc normalizeHostProps*(node: Node, policy: HostStylePolicy): HostProps =
   if node == nil: fail("nil host description")
@@ -89,7 +91,9 @@ proc normalizeHostProps*(node: Node, policy: HostStylePolicy): HostProps =
   if node.handler(change) != nil: result.eventMask = result.eventMask or EventChangeMask
   if node.handler(submit) != nil: result.eventMask = result.eventMask or EventSubmitMask
   if node.handler(back) != nil: result.eventMask = result.eventMask or EventBackMask
+  if node.handler(canvasInput) != nil: result.eventMask = result.eventMask or EventCanvasInputMask
   result.navigation = node.navigationProps
+  result.canvas = node.canvasFrame
   let source = node.listSource
   if source != nil:
     result.list = some(HostListProps(sourceGeneration: source.generation,

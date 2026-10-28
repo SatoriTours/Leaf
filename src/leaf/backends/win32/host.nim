@@ -1,6 +1,6 @@
 ## Owned Unicode top-level Host. WndProc never calls business or disposes a
 ## Session; all such work runs after native dispatch at an ordinary Nim boundary.
-import std/[tables, unicode, math, atomics]
+import std/[tables, unicode, math, atomics, monotimes]
 import ../../[core, backend, backend_session, native_layout, windows_dpi, native_theme]
 import ./[api, calls, host_state, host_bridge, navigation_input, skin]
 export host_bridge
@@ -17,7 +17,7 @@ type
     timer, taskTimer: UINT_PTR
     taskCookie: uint
     sessionToken: uint64
-    needsTaskTick, tasksRetired: bool
+    needsTaskTick, tasksRetired, animationVisible: bool
     cleanupFailure: ref CatchableError
     calls: Win32Calls
     ctx: HostContext
@@ -150,9 +150,14 @@ proc disarmTaskTick(host: Win32Host) =
     if host.calls.killTimer(host.window, host.taskTimer) == 0: nativeError("KillTimer task")
     host.taskTimer = 0
   host.needsTaskTick = false
+proc animationsVisible(host:Win32Host):bool=
+  host.window!=nil and IsWindowVisible(host.window)!=0 and IsIconic(host.window)==0
+proc frameWork(host:Win32Host):bool=
+  host.session.runtime.taskPumpPending() or
+    (host.animationsVisible() and host.session.runtime.animationPumpPending())
 proc armTaskTick(host: Win32Host) =
   if host.window == nil or host.close.pending or host.close.complete or
-      not host.currentTaskSession() or host.session.closing or not host.session.runtime.taskPumpPending():
+      not host.currentTaskSession() or host.session.closing or not host.frameWork():
     host.disarmTaskTick()
     return
   if host.taskTimer == 0:
@@ -365,6 +370,7 @@ proc safeTurn(host: Win32Host) =
       raise error
   if host.close.complete or host.busy(): return
   var primary: ref CatchableError
+  let ordinaryTick=host.needsTick
   if not host.close.pending and host.lease != nil: host.bridge.nativeTick()
   if not host.close.pending and host.needsTick and host.session != nil and host.safeTick != nil and
       (host.lease == nil or host.bridge.matchesSession(host.session)):
@@ -378,6 +384,9 @@ proc safeTurn(host: Win32Host) =
       primary = error
     finally: dec host.tickDepth
   if not host.close.pending and host.currentTaskSession() and not host.session.closing:
+    let visible=host.animationsVisible()
+    let animationDue=host.needsTaskTick or ordinaryTick or visible!=host.animationVisible
+    host.animationVisible=visible
     if host.needsTaskTick or host.session.runtime.taskPumpPending():
       host.needsTaskTick = false
       inc host.tickDepth
@@ -388,6 +397,15 @@ proc safeTurn(host: Win32Host) =
         if primary == nil: primary = error
         else: primary.msg.add("; task secondary: " & error.msg)
       finally: dec host.tickDepth
+    if not host.close.pending and animationDue and not host.session.closing:
+      inc host.tickDepth
+      try:
+        discard host.session.runtime.pumpAnimations(float64(getMonoTime().ticks)/1_000_000.0,visible)
+      except CatchableError as error:
+        host.recordError()
+        if primary==nil:primary=error
+        else:primary.msg.add("; animation secondary: " & error.msg)
+      finally:dec host.tickDepth
     if not host.close.pending: host.armTaskTick()
   else:
     host.disarmTaskTick()

@@ -62,11 +62,16 @@ proc nativeHostConsumer*(backend:Backend,sessionId=0'u64,
     for op in wire.ops:
       case op.kind
       of HostOpKind.create,HostOpKind.update:
+        let canvasReason = canvasMetadataReason(op.nodeKind, op.props.canvas)
+        if canvasReason.len != 0: fail(canvasReason)
         if (op.nodeKind == NodeKind.navigation) != op.props.navigation.isSome:
           fail("navigation metadata must belong to a navigation host")
         if op.props.navigation.isSome:
           let reason = op.props.navigation.get.invalidReason(MaxNodes)
           if reason.len != 0: fail(reason)
+        if op.nodeKind != NodeKind.canvasHost and
+            (op.props.eventMask and EventCanvasInputMask) != 0:
+          fail("Canvas input handler requires a Canvas host")
         if op.nodeKind != NodeKind.navigation and
             (op.props.eventMask and EventBackMask) != 0:
           fail("back handler requires a navigation host")
@@ -78,6 +83,7 @@ proc nativeHostConsumer*(backend:Backend,sessionId=0'u64,
         entity.handle=op.handle;entity.parent=op.parent;entity.nodeId=op.nodeId;entity.kind=op.nodeKind
         entity.props=effectiveProps(backend.capabilities,op.props.normalized,some(op.nodeKind))
         entity.navigation=op.props.navigation
+        entity.canvas=op.props.canvas
         entity.list=op.props.list
         entity.row=op.row
         edits[op.handle]=entity
@@ -96,16 +102,16 @@ proc nativeHostConsumer*(backend:Backend,sessionId=0'u64,
       if handle in created:
         batch.ops.add(UpdateOp(kind:opCreate,handle:handle,parent:entity.parent,index:entity.index,
           nodeId:entity.nodeId,nodeKind:entity.kind,props:entity.props,list:entity.list,navigation:entity.navigation,
-          row:entity.row))
+          row:entity.row,canvas:entity.canvas))
       else:
-        if old.props!=entity.props or old.list!=entity.list or old.row!=entity.row or old.navigation!=entity.navigation:
+        if old.props!=entity.props or old.list!=entity.list or old.row!=entity.row or old.navigation!=entity.navigation or old.canvas!=entity.canvas:
           batch.ops.add(UpdateOp(kind:opUpdate,handle:handle,parent:entity.parent,index:entity.index,
             nodeId:entity.nodeId,nodeKind:entity.kind,props:entity.props,list:entity.list,navigation:entity.navigation,
-            row:entity.row))
+            row:entity.row,canvas:entity.canvas))
         if old.parent!=entity.parent or old.index!=entity.index:
           batch.ops.add(UpdateOp(kind:opMove,handle:handle,parent:entity.parent,index:entity.index,
             nodeId:entity.nodeId,nodeKind:entity.kind,props:entity.props,list:entity.list,navigation:entity.navigation,
-            row:entity.row))
+            row:entity.row,canvas:entity.canvas))
     proc depth(op:UpdateOp):int=
       var parent=op.parent
       while parent!=NoHandle:

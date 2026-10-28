@@ -2,7 +2,7 @@
 ## successful publication replaces entries and never retains a candidate chain.
 import ./task_worker
 import std/[tables,sets,options,algorithm]
-import ./[core,component_description,component_state,host_reconcile,backend,task_service,task_contracts,commit_map]
+import ./[core,component_description,component_state,host_reconcile,backend,task_service,task_contracts,commit_map,graphics,animation,animation_binding,canvas_transition]
 export host_protocol.UpdateStats
 
 type
@@ -31,6 +31,15 @@ type
     ownedBytes:int
     registration:OwnerRegistration
     siblingIndex:int
+    animations:seq[AnimationBinding]
+    animationEpoch:uint64
+    presentation:CanvasPresentationInternal
+  PendingAnimationFinish=object
+    owner,generation:uint64
+    binding:AnimationBinding
+  OwnedAnimation=object
+    owner:uint64
+    binding:AnimationBinding
   ManagedStore=ref object
     owner:Runtime
     states:StateStore
@@ -49,6 +58,11 @@ type
     totals:UpdateStats
     snapshot:Snapshot
     snapshotValid,forceRoot:bool
+    animationClock:AnimationClock
+    animationFinishes:seq[PendingAnimationFinish]
+    animationsRetired:bool
+    presentationFrame:Option[float64]
+    presentationFrameDue:bool
   PreparedCommit=ref object
     editEpoch:uint64
     candidate:HostCandidate
@@ -57,6 +71,7 @@ type
     keyPatch:PreparedMapPatch[string,KeySummary]
     outletPatch:PreparedMapPatch[uint64,uint64]
     stateRetire:seq[PreparedOwnerDisposal]
+    animationRetire:seq[AnimationBinding]
     stateAttempt:StateAttempt
     taskAttempt:TaskAttempt
     published:bool
@@ -71,6 +86,7 @@ type
     exported:Option[Snapshot]
     computed,dirty:HashSet[uint64]
     created:seq[uint64]
+    newAnimations:seq[OwnedAnimation]
     root:uint64
     count,componentCount,bytes:int
     measurements:UpdateStats
@@ -155,6 +171,7 @@ proc descriptionBytes(desc:UiDescription,path:string):int=
   of DescriptionKind.host:
     let node=desc.hostNode
     result+=node.text.len+node.placeholder.len
+    if node.canvasFrame.isSome:result+=node.canvasFrame.get.ownedBytes
     for styles in [node.styles,node.attributes]:
       for key,value in styles:result+=32+key.len+value.len
     if node.listSource!=nil:
@@ -246,19 +263,29 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
       item.model=old.model
       item.ownedBytes=old.ownedBytes
       item.registration=old.registration
+      item.animations=old.animations
+      item.animationEpoch=old.animationEpoch
+      if not old.active:
+        if item.animationEpoch==high(uint64):fail("animation activation exhausted")
+        inc item.animationEpoch
     else:
       var mount:MountContext
       d.data.states.setPhase(StatePhase.initializing)
       try:
         item.registration=newOwnerRegistration(d.data.tasks,id)
-        mount=newMountContext(d.data.states,id,item.registration)
+        mount=newMountContext(d.data.states,id,item.registration,d.data.owner.reducedMotionInternal)
         item.model=desc.erased.instantiate(mount)
       finally:
         # Close the accounting frame on both the success and the exception exit;
         # the readonly scalar is read once after the frame is closed.
-        if mount!=nil:sealMountContext(mount)
+        if mount!=nil:
+          sealMountContext(mount)
+          item.animations=mount.animationBindingsInternal()
+          for binding in item.animations:
+            d.newAnimations.add(OwnedAnimation(owner:id,binding:binding))
         d.data.states.setPhase(StatePhase.idle)
       item.ownedBytes=ownedDescriptionBytes(mount)
+      item.animationEpoch=1
     # Owned configuration/description bytes are charged once, before children.
     if item.ownedBytes!=0:
       if item.ownedBytes > MaxTreeBytes - d.bytes:
@@ -286,7 +313,16 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
     item.handle=if old==nil or old.handle==NoHandle:d.data.reconciler.reserveHandle() else:old.handle
     let node=desc.hostNode
     item.description=desc.hostOnly()
-    let props=normalizeHostProps(node,d.data.policy)
+    var props=normalizeHostProps(node,d.data.policy)
+    if node.canvasFrame.isSome:
+      let previous=if old==nil:CanvasPresentationInternal() else:old.presentation
+      item.presentation=retargetCanvasPresentationInternal(previous,node.canvasFrame.get,
+        d.data.owner.reducedMotionInternal,old!=nil and not old.active,
+        forbidRetarget=d.data.presentationFrame.isSome)
+      let extra=item.presentation.extraBytesInternal
+      if extra>MaxTreeBytes-d.bytes:fail("Canvas presentation exceeds managed byte budget")
+      item.bytes+=extra;d.bytes+=extra
+      props.canvas=some(item.presentation.frameInternal)
     inc d.measurements.normalizedHosts
     d.changes.upserts.add(HostRecord(handle:item.handle,parent:parentHost,nodeId:path,
       kind:node.kind,props:props,boundaryId:owner))
@@ -699,6 +735,13 @@ proc prepareAccepted(d:ManagedDriver)=
     if finalCount==0:keyRemovals.add(delta.key)
     else:keyUpserts.add((delta.key,KeySummary(count:finalCount,
       xorId:base.xorId xor delta.xorId)))
+  var animationRetire:seq[AnimationBinding]
+  for owner in removedOwners:
+    let old=data.instances.getOrDefault(owner)
+    if old!=nil:
+      for binding in old.animations:animationRetire.add(binding)
+  for entry in d.newAnimations:
+    if d.current(entry.owner)==nil:animationRetire.add(entry.binding)
   var retire:seq[PreparedOwnerDisposal]
   if removedOwners.len>0:
     retire.add(data.states.prepareDisposeOwners(removedOwners))
@@ -713,7 +756,7 @@ proc prepareAccepted(d:ManagedDriver)=
       max(MaxNodes*2,data.keys.len)),
     outletPatch:data.outlets.preparePatch(outletRemovals,outletUpserts,
       max(MaxNodes,data.outlets.len)),
-    stateRetire:retire,stateAttempt:d.attempt,taskAttempt:d.taskAttempt)
+    stateRetire:retire,animationRetire:animationRetire,stateAttempt:d.attempt,taskAttempt:d.taskAttempt)
 
 proc discardPreparedCommit(d:ManagedDriver) {.raises:[].}=
   let commit=d.commit
@@ -732,7 +775,7 @@ method stage*(base:ManagedDriver,forceRoot:bool):RuntimeDriver=
   let forceRoot=forceRoot or data.forceRoot
   data.forceRoot=false
   let queued=data.states.pendingOwners()
-  if not forceRoot and queued.len==0 and data.invalid.len==0 and not data.tasks.hasTaskIntents:return nil
+  if not forceRoot and queued.len==0 and data.invalid.len==0 and not data.tasks.hasTaskIntents and not data.presentationFrameDue:return nil
   let d=ManagedDriver(data:data,count:data.count,componentCount:data.componentCount,bytes:data.bytes,root:data.root,globalRefresh:forceRoot,editEpoch:base.editEpoch)
   try:
     d.taskFrame=data.tasks.sealTaskIntentsInternal()
@@ -756,6 +799,29 @@ method stage*(base:ManagedDriver,forceRoot:bool):RuntimeDriver=
       let before=d.hostRoot(id)
       discard d.reconcile(item.description,id,item.parent,item.owner,item.parentHost,item.path,item.depth,item.siblingIndex)
       if d.hostRoot(id)!=before:d.repairAncestors(id)
+    if data.presentationFrame.isSome:
+      # Same attempt as sampled tween State. No view runs for unchanged owners.
+      # Never mutate the accepted instances (including on a rejected frame).
+      var ids:HashSet[uint64]
+      for id,item in data.instances:
+        if item.active and item.presentation.active:ids.incl(id)
+      for id,item in d.edits:
+        if item!=nil and item.active and item.presentation.active:ids.incl(id)
+      for id in ids:
+        let current=d.current(id)
+        if current==nil or not current.active or not current.presentation.active:continue
+        let item=current.copyInstance()
+        let oldExtra=item.presentation.extraBytesInternal
+        item.presentation=advanceCanvasPresentationInternal(item.presentation,data.presentationFrame.get)
+        let extra=item.presentation.extraBytesInternal
+        if extra>MaxTreeBytes-(d.bytes-oldExtra):fail("Canvas presentation exceeds managed byte budget")
+        item.bytes+=extra-oldExtra;d.bytes+=extra-oldExtra
+        d.edits[id]=item
+        var props=normalizeHostProps(item.description.hostNode,data.policy)
+        props.canvas=some(item.presentation.frameInternal)
+        inc d.measurements.normalizedHosts
+        d.changes.upserts.add(HostRecord(handle:item.handle,parent:item.parentHost,nodeId:item.path,
+          kind:item.description.hostNode.kind,props:props,boundaryId:item.owner))
     if data.root==0:
       let config=data.owner.applicationConfig
       d.changes.window=some(HostWindow(title:config.title,width:config.width,height:config.height))
@@ -833,7 +899,7 @@ method publish*(d:ManagedDriver) {.raises:[].}=
   data.totals.indexEdits+=h.indexEdits
   data.totals.ops+=h.ops
   d.edits.clear();d.changes=default(HostChanges);d.attempt=nil;d.hostPlan=nil
-  d.created.setLen(0);d.computed.clear();d.dirty.clear()
+  d.created.setLen(0);d.newAnimations.setLen(0);d.computed.clear();d.dirty.clear()
   d.taskAttempt=nil
   d.taskFrame=nil
   d.outletRemovals.setLen(0);d.outletUpserts.setLen(0)
@@ -859,6 +925,7 @@ method finishCommit*(d:ManagedDriver) {.raises:[].}=
   ## Runtime reentry guard, release retired values and finished attempts.
   let commit=d.commit
   if commit==nil or not commit.published:return
+  for binding in commit.animationRetire:retireAnimationBindingInternal(binding)
   d.data.reconciler.finishPublish(commit.candidate)
   finishPublished(commit.instancePatch)
   finishPublished(commit.indexPatch)
@@ -880,6 +947,8 @@ method reject*(d:ManagedDriver) {.raises:[].}=
   if d.attempt!=nil:d.data.states.rejectAttempt(d.attempt)
   d.data.states.clearQueued()
   d.data.invalid.clear()
+  for entry in d.newAnimations:retireAnimationBindingInternal(entry.binding)
+  d.newAnimations.setLen(0)
   for owner in d.created:d.data.states.disposeOwner(owner)
   d.edits.clear();d.attempt=nil;d.hostPlan=nil;d.created.setLen(0)
   d.outletRemovals.setLen(0);d.outletUpserts.setLen(0)
@@ -902,7 +971,10 @@ proc exportNode(d:ManagedDriver,id:uint64,rowIndex= -1):MountedNode=
   of DescriptionKind.host:
     var children:seq[MountedNode]
     for child in item.children:children.add(d.exportNode(child))
-    mountedDescription(item.description.hostNode,item.path,children,itemIndex=index)
+    let node=if item.description.hostNode.canvasFrame.isSome:
+      item.description.hostNode.withCanvasPresentationInternal(item.presentation.frameInternal)
+      else:item.description.hostNode
+    mountedDescription(node,item.path,children,itemIndex=index)
 method exportSnapshot*(d:ManagedDriver):Snapshot=
   if d.metadataOnly and d.data.snapshotValid:return d.data.snapshot
   if d.commit!=nil:
@@ -971,6 +1043,10 @@ method prepareCloseDeferredInternal*(d:ManagedDriver)=
   for item in owners:ordered.add(item.registration)
   d.data.tasks.prepareCloseTaskServiceInternal(ordered)
 method invalidateCloseStateInternal*(d:ManagedDriver)=
+  d.data.animationsRetired=true
+  d.data.animationFinishes.setLen(0)
+  for item in d.data.instances.values:
+    for binding in item.animations:retireAnimationBindingInternal(binding)
   d.data.tasks.invalidateTaskStateInternal()
   d.data.states.clearQueued()
   d.data.invalid.clear()
@@ -985,6 +1061,72 @@ method taskPumpPendingDriverInternal*(d:ManagedDriver):bool=
   not tasks.taskRetiredInternal and (tasks.pendingTaskBytesInternal>0 or tasks.taskWorkerStatsInternal.reservedTasks>0)
 method pumpDeferred*(d:ManagedDriver):TaskPumpReport=
   d.data.tasks.pumpTaskService()
+method animationPumpPendingDriverInternal*(d:ManagedDriver):bool=
+  if d.data.animationsRetired:return false
+  if d.data.animationFinishes.len>0:return true
+  for item in d.data.instances.values:
+    if not item.active:continue
+    if item.presentation.active:return true
+    for binding in item.animations:
+      if binding.playing!=nil and binding.playing():return true
+
+method pumpAnimationsDriverInternal*(d:ManagedDriver,monotonicMs:float64,visible:bool):AnimationPumpReport=
+  let data=d.data
+  if data.animationsRetired:return
+  let frame=data.animationClock.tick(monotonicMs,visible)
+  if not visible:return
+  # Only previously accepted facts can call business code, in a later ordinary
+  # turn. Every callback gets a fresh owner/generation check after prior turns.
+  let pending=move(data.animationFinishes)
+  for i,fact in pending:
+    let owner=data.instances.getOrDefault(fact.owner)
+    let binding=fact.binding
+    if owner==nil or not owner.active or binding.validFinish==nil or
+        not binding.validFinish(fact.generation) or binding.onFinish==nil:
+      inc result.droppedFinishes
+      continue
+    try:
+      data.owner.uiTask(proc()=binding.onFinish())
+      inc result.deliveredFinishes
+    except CatchableError:
+      # This callback was attempted once. Do not replay its nontransactional
+      # side effects when its managed State/Host turn is rejected.
+      for j in i+1..<pending.len:data.animationFinishes.add(pending[j])
+      raise
+  if data.animationsRetired:return
+  var owners:seq[Instance]
+  for item in data.instances.values:
+    if item.active and item.animations.len>0:owners.add(item)
+  owners.sort(proc(a,b:Instance):int=cmp(a.id,b.id))
+  var active:seq[OwnedAnimation]
+  for item in owners:
+    for binding in item.animations:
+      if binding.playing!=nil and binding.playing():
+        active.add(OwnedAnimation(owner:item.id,binding:binding))
+  var presentations=0
+  for item in data.instances.values:
+    if item.active:presentations+=item.presentation.activePropertyCountInternal
+  if active.len>0 or presentations>0:
+    var candidateFinishes:seq[PendingAnimationFinish]
+    data.presentationFrame=some(frame.activeMs)
+    data.presentationFrameDue=presentations>0
+    try:
+      data.owner.uiTask(proc()=
+        for entry in active:
+          let item=data.instances.getOrDefault(entry.owner)
+          entry.binding.step(frame.activeMs,item.animationEpoch)
+          let finish=entry.binding.finish()
+          if finish.isSome and entry.binding.onFinish!=nil:
+            candidateFinishes.add(PendingAnimationFinish(owner:entry.owner,
+              generation:finish.get,binding:entry.binding)))
+    finally:
+      data.presentationFrame=none(float64)
+      data.presentationFrameDue=false
+    # No token escapes a failed State/Host attempt.
+    for fact in candidateFinishes:data.animationFinishes.add(fact)
+    result.sampledAnimations=active.len+presentations
+  result.needsFrame=d.animationPumpPendingDriverInternal()
+
 proc componentApplication*(root:UiDescription,title:string,width=640,height=480,
     executionScope:ExecutionScope=nil):Application=
   if root==nil:fail("component application needs a root")

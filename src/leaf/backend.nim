@@ -6,7 +6,7 @@
 ## native backend needs, and declares which of those properties that backend
 ## can honour. Callbacks, Node references and native pointers never appear here.
 import std/[tables, hashes, options, sets, unicode]
-import ./[core, styles, list_protocol, navigation_protocol]
+import ./[core, styles, list_protocol, navigation_protocol, graphics, canvas_input]
 # `HostListProps` is a pure owned value; the backend stores the same type the
 # host wire uses, without importing `host_protocol` (which would be a cycle).
 export list_protocol, navigation_protocol
@@ -74,6 +74,7 @@ type
     kind*: NodeKind
     props*: NormalizedProps
     navigation*: Option[HostNavigationProps]
+    canvas*: Option[CanvasFrame]
     list*: Option[HostListProps]
       ## Complete typed list description; `none` for ordinary controls.
     row*: Option[NativeRowBinding]
@@ -96,6 +97,7 @@ type
     nodeKind*: NodeKind
     props*: NormalizedProps
     navigation*: Option[HostNavigationProps]
+    canvas*: Option[CanvasFrame]
     list*: Option[HostListProps]
       ## create/update carry the accepted list facts (`none` for ordinary
       ## controls); move/remove never use it.
@@ -151,6 +153,9 @@ type
     rebind*: proc(sessionId, mountGeneration: uint64) {.closure.}
     bindingValid*: proc(handle: NodeHandle, bindingGeneration: uint64): bool {.closure.}
     settle*: proc(value: EventSettlement) {.closure.}
+    projectCanvasInput*: proc(handle: NodeHandle, source: CanvasPointerEvent): Option[CanvasDelivery] {.closure.}
+      ## Pure native identity/projection lookup at ordinary delivery time. Never
+      ## called by enqueue/WndProc, and never stores application callbacks.
     sessionOwner: uint64
     sessionCounter: uint64
 
@@ -213,12 +218,18 @@ proc reserveRowSlot*(slots: var RowSlotTable, binding: NativeRowBinding): string
   slots[binding.listHandle] = entry
   ""
 
+proc canvasMetadataReason*(kind: NodeKind, frame: Option[CanvasFrame]): string =
+  if (kind == NodeKind.canvasHost) != frame.isSome:
+    return "Canvas frame must belong to a Canvas host"
+  if frame.isSome and frame.get.isNil: return "Canvas frame is missing"
+  ""
+
 proc fullCapabilities*(): BackendCapabilities =
   ## Capabilities of a backend that supports every A1 property. Backends should
   ## start from this and remove what they cannot honour.
   BackendCapabilities(
     kinds: {column, row, text, button, input, checkbox, toggle, progress, tag,
-      separator, spinner, virtualList, navigation},
+      separator, spinner, virtualList, navigation, canvasHost},
     layouts: {lfGap, lfPadding, lfWidth, lfHeight, lfFlexGrow, lfAlign,
       lfJustify, lfOverflow, lfMinMax, lfFlexShrink},
     alignments: {alignStart, alignEnd, alignCenter, alignStretch},

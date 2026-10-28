@@ -1,5 +1,13 @@
 # 开发进度与下一步
 
+## 2026-10-27 Canvas 真实交互切片（96 DPI／software 限定独立通过）
+
+已接通 Windows 鼠标点击／拖动、捕获及失焦取消、原始 Pointer／滚轮／键盘、修饰键、Tab／焦点提示与 Canvas 级可访问名称。业务回调仍在普通 UI turn，通过既有 Session FIFO 和托管状态事务交付；补充稳定身份、退休事件丢弃及溢出故障释放。最小可运行入口为 `examples/canvas_interaction.nim`，使用软件渲染；不宣称逐图元 UI Automation。
+
+最新 Windows 冻结快照 `canvas-interaction-final-1027` 的 20 项原生测试通过，三个示例编译／链接成功；同 EXE 的 `canvas-interaction-ui-final-1027` 在非提权 Session1／96 DPI 下完成 30 项系统鼠标／键盘断言，覆盖点击、拖动、拖出窗口释放、滚轮、方向键、Tab／ShiftTab、焦点取消、原生按钮及 resize／viewBox 投影，正常关闭 exit0。真实输入先后发现并以 RED→GREEN 修复空捕获维护自唤醒、双击 down 丢失、重绘后输入投影未更新三个缺陷；失败记录保留，不以消息注入测试代替真实系统输入。
+
+独立源码审查未发现 P0/P1；首审查角色缺 exec，未将其日志复核算作独立重跑。随后同验收模型通过可执行角色实际完成共享回归 22 套／196 项、精确 hash 的 Windows Canvas 20 项与真实系统输入 30 项，并从同快照重建／运行两套 Windows 兼容回归 16 项（15+1；原报告摘要误写31，以原始日志为准）。managed_runtime 首跑因进程 PATH 缺 Nim 失败，仅补 PATH 后通过；未修改产品。四张同 EXE 的真实 PNG 已独立语义视觉通过。接受范围仅软件渲染／96 DPI 交互切片，非156套全量回归，阶段 3 完整矩阵仍不标完成。150%／200% 与物理混合 DPI、硬件 GPU／真实设备故障、完整辅助技术及参考视频仍缺证据；动画、完整实验室及真实性能基线尚未实现。未提交或发布。验收后已保存证据并正常 ACPI 关闭本任务 VM，核实容器 exited／PID0；子 Agent 进程均已终止且保留历史。最新证据索引：`~/.local/state/agent-artifacts/leaf/2026-10-26-graphics-api-design/implementation/canvas-input-next-integration.md`。下文为历史批次，不外推至本次快照。
+
 ## 2026-10-25 提交代码：入口与 Win32 行裁剪修复
 
 用户已授权“提交代码”：在当前 `wks_2a5b342b722663f0` / local（不隔离）/ main 提交本轮10个源码、测试及文档文件，推送核实的 GitHub 默认主分支并跟进同SHA全部相关Actions；不打版本Tag、不新建空间。复用下述冻结快照的自测和独立验收证据，不把提交或CI成功改写为部分滚动／cold资源／现场门通过。最终SHA、Actions、SDK及关联空间清单存于 `~/.local/state/agent-artifacts/leaf/2026-10-25-windows-beta-acceptance/code-delivery.json`。`docs/design/` 和另一界面设计会话属于范围外成果，保留且不夹带提交；共享空间承载其他任务及未关闭验收门，不归档。
@@ -564,3 +572,93 @@ Android SQLite 基础已开发自测并整合：272源manifest3f7aa456…固定�
 - CI 跟进 e24a6d5：数据库三平台实际全绿，Windows 先前两项 scaffold 通过后，在后续 model notifications 夹具暴露同类未物化行；SDK 同症状失败。扫描全部生成应用的 Runtime/find/dispatch 夹具，同时发现 rejection 尚未接 viewport；两套在隔离 native 模板分支各复现 notes_title_1 RED。现将既有 helper 原样提取为测试公共模块，四个 scaffold 套件复用，断言保留、产品与模板未改；补查 ResourcesProbe 实为宿主 Runtime 后也复现 task_title_1 RED，资源 CRUD/冷重开补齐 viewport。普通 Linux 与隔离 native 模板方法各四套31 OK/0 FAILED/自然0，后者不替代 Windows 实跑。补充独立复核后推送新 SHA 并继续全部 CI；失败旧 SDK 批次已取消，不计通过。完整目标与原始证据继续保留。
 
 - CI 跟进 6a49c10：数据库与 Model 三平台均实际通过；Windows SDK 构建/打包通过后，安装 smoke 的跨进程快照文本断言失败。主控停止继续逐夹具补 viewport，改查公共 headless 契约与整条安装验证：显式 `--list` 已存在，SQLite 实际保存成功，未物化快照无标题；同一新进程加 `--list task_list 0 1` 即读回。仅修 smoke 三处跨进程读回，Windows 显式请求首行、导航在请求前执行，第二应用继续使用独立 DB；不修改产品 headless/列表语义。Linux SDK 回归配置 NIM 后19 OK/0 FAILED（首次缺 NIM 的方法失败保留），真实 CI Windows SDK 在既有 VM 的旧脚本自然1、新脚本完整 headless smoke 自然0（含子编译107.76s，编排上限240s、postcheck Ready/owned[]）；仅 headlessOnly、已有 MinGW 拷入，非在线安装器/GPUI 重验。独立复核与原始证据放在 code-delivery 目录；新 SHA 的全部 Actions 与 SDK 发布尚需验证，完整迁移仍未完成。
+
+
+### 2026-10-28 Task4 动画基础层（自测，待独立验收）
+
+- 新增纯值语义 `animation.nim`：毫秒时长、标量／Vec2（位置与尺寸）／线性光预乘alpha颜色插值、四种easing、有限单程次数／forever／pingPong、play/pause/restart/reset/seek、唯一自然Finish token、取消、当前采样值重定向、共享活动时钟及需求合并。全部无回调／I/O。
+- 新增内部 `animation_state.nim`：控制与候选帧复用StateStore托管草稿、owner与同一接受／拒绝／销毁门；render不可控制，失败候选不消费Finish，空推进不入队。
+- 两新套20项自测通过；API缺失的编译失败仅记API RED，不冒充行为RED。后续两个真实行为RED（重复／零时长seek终点、暂停／结束空推进入队）均修复并复跑通过。日志、4文件hash见既有implementation证据目录的 animation-*。
+- 边界：此为内部基础，不从leaf公共入口导出；未接component animation:／Canvas transition:、presentation、原生共享帧调度、owner隐藏生命周期或onFinish业务交付，系统减少动态效果尚未查询（核心只接收显式reduced）。真实Windows动画／视觉／性能未验证；Task4整项RED/GREEN/Verify均不勾选。既有96DPI交互验收不重跑，VM保持关闭。
+- 独立验收准备中：仅冻结四新文件及必要State／组件回归，不委派实现、不提交／发布。
+
+
+### 2026-10-28 Task4 内部基础独立验收闭合（整项仍未完成）
+
+- 功能验收profile按最新六项notes选择；Pi原生delegate run `7d54ed24-5b6b-4606-9004-980f34f4f6d2`，实际模型 `magpie/group/deepseek-flash-4.1`。只读源码＋独立执行两新套20项、必要State草稿／State／组件DSL回归26项、唯一边界probe通过，无P0/P1。原始日志 `animation-independent-logs/`，报告 `animation-core-independent-review.md`。父会话核4文件SHA与冻结manifest一致、原始OK共46项及probe、git diff检查；未重复跑未变快照。
+- 原报告日期2026-10-26误记；实际run UTC 2026-10-27 17:10:07—17:12:50（本地2026-10-28），原报告保留。probe两次作者期望错误未保留失败版本／原始日志，这是探针证据留存缺口，不冒充产品RED；已保存最后probe源码与实际通过日志。产品两个genuine RED日志均完整保留。
+- 非阻断P2留待接线时文档／必要测试：accepted sample与candidate value区别；seek不会重开已自然结束的play generation；pingPong边界归下一单程；隐藏tick计入截止隐藏时刻区间；死owner控制静默退役而纯Timeline先校验参数；同attempt重复value及接受后Finish交付补测。为避免改冻结源码，不做无关注释修补。
+- 父裁决纠正P2-2说明的一处混淆：失败候选的finishIssued／finishPending均随整份State回滚，不是失败候选保留finishIssued；现有“frame failure cannot consume a natural Finish”已实际证明拒绝后仍可重新产生token。同generation已接受自然结束后seek不重新交付Finish，只有restart开启新generation，符合现有设计。
+- Final: Ruling: 接受上述核心范围，不将Declined to judge项当通过：真实Windows播放／最小化／缩放／DPI／视觉／GPU、性能与分配、公共DSL和属性冲突、presentation与native共享调度、真实owner隐藏与onFinish普通turn交付、OS reduced查询、实际多Canvas同帧一致及O(N)重算成本均仍未完成。若误把基础通过当整体通过，将漏掉真实显示、生命周期、双驱动和性能问题，因此Task4整项RED/GREEN/Verify继续不勾选，未导出公共入口。无提交／发布授权，不做Git写入。
+- 子Agent实际process terminal observed、active async0，保留会话／全部证据。VM本轮未启动。usage／实付未知。本次仅内部基础切片闭合；下一实现主线仍为component animation:词法区分、共享frame registry和owner生命周期，再接Canvas transition/presentation及真实Windows验收。
+
+
+### 2026-10-28 Task4 tween／组件与共享调度（自测通过，待独立验收）
+
+- `component animation:` 初始化一次，view/普通数值辅助函数读取采样值，event的x.play/pause/restart/reset/seek显式控制；词法遮蔽、跨实例、只读动画变量与view禁控制；onFinish命名参数从纯tween配置分离，初始化后闭包绑定所有State／动画handles，无全局converter。
+- 共享Runtime活动clock＋owner-owned bindings，不造第二份commit registry。控制与采样anchor同StateStore事务；失败帧保留accepted anchor并在下次实际时间追上。retained隐藏owner以accepted activation epoch冻结，窗口最小化／隐藏停止帧timer，不对未知遮挡作承诺。Finish仅成功State/Host帧后入下一普通turn，复核owner/generation；销毁清回调、死owner不再请求帧。
+- 单窗口复用原16ms task timer，WndProc只置due flag，普通safeTurn采样／交付；空闲停timer。默认runNative在挂载前只读查询SPI_GETCLIENTAREAANIMATION，显式MotionPolicy.full/reduced可冻结策略；不写OS设置。
+- Windows genuine RED `animation-timer-red-1028`：compile0/run1，x始终0、Finish0、timer arms0；修复后真实GREEN，再补实际minimize/restore。最新587文件快照 `animation-native-final2-1028`（ZIP SHA256 `174b5dd1259290f6881dde00cf5582b5b815ba6e6e6c72ac79c35242b7844049`）：动画native2、旧Canvas20均compile/run0；示例 `examples/canvas_animation.nim` 实编译链接。中间final版本为测试fixture raises effect编译失败，保留，不算行为RED。
+- 同hash示例EXE `388d93751266fc68f101cae500a82617691043c3f7e8d140320bdeb0ec71eda4`；系统mouse_event真实按钮脚本 `animation-ui-1028` 的所有检查通过及4张截图，Session1/elevated=false、96DPI/software/MotionPolicy.full。非物理硬件；静态PNG不作动画节奏／FPS证据。脚本在已有implementation目录 `leaf_canvas_animation_ui.ps1`。
+- 核心/State/DSL/runtime/Finish和旧组件／草稿7套自测53项属motion接入前；motion另补genuine行为RED→GREEN，当前runtime10项。完整最新选定回归由独立端执行，不将旧53项伪称最后快照全测。Finish新共享测试首轮直接GREEN，未声称所有分支均先行为RED；native端的Finish缺失已被真实RED捕获。
+- 本轮是tween完整运行切片，不是Task4全部：Canvas transition语法／presentation-only不跑用户view的属性过渡、同属性双驱动冲突未实现；当前动态表达式每帧重算owner view／Canvas，成本O(owner hosts＋Canvas图元)，未测性能。Task4整项RED/GREEN/Verify仍不勾选。高DPI／hardware／辅助技术／参考视频缺口保留，未提交发布。
+
+Tween静态视觉限定独立通过（96DPI/software，含同EXE等待600ms的稳定初始态）；原瞬态全窗透色图保留，具体Canvas Alpha根因推断已撤回。功能独立验收尚在进行，Task4未完成。证据见统一索引。
+
+### Tween组件与调度：限定验收通过（2026-10-28，Task4未完）
+- 基线final2独立Linux17套147项、Windows原生22＋Host24＝46项及真实UI21项；修复后最新final587文件delta独立4套26项、精确新EXE native2项、系统mouse_event UI21项全部通过，无必需项失败。不是最终快照全仓／17套重跑。
+- except别名遮蔽已RED→GREEN修复；Finish每generation最多尝试一次，失败交付turn的托管回滚／异常传播与不重放外部副作用契约已文档化并独立实测。
+- 当前示例 examples/canvas_animation.nim 的新EXE及静态图独立通过（96DPI/software/full）；全部587文件验收前后hash一致。唯一证据索引canvas-input-next-integration.md，最终报告animation-tween-independent-delta.md、animation-tween-independent-visual-final.md。
+- Task4仍未完成：Canvas transition语法／presentation-only属性过渡／同属性双驱动冲突未接；高DPI/GPU/辅助技术、实验室、性能及视频对齐缺口保持。保留主线继续位置，不提交／发布。
+
+本轮收尾：Windows VM已正常ACPI关机，容器exited/PID0；所有验收子Agent进程终止，证据与历史保留。下一步Canvas transition接线，Task4未完成、无提交发布。
+
+### 2026-10-28 Canvas transition／presentation 接线（自测通过，待独立验收）
+
+- 新增 `examples/canvas_transition.nim`：显式software/full，中文目标A/B、中途重定向、替换图元；位置／半径／颜色／标量360°旋转。纯属性帧不执行用户view，静态计数由目标事件更新。
+- `transition:` 白名单、稳定身份、初始直接显示、accepted目标重定向、无入口动画、Some颜色插值、reduced直接切换；presentation及anchor复用现有Instance/PreparedMapPatch/Host gate，不另建commit协议。tween和不同过渡属性共用同一普通帧事务。
+- 宏检查显式tween及词法别名同属性冲突，运行时拒绝共享采样帧持续改变的隐式过渡目标；不承诺任意Nim全局/跨组件静态污点分析。保持普通数值helper与局部/循环遮蔽。
+- 自测：Linux18套126项（first592快照）；final仅Windows夹具时钟1文件差异。final592真Windows新transition2＋既有animation2＋Canvas20=24项；真实系统mouse_event示例19项，software/96DPI/non-elevated Session1。5张实际PNG保存待独立视觉检查；静态图不证明时间/FPS。
+- 首个Native第二case漏观察intermediate，其他断言通过；计时起点从构建前改为pump前后重跑通过，保留失败，不认定为产品RED或唯一根因。API/编译/无效模板fixture不冒充行为RED。
+- 证据统一索引仍是 `~/.local/state/agent-artifacts/leaf/2026-10-26-graphics-api-design/implementation/canvas-input-next-integration.md`。目前Task4整项仍不勾选；独立验收、高DPI/hardware/辅助技术、实验室与性能未完成。无提交发布。
+
+### 2026-10-28 Canvas transition 切片独立验收通过（Task4整项仍保留验证门）
+
+- 最终592文件的11路径增量由功能验收profile `magpie/group/deepseek-flash-4.1`（run 0eb18d3c-4875-44fa-8b47-eb6192533bcf）独立实跑18套Linux126项、新EXE原生24项和系统mouse_event UI19项；全部通过，无P0/P1，源码前后592/592一致。另两项有限探针验证宏定向拒绝及不透明连续双驱动提交前回滚。
+- 独立视觉profile `cliproxy/gemini-3.8-flash-high` high（run 9e14cf82-1bda-4024-a529-df55e40e66d5）实际读取5张PNG，中文／布局／图元／resize静态通过。报告“真机”一词仅指实际Windows VM截图，不是物理硬件；静态中间位置不证明插值连续性、交互、时序或FPS。
+- 原会话核6改＋5新增量、原始日志126 OK/24 native exit0/UI19 checks、Guest592清单与新EXE hashes、5张来源图片一致性；未重跑已完成矩阵。聚合hash拼接口径已补入canvas-transition-delta.json，不同公式不构成源码差异；manifestTag=null由逐文件清单覆盖，不伪称字段有效。
+- 5条非阻断P2已裁决保留：捕获双驱动拒绝后继续pump可重复错误（需修正／pause／close）；别名检查保守；预算保守；同handle归一化冗余（计数是真调用次数，不是唯一host）；原生墙钟观察有抖动风险。前3项已公开说明，不为minor改冻结产品反复重建验收。
+- 当前示例 `examples/canvas_transition.nim`；统一证据索引不变，报告和parent-evidence已落盘。仅本切片Windows96/software通过；Task4/阶段3全部完成、高DPI/GPU/辅助技术、实验室及性能仍不能宣称通过。下一主线实验室/性能，不提交／发布。
+- 收尾：保存完整证据后确认Guest无Leaf进程／任务、无其他RDP/web客户端，正常ACPI关机，VM exited/PID0/non-OOM；QEMU容器namespace退出核实。两审查runner精确PID已不存在、active async0，历史保留。只移除本轮已确认的临时文件／审查私有目录；共享SDK／Nim缓存／磁盘／Guest历史及未知旧archive保留。收尾后592源码hash与HEAD/main不变、diff检查通过，无提交发布。
+
+### 2026-10-28 图形实验室功能切片：已实现、自测，待独立验收
+
+- 新入口 `examples/graphics_lab/main.nim`，说明 `examples/graphics_lab/README.md`。完整播放／暂停／定位／单步、参数、键盘和交互圆点；3类固定seed场景与100/1000/10000档位。共享scene/frameAt与DSL的真实命令一致；sealed路径可用 `path: geometry:` 复用，不混路径命令或fillRule。
+- 两个行为RED已修复：微小负percent归一化underflow误接受；默认属性场景运动裁剪（减小场景半径／位移，非Canvas bug）。降低初始窗口高度适配实际1280×800 VM。API缺失／编译接线失败不算行为RED。
+- final598文件、8源码路径增量；Linux20项通过；final原生Lab1测试覆盖9种负载实际EndDraw与资源归零，示例实跑系统mouse_event/SendKeys27项及5图。既有原生24在first精确EXE实跑通过（相应模块未变），不称final全量重建。仅96DPI/software/full。
+- `nimble` 不在环境，原task body `scripts/test.nim` 有界540秒运行：88套结束，迁移分支89th开始后超时，raw629 OK/0FAILED；不是全仓通过，根因未定。已核精确runner／分支fixture进程终止，不安装依赖、不修迁移或无限重跑。final只重验受影响20项。
+- 统一证据索引仍为canvas-input-next-integration.md；正式producer、冻结Release测量／报告和Task5整体验收未完成。无FPS／GPU主张、未提交发布。现准备独立功能及语义视觉验收。
+
+### 图形实验室功能切片：限定独立验收通过（2026-10-28）
+
+- `examples/graphics_lab/main.nim` 支持参数、时间轴、单步、键盘、可点击／拖动／transition圆点及3种固定seed负载×100/1000/10000档。Linux独立7套54项、实际系统mouse_event/SendKeys UI27项、5张Windows VM PNG静态视觉通过；软件渲染/96DPI，不等于物理输入或FPS证明。
+- 独立原生final Lab1（含9负载真实EndDraw和资源归零）＋first未变compatibility22另计；旧transition最小化测试出现同EXE两失败/一通过，未刷绿掩盖。已用受控首采样延迟证实观察夹具假阴性，改为实际中间帧／观察hidden边界驱动；新3用例独立两次通过，禁用minimize负控2项按预期失败。P1已关闭，不改产品scheduler；不称同一final全套26重建/重跑。
+- 以证据目录`graphics-lab-accepted-input.json`的“final598 base＋单fixture overlay”为接受输入，597文件未变；composite598 aggregate `18b8950af2b126177a34e24cbab7df1ed129e5fcc23e0c9211228e1fad5c1d52`。原manifest/ZIP/失败不覆盖；统一索引仍canvas-input-next-integration.md，父核验graphics-lab-parent-evidence.json。未跟踪源码保留，不提交发布。
+- P2：左右键±5%不是按钮1/120步长（README已明示）；scale2显式溢出无自动测试；近endpoint/极慢Guest的native观察仍有范围限制。原“delta aggregate不匹配”撤回，8路径与598路径集合混淆已复算更正。视觉只接受静态布局/中文/位置与图元，不接受精确源颜色／世界坐标／资源退役等静态图推断。
+- 全仓入口仍540秒超时未完成，不将629 raw OK当全仓通过。Task4/5整项、正式performance producer、JSON/CSV、Release5s预热/30s采样/3独立进程及跨环境比较仍开放；高DPI/hardware/辅助技术/video缺口保留。下一切片是正式性能采集，不以本功能实验室宣称性能基线完成。
+- 收尾：本轮VM已正常ACPI关机并核实exited/PID0/non-OOM；三个子runner实际PID已退出，主会话／共享协调进程和历史保留。必要证据保存后仅清理17个已验证任务所有权、无占用的临时根；SDK、共享缓存和VM磁盘不动。
+
+### 2026-10-28 正式 Canvas CPU侧基线（限定独立验收通过）
+- 无HUD Release ORC producer／采集及验证工具已落盘，使用同一Scene／State／BackendSession。源码609与实际EXE／工具链内容hash绑定，协议和重现步骤见benchmarks/CANVAS_PERFORMANCE.md。
+- 完整九负载×三process，各5s预热／30s采样，27个actual exit0、无超时；44,522次操作，独立615项断言与27份CSV字节重建、11正／负控通过，主控--require-formal及diff／源hash核验通过。Linux组合59种、final default Native20＋instrumented1种，不将重复cycles或旧UI冒充新的测试种类。
+- 三次process p95中位数：10k static9.45ms、properties26.74ms、geometry28.10ms。后两者CPU侧wall超16.67ms；GPU/显示FPS未知，interval受OS tick量化，无10k稳定60FPS或跨版本改善结论。tracked native计数回归不等于全部缓存归零／长期无泄漏。
+- Task4/5整体、全仓历史540s timeout、高DPI/hardware/AT/video仍开放，无提交/推送/发布。当前首份正式性能数据已保存；资源收尾另记主证据索引。
+
+### 2026-10-29 Canvas 优化限定独立验收与代码交付准备
+
+- 已实现轻量有限／Native FLT_MAX校验及scene-local immutable SDK path驻留，未改producer负载／协议／事务门。独立Linux43、默认无测量Canvas23、插桩1通过；同入口静态视觉未见明显损坏。CI测试入口overlay另行独立2项通过，不混入609测量源码。
+- 最终同会话properties-10000配对6进程：process p95中位27.9546→21.5598ms（−22.88%）。第二正式9×3进程全部exit0，独立615项／27 CSV通过，主控验证器validated-baseline；10k动态新p95为22.4941／19.9402ms，仍超16.667ms，不是60FPS／GPU时间证明。
+- 九组全部差值和离散保留于benchmarks/CANVAS_PERFORMANCE.md。低负载／staticFrame跨会话升高未隔离归因，不把并发负载作唯一解释，也不把三次spread当普适门限。阶段p95不作成本占比；Native归零不等于heap/RSS/GDI/USER或长期无泄漏。
+- 测量609源码b40bb8f…、EXE04b390bf…、原工具链a93f3369…；Git交付含独立接受的CI选择器overlay与后续事实文档，不伪称整棵Git树就是旧609。原始档案不覆写。主控裁决纠正审查中FLT_MAX“缝隙”误报（常量二进制恰为扩展FLT_MAX）及旧zero语义误述。
+- 用户已明确授权“提交代码”：当前main整合本任务源／测试／文档→push核实GitHub远端→跟进同SHA四个自动workflow及必需产物，完成后按安全条件核本任务空间归档。当前尚未push／核CI，不把交付准备写成成功；实际SHA／Actions／资源及空间结果保存在统一canvas-input-next-integration.md。
+- Task4/5整项及硬件／高DPI／AT／video继续未完成；历史全仓540s timeout不改称当前通过，新的整仓CI结论以本次SHA为准。此前“无提交授权／性能未实现”等段落均属所标历史批次，不覆盖本条最新状态。

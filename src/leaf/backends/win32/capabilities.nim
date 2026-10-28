@@ -12,7 +12,7 @@ import ../../[core, styles, backend, native_theme]
 proc win32Capabilities*(theme = systemTheme): BackendCapabilities =
   result = BackendCapabilities(
     kinds: {column, row, text, button, input, checkbox, toggle, progress, tag,
-      separator, spinner, virtualList, navigation},
+      separator, spinner, virtualList, navigation, canvasHost},
     layouts: {lfGap, lfPadding, lfWidth, lfHeight, lfFlexGrow, lfAlign,
       lfJustify, lfOverflow},
     alignments: {alignStart, alignEnd, alignCenter, alignStretch},

@@ -6,7 +6,7 @@
 ## before the backend confirms a batch, and never executes platform lifecycle.
 import std/[tables, sets, math, strutils, json, options]
 import ./[core, styles, backend, reconcile,managed_runtime,host_session,native_host_adapter,
-  native_navigation, navigation_protocol]
+  native_navigation, navigation_protocol, canvas_input]
 
 const
   MaxPendingRowRequests* = 256
@@ -73,6 +73,7 @@ type
     lastQueued: uint64
     lastProcessed: uint64
     queue: seq[EventEnvelope]
+    canvasClaimed: int
     navigation: NativeNavigation
     when compileOption("threads"): uiThreadId: int
     entities: Table[NodeHandle, MountedEntity]
@@ -533,6 +534,10 @@ proc dispose*(session: BackendSession) =
   session.viewports.clear()
   session.disposed = true
 
+proc canvasFacts(values: openArray[EventEnvelope]): int =
+  for value in values:
+    if value.event.kind == EventKind.canvasInput: inc result
+
 proc enqueue*(session: BackendSession, envelope: EventEnvelope): bool =
   ## Queue a genuine user event. Backend setter notifications are suppressed at
   ## the source. Wrong session/generation, dead handles, future revisions and
@@ -549,6 +554,20 @@ proc enqueue*(session: BackendSession, envelope: EventEnvelope): bool =
   if session.backend.bindingValid != nil and
       not session.backend.bindingValid(envelope.handle, envelope.bindingGeneration):
     return false
+  if envelope.event.kind == EventKind.canvasInput and session.queue.len > 0:
+    let previous = session.queue[^1]
+    if previous.event.kind == EventKind.canvasInput and previous.handle == envelope.handle and
+        previous.bindingGeneration == envelope.bindingGeneration:
+      let merged = mergeCanvasMovesInternal(previous.event.canvas, envelope.event.canvas)
+      if merged.isSome:
+        var latest = envelope
+        latest.event.canvas = merged.get
+        session.queue[^1] = latest
+        session.lastQueued = envelope.sequence
+        return true
+  if envelope.event.kind == EventKind.canvasInput and
+      session.canvasClaimed + canvasFacts(session.queue) >= MaxCanvasPointerEvents:
+    fail("Canvas native input queue capacity exceeded")
   session.lastQueued = envelope.sequence
   session.queue.add(envelope)
   true
@@ -688,9 +707,17 @@ proc process(session: BackendSession, envelope: EventEnvelope) =
   except UiError:
     return
   let node = mounted.node
-  if not node.disabled and node.handler(envelope.event.kind) != nil:
+  var event = envelope.event
+  if event.kind == EventKind.canvasInput and event.canvas.needsProjectionInternal:
+    if session.backend.projectCanvasInput == nil: fail("Canvas native input projector is unavailable")
+    let projected = session.backend.projectCanvasInput(envelope.handle, event.canvas.sourceInternal)
+    if projected.isNone:
+      session.settleEvent(envelope)
+      return
+    event.canvas = projected.get
+  if not node.disabled and node.handler(event.kind) != nil:
     try:
-      discard session.runtime.dispatch(entity.nodeId, envelope.event)
+      discard session.runtime.dispatch(entity.nodeId, event)
     except CatchableError:
       discard
   session.settleEvent(envelope)
@@ -708,6 +735,7 @@ proc drainEvents*(session: BackendSession, canDeliver: DeliveryGate = nil) =
   try:
     let pending = session.queue
     session.queue = @[]
+    session.canvasClaimed = canvasFacts(pending)
     for index, envelope in pending:
       if not session.eventEligible: return
       if canDeliver != nil and not canDeliver():
@@ -715,9 +743,13 @@ proc drainEvents*(session: BackendSession, canDeliver: DeliveryGate = nil) =
         # still invalidates the batch through eventEligible above.
         session.queue = pending[index .. ^1] & session.queue
         return
-      session.process(envelope)
-      session.pruneNavigation()
+      try:
+        session.process(envelope)
+        session.pruneNavigation()
+      finally:
+        if envelope.event.kind == EventKind.canvasInput: dec session.canvasClaimed
   finally:
+    session.canvasClaimed = 0
     session.draining = false
 
 proc applyRowViewport(session: BackendSession, entity: MountedEntity,

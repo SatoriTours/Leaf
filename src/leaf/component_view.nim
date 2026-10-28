@@ -7,6 +7,8 @@ template appendDescription(children:var seq[UiDescription],content:untyped)=
 proc expandDescription(node:NimNode):NimNode=
   if node.kind notin {nnkCall,nnkCommand} or node.len<2 or node[^1].kind!=nnkStmtList:
     return newCall(bindSym"toDescription",node)
+  if node[0].eqIdent("canvas"):
+    return newCall(bindSym"toDescription",node)
   let call=newCall(node[0])
   call.copyLineInfo(node)
   for i in 1..<node.len-1:call.add(node[i])

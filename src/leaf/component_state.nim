@@ -33,6 +33,8 @@ type
     clear:proc(base:CellBase) {.closure,raises:[].}
   StateCell[T] = ref object of CellBase
     accepted:T
+    managed, hasDraft:bool
+    draft:T
     updates:seq[StateUpdate[T]]
     equal:StateEqual[T]
     snapshot:StateSnapshot[T]
@@ -133,11 +135,18 @@ proc allocateState*[T](store:StateStore,owner:uint64,initial:T,
   inc store.nextId
   let cell=StateCell[T](id:id,owner:owner,generation:id,equal:equal,snapshot:snapshot)
   cell.accepted=cell.copied(initial)
-  cell.clear=proc(base:CellBase) {.raises:[].}=StateCell[T](base).updates.setLen(0)
+  cell.clear=proc(base:CellBase) {.raises:[].}=
+    let cell=StateCell[T](base)
+    cell.updates.setLen(0)
+    cell.hasDraft=false
+    cell.draft=default(T)
   cell.stage=proc(base:CellBase):CandidateBase=
     let cell=StateCell[T](base)
     let updates=move(cell.updates)
     var candidate=StateCandidate[T](owner:cell.owner,cell:cell,value:cell.copied(cell.accepted))
+    if cell.managed and cell.hasDraft:
+      candidate.value=move(cell.draft)
+      cell.hasDraft=false
     for update in updates:candidate.value=update(candidate.value)
     candidate.changed=cell.equal==nil or not cell.equal(cell.copied(cell.accepted),cell.copied(candidate.value))
     candidate.publish=proc(base:CandidateBase) {.raises:[].}=
@@ -190,9 +199,32 @@ proc markQueued[T](state:State[T])=
   if state.id notin state.store.queuedSet:
     state.store.queuedSet.incl(state.id)
     state.store.queued.add(state.id)
+proc allocateManagedState*[T](store:StateStore,owner:uint64,initial:T,
+    equal:StateEqual[T]=nil,snapshot:StateSnapshot[T]=nil):State[T]=
+  ## Managed variables share ordinary State ownership and commit publication.
+  result=store.allocateState(owner,initial,equal,snapshot)
+  result.cellFor().managed=true
+
+proc readDraft*[T](state:State[T]):T=
+  ## Only ordinary UI code sees its current batch's writes; render uses attempts.
+  let cell=state.writable()
+  if cell==nil:fail("disposed managed variable")
+  if not cell.managed:fail("draft access requires a managed variable")
+  cell.copied(if cell.hasDraft:cell.draft else:cell.accepted)
+
+proc writeDraft*[T](state:State[T],value:T)=
+  let cell=state.writable()
+  if cell==nil:fail("disposed managed variable")
+  if not cell.managed:fail("draft access requires a managed variable")
+  let copied=cell.copied(value)
+  state.markQueued()
+  cell.draft=copied
+  cell.hasDraft=true
+
 proc queueSet*[T](state:State[T],value:T):StateWriteResult=
   let cell=state.writable()
   if cell==nil:return StateWriteResult.disposed
+  if cell.managed:fail("legacy set cannot write a managed variable")
   let captured=cell.copied(value)
   let policy=cell.snapshot
   cell.updates.add(proc(previous:T):T=
@@ -202,6 +234,7 @@ proc queueSet*[T](state:State[T],value:T):StateWriteResult=
 proc queueUpdate*[T](state:State[T],f:proc(previous:T):T {.closure.}):StateWriteResult=
   let cell=state.writable()
   if cell==nil:return StateWriteResult.disposed
+  if cell.managed:fail("legacy update cannot write a managed variable")
   if f==nil:fail("missing State updater")
   cell.updates.add(f)
   state.markQueued()

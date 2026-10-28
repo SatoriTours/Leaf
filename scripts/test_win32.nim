@@ -16,6 +16,12 @@ when defined(windows):
     defer: process.close()
     process.waitForExit()
 
+proc windowsSuiteDefinesInternal*(filename: string): seq[string] =
+  ## Keep optional Canvas CPU instrumentation out of ordinary native suites.
+  result = @["-d:leafProtocolProbes"]
+  if filename == "test_canvas_performance.nim":
+    result.add("-d:leafCanvasMeasure")
+
 proc main(): int =
   when defined(windows):
     let root = currentSourcePath().parentDir.parentDir
@@ -40,7 +46,8 @@ proc main(): int =
       let name = test.extractFilename.changeFileExt(ExeExt)
       let output = outputDirectory / name
       let cache = compilerPath(outputDirectory / (name & "-cache"))
-      var args = @["c", "--threads:on", "--forceBuild:on", "-d:leafProtocolProbes",
+      var args = @["c", "--threads:on", "--forceBuild:on"] &
+        windowsSuiteDefinesInternal(test.extractFilename) & @[
         "--skipParentCfg:on", "--skipUserCfg:on",
         "--nimcache:" & cache.replace("$", "$$"),
         "--passC:-I" & quoteShell(compilerPath(directory)),

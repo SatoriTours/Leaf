@@ -221,15 +221,28 @@ const
   SM_CXBORDER* = 5'i32
   SM_CYBORDER* = 6'i32
   SM_CYHSCROLL* = 3'i32
+type MouseTracking* {.importc: "TRACKMOUSEEVENT", header: "<windows.h>", bycopy.} = object
+  cbSize*, dwFlags*: DWORD
+  hwndTrack*: HWND
+  dwHoverTime*: DWORD
 {.push stdcall, dynlib: "user32.dll", importc, raises: [].}
 proc SetWindowTextW*(window: HWND, text: WidePtr): BOOL
 proc InvalidateRect*(window: HWND, rect: pointer, erase: BOOL): BOOL
 proc EnableWindow*(window: HWND, enabled: BOOL): BOOL
 proc IsWindowEnabled*(window: HWND): BOOL
 proc IsWindowVisible*(window: HWND): BOOL
+proc IsIconic*(window: HWND): BOOL
 proc GetParent*(window: HWND): HWND
 proc GetScrollInfo*(window: HWND, bar: int32, info: ptr SCROLLINFO): BOOL
 proc SetScrollInfo*(window: HWND, bar: int32, info: ptr SCROLLINFO, redraw: BOOL): int32
+proc ClientToScreen*(window: HWND, point: ptr POINT): BOOL
+proc TrackMouseEvent*(event: ptr MouseTracking): BOOL
+proc GetKeyState*(key: int32): int16
+proc GetCursorPos*(point: ptr POINT): BOOL
+proc DrawFocusRect*(dc: HDC, rect: ptr RECT): BOOL
+proc GetCapture*(): HWND
+proc SetCapture*(window: HWND): HWND
+proc ReleaseCapture*(): BOOL
 proc GetFocus*(): HWND
 proc SetFocus*(window: HWND): HWND
 proc GetDlgCtrlID*(window: HWND): int32

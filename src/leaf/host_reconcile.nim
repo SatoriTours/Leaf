@@ -1,7 +1,7 @@
 ## Backend-neutral host identity and candidate overlays. Snapshot planning is a
 ## compatibility path; delta planning never materializes the accepted tree.
 import std/[tables, sets, options, unicode]
-import ./[core, backend, host_protocol, commit_map]
+import ./[core, backend, host_protocol, commit_map, graphics]
 export host_protocol
 
 type
@@ -93,6 +93,7 @@ proc bytes(record: HostRecord): int =
   result=sizeof(HostRecord)+record.nodeId.len+record.props.text.len+
     record.props.placeholder.len
   if record.row.isSome:result+=record.row.get.itemKey.len
+  if record.props.canvas.isSome:result+=record.props.canvas.get.ownedBytes
 proc validate*(r: HostReconciler,c: HostCandidate) =
   if c == nil or c.owner != r.owner: fail("foreign host candidate")
   if c.status != hostCandidateSealed: fail("host candidate is not sealed")
@@ -118,11 +119,16 @@ proc planDelta*(r: HostReconciler, changes: HostChanges, nextRevision: uint64): 
   for record in changes.upserts:
     if record.handle == NoHandle or record.handle in removed or c.edits.hasKey(record.handle):
       fail("duplicate host edit")
+    let canvasReason = canvasMetadataReason(record.kind, record.props.canvas)
+    if canvasReason.len != 0: fail(canvasReason)
     if (record.kind == NodeKind.navigation) != record.props.navigation.isSome:
       fail("navigation metadata must belong to a navigation host")
     if record.props.navigation.isSome:
       let reason = record.props.navigation.get.invalidReason(MaxNodes)
       if reason.len != 0: fail(reason)
+    if record.kind != NodeKind.canvasHost and
+        (record.props.eventMask and EventCanvasInputMask) != 0:
+      fail("Canvas input handler requires a Canvas host")
     if record.kind != NodeKind.navigation and
         (record.props.eventMask and EventBackMask) != 0:
       fail("back handler requires a navigation host")

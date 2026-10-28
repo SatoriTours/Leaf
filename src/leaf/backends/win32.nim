@@ -1,7 +1,7 @@
 ## Public native Windows launch boundary; application closures stay in Nim.
 when not defined(windows): {.error: "leafNativeWin32 requires Windows".}
 import std/options
-import ../[core, styles, backend_session, native_layout, ui_thread, diagnostics]
+import ../[core, styles, backend_session, native_layout, ui_thread, diagnostics, animation]
 import ./win32/[api, host, backend]
 export host.Win32RunError
 
@@ -9,8 +9,15 @@ proc runNative*(app: Application, diagnostics: Diagnostics = nil,
                 cleanupOwner: ptr Runtime = nil): int =
   if cleanupOwner != nil and cleanupOwner[] != nil:
     fail("Win32 cleanup owner slot must be empty")
+  # Read-only platform policy resolution before any autoplay owner is mounted.
+  var configured=app
+  if app.motionPolicy==MotionPolicy.system:
+    var enabled:BOOL
+    if SystemParametersInfoW(0x1042'u32,0,addr enabled,0)==0:
+      fail("SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION) failed")
+    configured=configured.withMotionPolicy(if enabled==0:MotionPolicy.reduced else:MotionPolicy.full)
   let activity = newUiScopeActivity()
-  let guarded = guardUiApplication(app, proc(): uint64 = uint64(GetCurrentThreadId()), activity)
+  let guarded = guardUiApplication(configured, proc(): uint64 = uint64(GetCurrentThreadId()), activity)
   var runtime: Runtime
   try:
     runtime = newRuntime(guarded, validator = proc(snapshot: Snapshot) = validateProps(snapshot.root),
@@ -26,7 +33,7 @@ proc runNative*(app: Application, diagnostics: Diagnostics = nil,
     window = createHost(app.title, DipSize(width: float64(app.width), height: float64(app.height)),
       theme = app.nativeTheme)
     window.setStartupScope(proc(): bool = activity.busy or runtime.installingUpdate or runtime.installingHook)
-    let native = newWin32Backend(window)
+    let native = newWin32Backend(window, renderer = app.canvasRenderer)
     let session = native.attachWin32Backend(runtime)
     native.bindSession(session)
     window.bindSession(session, proc(): bool = activity.busy)

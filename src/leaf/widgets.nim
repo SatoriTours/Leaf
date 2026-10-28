@@ -1,7 +1,11 @@
 ## Typed Nim constructors for native controls and layout descriptions.
 import std/[math, tables]
 import ./core
+import ./graphics
 export core
+
+proc canvasNodeInternal*(frame: CanvasFrame, key = "", styles: Styles = default(Styles)): Node =
+  ui(NodeKind.canvasHost, key = key, styles = styles, canvas = some(frame))
 
 proc column*(children: seq[Node], key = "", styles: Styles = default(Styles)): Node =
   ui(NodeKind.column, key = key, children = children, styles = styles)

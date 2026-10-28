@@ -19,6 +19,7 @@ proc component(node: NimNode): NimNode =
   if node.kind notin {nnkCall, nnkCommand} or node.len < 2 or
       node[^1].kind != nnkStmtList:
     return node
+  if node[0].eqIdent("canvas"): return node
   let call = newCall(node[0])
   call.copyLineInfo(node)
   for i in 1..<node.len - 1: call.add(node[i])

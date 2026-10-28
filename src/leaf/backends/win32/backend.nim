@@ -1,9 +1,9 @@
 ## Owned Unicode controls, incremental updates and native event capture.
 import std/[tables, options, algorithm, widestrs, sets]
 import ../../[core, styles, backend, backend_session, native_layout, native_edit, native_measure_cache,
-  height_index, native_list_layout, native_theme]
+  height_index, native_list_layout, native_theme, graphics, canvas_input]
 import ./[api, calls, host, capabilities, measure, control_ids, list_host, row_pool,
-  resource_owner, navigation_input, skin]
+  resource_owner, navigation_input, skin, canvas]
 
 type
   Win32Diagnostics* = object
@@ -29,12 +29,18 @@ type
       ## owner back-pointer for the irreversible NCDESTROY completion
     setterDepth: int
     binding: uint64
+    canvas: CanvasSurface
+    pointerMachine: CanvasPointerMachine
+    pointerOwner: Option[CanvasBindingId]
+    lastPointer: PointerSample
+    trackingMouse: bool
     acceptedNavigation: Option[HostNavigationProps]
     backEnabled: bool
     capture: proc(control: NativeControl, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.closure.}
   Win32Backend* = ref object
     host: Win32Host
     theme: NativeTheme
+    renderer: CanvasRenderer
     calls: Win32Calls
     owner: DWORD
     lease: HostBackendLease
@@ -96,6 +102,7 @@ type
     sessionId, generation, sequence, revision, nextBinding: uint64
     stats: Win32Diagnostics
     pendingError: ref CatchableError
+    pendingInputFailure: bool
 
 var controlsByCookie {.threadvar.}: Table[uint, NativeControl]
 var listsByCookie {.threadvar.}: Table[uint, Win32ListHost]
@@ -128,6 +135,9 @@ proc reportError(win: Win32Backend) =
   if win.pendingError != nil:
     let error = win.pendingError
     win.pendingError = nil
+    if win.pendingInputFailure and win.session != nil:
+      win.pendingInputFailure = false
+      win.session.faultBackendEffects(win.protocol, "Canvas input failed: " & error.msg)
     raise error
 
 proc finalizeControl(control: NativeControl) {.raises: [].} =
@@ -182,6 +192,10 @@ proc controlFor(win: Win32Backend, token: uint64): NativeControl =
 proc unbindControl(win: Win32Backend, token: uint64) =
   ## Last step, after every access to the control: non-failing table delete.
   if token == 0: return
+  let control = win.bindings.getOrDefault(token)
+  if control != nil and control.canvas != nil:
+    control.canvas.releaseCanvasInternal()
+    control.canvas = nil
   win.bindings.del(token)
 
 proc retireOrphanBinding(win: Win32Backend, token: uint64) =
@@ -750,9 +764,149 @@ proc syncFocusedListTraversal(win: Win32Backend, focus: HWND) =
       if win.calls.setWindowData(list.window, -20, int(desired)) == 0 and lastError() != 0:
         nativeError("SetWindowLongPtrW viewport focus traversal")
 
+proc releasePointerCapture(control: NativeControl) =
+  if GetCapture() == control.window and ReleaseCapture() == 0:
+    nativeError("Canvas ReleaseCapture")
+
+proc queuePointer(win: Win32Backend, control: NativeControl, event: CanvasPointerEvent): bool =
+  var listened = false
+  for token in event.sourceRouteInternal:
+    if (token.mask and (1'u32 shl ord(event.kind))) != 0: listened = true
+  if not listened: return false
+  inc win.sequence
+  result = win.session.enqueue(EventEnvelope(session: win.sessionId,
+    mountGeneration: win.generation, bindingGeneration: control.binding,
+    handle: control.handle, sequence: win.sequence, observedRevision: win.revision,
+    source: sourceUser, event: Event(kind: EventKind.canvasInput,
+      canvas: nativeCanvasDeliveryInternal(event))))
+  discard PostMessageW(win.host.windowHandle, WM_HOST_TICK, 0, 0)
+
+proc flushPointer(win: Win32Backend, control: NativeControl) =
+  for event in control.pointerMachine.drain():
+    discard win.queuePointer(control, event)
+  if not control.pointerMachine.captureWanted:
+    control.pointerOwner = none(CanvasBindingId)
+    control.releasePointerCapture()
+
+proc currentPointerTarget(control: NativeControl): Option[PointerTarget] =
+  if control.pointerOwner.isNone: return none(PointerTarget)
+  let id = control.pointerOwner.get
+  if not control.canvas.inputBindingAlive(id):
+    control.pointerMachine.retire(id)
+    return none(PointerTarget)
+  result = control.canvas.inputTarget(id)
+  if result.isNone or result.get.parentFromCanvas.inverse.isNone or result.get.localFromCanvas.inverse.isNone:
+    control.pointerMachine.cancel(PointerCancelReason.nonInvertible)
+    result = none(PointerTarget)
+
+proc pointerModifiers(wp: WPARAM, mouse: bool): set[PointerModifier] =
+  if (mouse and (wp and 4) != 0) or (not mouse and GetKeyState(16) < 0): result.incl(PointerModifier.shift)
+  if (mouse and (wp and 8) != 0) or (not mouse and GetKeyState(17) < 0): result.incl(PointerModifier.control)
+  if GetKeyState(18) < 0: result.incl(PointerModifier.alt)
+  if GetKeyState(91) < 0 or GetKeyState(92) < 0: result.incl(PointerModifier.meta)
+
+proc rawPointer(win: Win32Backend, control: NativeControl, target: Option[PointerTarget],
+    kind: PointerEventKind, sample: PointerSample, wheelDelta = vec2(0, 0),
+    keyCode = 0'u32, keyRepeat = false): bool =
+  if target.isSome:
+    result = win.queuePointer(control, rawCanvasEventInternal(target.get, kind, sample,
+      wheelDelta, keyCode, keyRepeat))
+
+proc capturePointer(win: Win32Backend, control: NativeControl, message: UINT,
+    wp: WPARAM, lp: LPARAM): bool =
+  if control.pointerMachine == nil or not control.armed or win.session == nil or
+      win.session.closing or win.session.disposed or win.session.faulted: return false
+  case message
+  of 0x0200'u32, 0x0201'u32, 0x0202'u32, 0x0203'u32, 0x0204'u32, 0x0205'u32,
+      0x0206'u32, 0x0207'u32, 0x0208'u32, 0x0209'u32:
+    var point = POINT(x: int32(cast[int16](lp and 0xffff)), y: int32(cast[int16]((lp shr 16) and 0xffff)))
+    if ClientToScreen(control.window, addr point) == 0: nativeError("Canvas ClientToScreen")
+    var sample = PointerSample(pointerId: 1, button: PointerButton.primary,
+      screenPosition: vec2(float64(point.x), float64(point.y)), modifiers: pointerModifiers(wp, true))
+    if (wp and 1) != 0: sample.buttons.incl(PointerButton.primary)
+    if (wp and 2) != 0: sample.buttons.incl(PointerButton.secondary)
+    if (wp and 16) != 0: sample.buttons.incl(PointerButton.middle)
+    if message in [0x0204'u32, 0x0205'u32, 0x0206'u32]: sample.button = PointerButton.secondary
+    elif message in [0x0207'u32, 0x0208'u32, 0x0209'u32]: sample.button = PointerButton.middle
+    control.lastPointer = sample
+    let hit = control.canvas.pointerAtScreen(sample.screenPosition)
+    # STATIC uses CS_DBLCLKS: the second down arrives as *_DBLCLK.
+    if message in [0x0201'u32, 0x0203'u32, 0x0204'u32, 0x0206'u32, 0x0207'u32, 0x0209'u32]:
+      if control.canvas.acceptedFrame.focusable:
+        discard SetFocus(control.window)
+      discard win.rawPointer(control, hit, PointerEventKind.pointerDown, sample)
+      if hit.isSome:
+        control.pointerMachine.press(sample, hit.get)
+        if control.pointerMachine.captureWanted:
+          control.pointerOwner = some(hit.get.id)
+          discard SetCapture(control.window)
+          if GetCapture() != control.window: fail("Canvas mouse capture failed")
+    elif message == 0x0200:
+      if not control.trackingMouse:
+        var tracking = MouseTracking(cbSize: DWORD(sizeof(MouseTracking)), dwFlags: 2, hwndTrack: control.window)
+        if TrackMouseEvent(addr tracking) == 0: nativeError("Canvas TrackMouseEvent")
+        control.trackingMouse = true
+      let captured = control.currentPointerTarget()
+      discard win.rawPointer(control, (if captured.isSome: captured else: hit), PointerEventKind.pointerMove, sample)
+      control.pointerMachine.move(sample, captured)
+      control.pointerMachine.updateHover(sample, control.canvas.hoverAtScreen(sample.screenPosition))
+    else:
+      let captured = control.currentPointerTarget()
+      discard win.rawPointer(control, (if captured.isSome: captured else: hit), PointerEventKind.pointerUp, sample)
+      control.pointerMachine.release(sample, captured,
+        (if hit.isSome: some(hit.get.id) else: none(CanvasBindingId)))
+    win.flushPointer(control)
+    true
+  of WM_MOUSEWHEEL, 0x020E'u32:
+    var sample = PointerSample(pointerId: 1, screenPosition: vec2(
+      float64(cast[int16](lp and 0xffff)), float64(cast[int16]((lp shr 16) and 0xffff))),
+      modifiers: pointerModifiers(wp, true))
+    if (wp and 1) != 0: sample.buttons.incl(PointerButton.primary)
+    if (wp and 2) != 0: sample.buttons.incl(PointerButton.secondary)
+    if (wp and 16) != 0: sample.buttons.incl(PointerButton.middle)
+    let amount = float64(cast[int16]((wp shr 16) and 0xffff))/120
+    let delta = if message == WM_MOUSEWHEEL: vec2(0, amount) else: vec2(amount, 0)
+    win.rawPointer(control, control.canvas.pointerAtScreen(sample.screenPosition), PointerEventKind.wheel, sample, delta)
+  of WM_KEYDOWN, 0x0104'u32:
+    if wp == 9 or (message == 0x0104 and wp == 115): return false # Native Tab / Alt+F4.
+    if not control.canvas.acceptedFrame.focusable or GetFocus() != control.window: return false
+    var sample = PointerSample(modifiers: pointerModifiers(0, false))
+    var point: POINT
+    if GetCursorPos(addr point) == 0: nativeError("Canvas keyboard pointer position")
+    sample.screenPosition = vec2(float64(point.x), float64(point.y))
+    win.rawPointer(control, control.canvas.rootInputTarget(), PointerEventKind.keyDown, sample,
+      keyCode=uint32(wp), keyRepeat=(lp and (1 shl 30)) != 0)
+  of WM_GETDLGCODE:
+    if control.canvas.acceptedFrame.focusable: return false
+    false
+  of 0x02A3'u32: # WM_MOUSELEAVE
+    control.trackingMouse = false
+    control.pointerMachine.updateHover(control.lastPointer, [])
+    win.flushPointer(control)
+    true
+  of 0x0215'u32, 0x001F'u32, 0x0008'u32: # CAPTURECHANGED / CANCELMODE / KILLFOCUS
+    control.pointerMachine.cancel(if message == 0x0008: PointerCancelReason.focusLost else: PointerCancelReason.captureLost)
+    win.flushPointer(control)
+    false
+  else: false
+
 proc captureControl(win: Win32Backend, control: NativeControl, message: UINT,
                     wp: WPARAM, lp: LPARAM): LRESULT =
   try:
+    if control.canvas != nil:
+      if message in [0x0007'u32, 0x0008'u32]:
+        if InvalidateRect(control.window, nil, 0) == 0: nativeError("Canvas focus invalidation")
+      if message == WM_GETDLGCODE and control.canvas.acceptedFrame.focusable:
+        return DLGC_WANTARROWS # Never WANTALLKEYS: Tab belongs to USER32.
+      if win.capturePointer(control, message, wp, lp): return 0
+      if message == 0x0014: return 1 # WM_ERASEBKGND: Direct2D owns all pixels.
+      if message == 0x000F: # WM_PAINT: accepted cache only, never an app render.
+        let busy = win.depth != 0 or win.applying or win.restoring or
+          (win.session != nil and win.session.runtime.installingUpdate)
+        control.canvas.handlePaint(busy)
+        if control.canvas.needsRebuild:
+          discard PostMessageW(win.host.windowHandle, WM_HOST_TICK, 0, 0)
+        return 0
     if message == 0x0007: win.syncFocusedListTraversal(control.window) # WM_SETFOCUS
     elif message == 0x0008: win.syncFocusedListTraversal(cast[HWND](wp)) # WM_KILLFOCUS
     var paintReply: LRESULT
@@ -799,6 +953,12 @@ proc captureControl(win: Win32Backend, control: NativeControl, message: UINT,
       return
     return win.calls.defaultSubclass(control.window, message, wp, lp)
   except CatchableError as error:
+    if control.pointerMachine != nil:
+      win.pendingInputFailure = true
+      control.pointerMachine = nil
+      control.pointerOwner = none(CanvasBindingId)
+      if GetCapture() == control.window: discard ReleaseCapture()
+      discard PostMessageW(win.host.windowHandle, WM_HOST_TICK, 0, 0)
     win.markError(error)
     return 0
 
@@ -1074,6 +1234,9 @@ proc makeControl(win: Win32Backend, entity: MountedEntity): NativeControl =
     # WS_TABSTOP puts it in the native tab order so it can hold real keyboard
     # focus; without it the arrows below could never reach this window.
     style = style or WS_VSCROLL or WS_CLIPCHILDREN or WS_TABSTOP
+  of NodeKind.canvasHost:
+    style = style or 0x100'u32 # SS_NOTIFY: receive physical mouse input, not HTTRANSPARENT.
+    if entity.canvas.isSome and entity.canvas.get.focusable: style = style or WS_TABSTOP
   of NodeKind.text, NodeKind.tag: style = style or SS_NOPREFIX
   of NodeKind.button: className = "BUTTON"; style = style or WS_TABSTOP
   of NodeKind.input:
@@ -1087,7 +1250,6 @@ proc makeControl(win: Win32Backend, entity: MountedEntity): NativeControl =
   of NodeKind.progress: className = "msctls_progress32"
   of NodeKind.spinner: className = "msctls_progress32"; style = style or PBS_MARQUEE
   of NodeKind.separator: style = style or SS_ETCHEDHOR
-  else: fail("unsupported native control kind")
   var parent = win.host.windowHandle
   if entity.parent != NoHandle:
     if entity.parent in win.prepared: parent = win.prepared[entity.parent].window
@@ -1138,6 +1300,11 @@ proc makeControl(win: Win32Backend, entity: MountedEntity): NativeControl =
   if entity.kind == NodeKind.input and entity.props.control.resetToken.isSome:
     control.editor.acceptModel(entity.value, 0, entity.props.control.resetToken)
     control.editor.completeReset(entity.props.control.resetToken.get)
+  if entity.kind == NodeKind.canvasHost:
+    control.canvas = newCanvasSurface(control.window, win.renderer)
+    let dpi = GetDpiForWindow(control.window)
+    control.pointerMachine = newCanvasPointerMachine(vec2(
+      float64(GetSystemMetricsForDpi(68, dpi)), float64(GetSystemMetricsForDpi(69, dpi))))
   result = control
 
 proc properties(win: Win32Backend, control: NativeControl, entity: MountedEntity) =
@@ -1197,6 +1364,15 @@ proc properties(win: Win32Backend, control: NativeControl, entity: MountedEntity
     discard win.calls.send(control.window, PBM_SETPOS, WPARAM(int(entity.props.control.progress.get(0.0))), 0)
   of NodeKind.spinner: discard win.calls.send(control.window, PBM_SETMARQUEE, 1, 30)
   else: discard
+  if entity.kind == NodeKind.canvasHost:
+    let currentStyle = GetWindowLongW(control.window, -16)
+    let focusable = entity.canvas.get.focusable
+    let desiredStyle = if focusable: currentStyle or int32(WS_TABSTOP) else: currentStyle and not int32(WS_TABSTOP)
+    if currentStyle != desiredStyle:
+      setLastError(0)
+      if win.calls.setWindowData(control.window, -16, int(desiredStyle)) == 0 and lastError() != 0:
+        nativeError("Canvas focusability update")
+      if not focusable and GetFocus() == control.window: discard SetFocus(win.host.windowHandle)
   # Only after every real setter ran is the OS state the new entity's state.
   control.fresh = false
   control.entity = entity
@@ -1224,6 +1400,7 @@ proc measureControl*(win: Win32Backend, entity: MountedEntity, available: DipSiz
   inc win.stats.measures
   case entity.kind
   of NodeKind.column, NodeKind.row, NodeKind.navigation: result = DipSize()
+  of NodeKind.canvasHost: result = DipSize(width: available.width, height: 0.0)
   of NodeKind.virtualList:
     # A list is a block-level scrollable viewport, not a text leaf: it takes the
     # finite width offered by its parent (the same value `resolveChildWidth`
@@ -1566,6 +1743,13 @@ proc relayout*(win: Win32Backend, content: DipSize, dpi: int) =
         # end of relayout), so a later list failing accepts nothing.
         if listHandle notin win.pendingFrames: win.pendingFrames.add(listHandle)
 
+  for control in win.controls.values:
+    if control.canvas == nil: continue
+    try: discard control.canvas.present()
+    except UiError:
+      if not win.applying and not win.restoring and control.canvas.needsRebuild:
+        discard PostMessageW(win.host.windowHandle, WM_HOST_TICK, 0, 0)
+      else: raise
   if not win.applying and not win.restoring and not win.replaying:
     # Geometry-only pass: every list's candidate OS apply succeeded, so the
     # metadata publication may move the prepared frames now (no Runtime revision).
@@ -1573,6 +1757,18 @@ proc relayout*(win: Win32Backend, content: DipSize, dpi: int) =
   inc win.stats.layouts
   win.dirty = false
   win.listDirty = false
+
+proc prepareCanvases(win: Win32Backend) =
+  for handle, entity in win.candidate:
+    if entity.kind != NodeKind.canvasHost: continue
+    var control: NativeControl
+    if handle in win.prepared: control = win.prepared[handle]
+    else: control = win.controls.getOrDefault(handle)
+    if control == nil or control.canvas == nil: fail("Canvas owner is missing")
+    let reason = canvasMetadataReason(entity.kind, entity.canvas)
+    if reason.len != 0: fail(reason)
+    if control.canvas.acceptedFrame != entity.canvas.get:
+      control.canvas.prepareFrame(entity.canvas.get, inputSession=win.sessionId, inputMount=control.bindingToken)
 
 proc prepareModels(win: Win32Backend) =
   ## Prepare owned editor-model values for every entity this batch may accept.
@@ -1586,6 +1782,8 @@ proc prepareModels(win: Win32Backend) =
     win.preparedModels[handle] = prepareModelAccept(control.editor, entity.value)
 
 proc discardPrepared(win: Win32Backend) =
+  for control in win.controls.values:
+    if control.canvas != nil: control.canvas.discardPrepared()
   let first = win.releasePrepared()
   win.candidate.clear()
   win.preparedModels.clear()
@@ -1613,6 +1811,8 @@ proc validateNavigation(win: Win32Backend, batch: UpdateBatch) =
       if op.kind == opRemove: removed.incl(op.handle)
   var children: Table[NodeHandle, int]
   for entity in win.navigationCandidates(batch.isDelta, removed):
+    let canvasReason = canvasMetadataReason(entity.kind, entity.canvas)
+    if canvasReason.len != 0: fail(canvasReason)
     if (entity.kind == NodeKind.navigation) != entity.navigation.isSome or
         (entity.props.control.hasBack and entity.kind != NodeKind.navigation):
       fail("Win32 navigation metadata does not match its kind")
@@ -1653,7 +1853,7 @@ proc prepare(win: Win32Backend, batch: UpdateBatch) =
         if op.handle in win.current:fail("duplicate native handle")
         win.candidate[op.handle]=MountedEntity(handle:op.handle,parent:op.parent,
           index:op.index,nodeId:op.nodeId,kind:op.nodeKind,props:op.props,
-          list:op.list,row:op.row,navigation:op.navigation)
+          list:op.list,row:op.row,navigation:op.navigation,canvas:op.canvas)
       of opUpdate,opMove:
         if op.handle notin win.current:fail("unknown native handle")
         var entity=win.candidate.getOrDefault(op.handle,win.current.getOrDefault(op.handle))
@@ -1662,6 +1862,7 @@ proc prepare(win: Win32Backend, batch: UpdateBatch) =
           discard checkedWide(op.props.control.value.get(""))
           entity.props=op.props;entity.list=op.list;entity.row=op.row
           entity.navigation=op.navigation
+          entity.canvas=op.canvas
         else:
           entity.parent=op.parent;entity.index=op.index
           if op.row.isSome:entity.row=op.row
@@ -1686,6 +1887,7 @@ proc prepare(win: Win32Backend, batch: UpdateBatch) =
           reuse = win.attachParkedRow(op.handle)
           if not reuse: win.borrowGroup = nil
       if not reuse: discard win.makeControl(entity)
+    win.prepareCanvases()
     win.prepareModels()
     return
   win.candidate = win.current
@@ -1707,7 +1909,7 @@ proc prepare(win: Win32Backend, batch: UpdateBatch) =
       if op.kind == opCreate:
         let entity = MountedEntity(handle: op.handle, parent: op.parent, index: op.index,
           kind: op.nodeKind, nodeId: op.nodeId, props: op.props, list: op.list,
-          row: op.row, navigation: op.navigation)
+          row: op.row, navigation: op.navigation, canvas: op.canvas)
         win.candidate[op.handle] = entity
       else:
         win.candidate[op.handle].parent = op.parent
@@ -1720,6 +1922,7 @@ proc prepare(win: Win32Backend, batch: UpdateBatch) =
       win.candidate[op.handle].list = op.list
       win.candidate[op.handle].row = op.row
       win.candidate[op.handle].navigation = op.navigation
+      win.candidate[op.handle].canvas = op.canvas
     of opRemove:
       if op.handle notin win.candidate: fail("remove of absent native control")
       let old = win.candidate[op.handle]
@@ -1730,6 +1933,7 @@ proc prepare(win: Win32Backend, batch: UpdateBatch) =
   win.validateNavigation(batch)
   for op in batch.ops:
     if op.kind == opCreate: discard win.makeControl(win.candidate[op.handle])
+  win.prepareCanvases()
   win.prepareModels()
 proc apply(win: Win32Backend, batch: UpdateBatch) =
   win.checkLive()
@@ -1800,6 +2004,7 @@ proc accept(win: Win32Backend, entities: Table[NodeHandle, MountedEntity], revis
   for handle, control in win.controls.mpairs:
     if handle notin entities: continue
     let entity = entities.getOrDefault(handle)
+    if control.canvas != nil: control.canvas.acceptPrepared()
     control.acceptedNavigation = entity.navigation
     control.backEnabled = entity.props.control.hasBack and entity.props.control.enabled.get(true)
     var preparedAccept = false
@@ -1816,6 +2021,7 @@ proc acceptDelta(win:Win32Backend,delta:HostAcceptedDelta) {.raises:[].}=
   for entity in delta.upserts:
     let control=win.controls.getOrDefault(entity.handle)
     if control!=nil:
+      if control.canvas!=nil:control.canvas.acceptPrepared()
       control.acceptedNavigation=entity.navigation
       control.backEnabled=entity.props.control.hasBack and entity.props.control.enabled.get(true)
       var preparedAccept=false
@@ -1865,7 +2071,7 @@ proc restore(win: Win32Backend, entities: Table[NodeHandle, MountedEntity]) =
   for entity in ordered:
     batch.ops.add UpdateOp(kind: opCreate, handle: entity.handle, parent: entity.parent,
       index: entity.index, nodeKind: entity.kind, nodeId: entity.nodeId,
-      props: entity.props, list: entity.list, row: entity.row, navigation: entity.navigation)
+      props: entity.props, list: entity.list, row: entity.row, navigation: entity.navigation, canvas: entity.canvas)
   # Rollback replay entry: the pinned accepted frames are installed by relayout
   # *before* any measurement, so the rejected candidate is never re-measured and
   # no ordinary measure/layout pass runs first.
@@ -2015,12 +2221,22 @@ proc listGeometry(win: Win32Backend) =
   if win.listDirty or win.dirty:
     win.geometryRelayout()
 
+proc maintainPointers(win: Win32Backend) =
+  # Acceptance only publishes metadata. Reconcile OS capture at an ordinary
+  # boundary, even when the new geometry makes further mouse messages impossible.
+  for control in win.controls.values:
+    if control.canvas != nil and control.pointerMachine != nil and control.pointerOwner.isSome:
+      discard control.currentPointerTarget()
+      win.flushPointer(control)
+
 proc safeListTurn*(win: Win32Backend) =
   ## Production and test entry for one ordinary native list turn:
   ## genuine events -> this turn's viewport facts -> one bounded drain -> one
   ## bounded geometry pass. Never called from a window callback.
   win.checkLive()
   if win.session == nil: return
+  win.reportError()
+  win.maintainPointers()
   for list in win.lists.values: list.beginGeometryTurn()
   win.session.drainEvents()
   win.publishListFacts()
@@ -2031,6 +2247,11 @@ proc safeListTurn*(win: Win32Backend) =
 proc nativeTurn(win: Win32Backend) =
   win.checkLive()
   win.reportError()
+  for control in win.controls.values:
+    if control.canvas != nil:
+      control.canvas.recoverOnce()
+      control.canvas.maintain()
+  win.maintainPointers()
   for list in win.lists.values: list.beginGeometryTurn()
   if win.fontDirty:
     let fresh = newNativeMeasure(win.host.windowHandle, win.calls, win.theme != systemTheme)
@@ -2084,9 +2305,11 @@ proc dispose(win: Win32Backend) =
     fail("native binding store still owns " & $win.bindings.len &
       " controls after release")
   win.closed = true
-proc newWin32Backend*(host: Win32Host, calls: Win32Calls = systemWin32Calls()): Win32Backend =
+proc newWin32Backend*(host: Win32Host, calls: Win32Calls = systemWin32Calls(),
+    renderer = CanvasRenderer.hardware): Win32Backend =
   discard host.context
-  let win = Win32Backend(host: host, theme: host.nativeTheme, calls: calls, owner: GetCurrentThreadId())
+  let win = Win32Backend(host: host, theme: host.nativeTheme, renderer: renderer,
+    calls: calls, owner: GetCurrentThreadId())
   win.protocol = Backend(capabilities: win32Capabilities(win.theme))
   win.protocol.prepare = proc(batch: UpdateBatch) = win.prepare(batch)
   win.protocol.apply = proc(batch: UpdateBatch) = win.apply(batch)
@@ -2099,6 +2322,10 @@ proc newWin32Backend*(host: Win32Host, calls: Win32Calls = systemWin32Calls()): 
   win.protocol.bindingValid = proc(handle: NodeHandle, generation: uint64): bool =
     let control = win.controls.getOrDefault(handle)
     control != nil and control.window != nil and control.armed and control.binding == generation
+  win.protocol.projectCanvasInput = proc(handle: NodeHandle, source: CanvasPointerEvent): Option[CanvasDelivery] =
+    let control = win.controls.getOrDefault(handle)
+    if control == nil or control.canvas == nil: return none(CanvasDelivery)
+    control.canvas.projectInput(source)
   win.protocol.settle = proc(value: EventSettlement) = win.settle(value)
   win.lease = host.claimBackendOwner(HostBackendBridge(
     capture: proc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): bool {.raises: [].} =
@@ -2153,6 +2380,18 @@ proc attachWin32Backend*(win: Win32Backend, runtime: Runtime, mode: CapabilityMo
     proc(session: BackendSession) {.raises: [].} = win.session = session)
 
 when defined(leafProtocolProbes):
+  proc nativeWindowForTest*(win: Win32Backend, handle: NodeHandle): HWND =
+    win.checkLive()
+    let control = win.controls.getOrDefault(handle)
+    if control != nil and control.entry != nil and
+        win.controlFor(control.bindingToken) == control and
+        cast[HWND](control.entry.window) == control.window:
+      return control.window
+
+  proc canvasWindowForTest*(win: Win32Backend, handle: NodeHandle): HWND =
+    let control = win.controls.getOrDefault(handle)
+    if control != nil and control.canvas != nil: return win.nativeWindowForTest(handle)
+
   proc rowWindowForTest*(win: Win32Backend, rootHandle: NodeHandle): HWND =
     ## Test-only read-only observation: the live HWND of a current accepted row
     ## root. It resolves the handle through the existing control index and then
@@ -2292,6 +2531,27 @@ when defined(leafProtocolProbes):
      int32(win.rowMeasureCount - win.restoreMeasureBase),
      int32(win.restoreAppliedCount),
      int32(win.measureCacheHits - win.restoreCacheBase))
+
+proc canvasDiagnostics*(win: Win32Backend, handle: NodeHandle): CanvasDiagnostics =
+  win.checkOwner()
+  let control = win.controls.getOrDefault(handle)
+  if control == nil or control.canvas == nil: fail("Canvas handle is not live")
+  control.canvas.diagnostics
+
+when defined(leafCanvasMeasure):
+  proc canvasWindowForMeasurementInternal*(win: Win32Backend, handle: NodeHandle): HWND =
+    ## Instrumented standalone producer only; no API/clock cost in default builds.
+    win.checkOwner()
+    let control = win.controls.getOrDefault(handle)
+    if control == nil or control.canvas == nil: fail("Canvas handle is not live")
+    control.window
+
+  proc repaintCanvasForMeasurementInternal*(win: Win32Backend, handle: NodeHandle): bool =
+    ## Same accepted-frame paint path as WM_PAINT, never a second commit path.
+    win.checkOwner()
+    let control = win.controls.getOrDefault(handle)
+    if control == nil or control.canvas == nil: fail("Canvas handle is not live")
+    control.canvas.paintAccepted()
 
 proc diagnostics*(win: Win32Backend): Win32Diagnostics =
   win.checkOwner()

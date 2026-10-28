@@ -1,6 +1,6 @@
 import ../fixture_app
 import std/[unittest, tables, options, math, unicode]
-import leaf/[core, widgets, styles, backend, backend_session, native_layout]
+import leaf/[core, widgets, styles, backend, backend_session, native_layout, graphics]
 import leaf/backends/headless
 import leaf/backends/win32/capabilities
 
@@ -262,7 +262,7 @@ suite "Win32 capability boundary":
     let caps = win32Capabilities()
     check cfInputReset in caps.controls
     check caps.kinds == {column, row, text, button, input, checkbox, toggle,
-      progress, tag, separator, spinner, virtualList, navigation}
+      progress, tag, separator, spinner, virtualList, navigation, canvasHost}
     check NodeKind.virtualList in caps.kinds
     check NodeKind.navigation in caps.kinds
     check caps.layouts == {lfGap, lfPadding, lfWidth, lfHeight, lfFlexGrow,
@@ -275,6 +275,11 @@ suite "Win32 capability boundary":
     check caps.overflows == {overflowHidden}
     check caps.decorations == {}
     check caps.variants == {variantDefault}
+
+  test "Canvas capability accepts a typed frame without claiming extra decorations":
+    let frame = newCanvasBuilder().finishFrame()
+    let drawing = canvasNodeInternal(frame, styles = style({"height": "200", "width": "full"}))
+    check checkCapabilities(mount(drawing), win32Capabilities(), strict).len == 0
 
   test "win32 accepts native lists and rejects unsupported required layout values":
     let caps = win32Capabilities()

@@ -57,11 +57,12 @@ proc applyImpl(recording: RecordingBackend, batch: UpdateBatch) =
       case op.kind
       of opCreate:
         recording.entities[op.handle]=MountedEntity(handle:op.handle,parent:op.parent,index:op.index,
-          nodeId:op.nodeId,kind:op.nodeKind,props:op.props,list:op.list,row:op.row,navigation:op.navigation)
+          nodeId:op.nodeId,kind:op.nodeKind,props:op.props,list:op.list,row:op.row,navigation:op.navigation,canvas:op.canvas)
         inc recording.creates
       of opUpdate:
         recording.entities[op.handle].props=op.props
         recording.entities[op.handle].navigation=op.navigation
+        recording.entities[op.handle].canvas=op.canvas
         recording.entities[op.handle].list=op.list
         recording.entities[op.handle].row=op.row
         inc recording.updates
@@ -83,7 +84,7 @@ proc applyImpl(recording: RecordingBackend, batch: UpdateBatch) =
         raise newException(UiError, "duplicate entity handle")
       recording.entities[op.handle] = MountedEntity(handle: op.handle,
         parent: op.parent, nodeId: op.nodeId, kind: op.nodeKind,
-        props: op.props, list: op.list, row: op.row, index: op.index, navigation: op.navigation)
+        props: op.props, list: op.list, row: op.row, index: op.index, navigation: op.navigation, canvas: op.canvas)
       recording.children.mgetOrPut(op.parent, @[]).insert(op.handle, op.index)
       inc recording.creates
     of opUpdate:
@@ -91,6 +92,7 @@ proc applyImpl(recording: RecordingBackend, batch: UpdateBatch) =
         raise newException(UiError, "update handle is not mounted")
       recording.entities[op.handle].props = op.props
       recording.entities[op.handle].navigation = op.navigation
+      recording.entities[op.handle].canvas = op.canvas
       inc recording.updates
       if recording.onSetter != nil: recording.onSetter(op.handle)
     of opMove:

@@ -317,7 +317,7 @@ proc accessibilityFrom(node: Node, control: ControlProps): AccessibilityProps =
   of NodeKind.progress:
     if control.progress.isSome:
       result.value = some($control.progress.get)
-  of NodeKind.text:
+  of NodeKind.text, NodeKind.canvasHost:
     result.label = some(node.text)
   else:
     discard

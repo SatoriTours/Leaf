@@ -5,6 +5,10 @@ import ./diagnostics
 import ./task_contracts
 import ./navigation_protocol
 import ./native_theme
+import ./graphics
+import ./canvas_input
+import ./animation_binding
+from ./animation import MotionPolicy
 
 const
   MaxNodes* = 10_000
@@ -17,9 +21,9 @@ type
   UiError* = object of CatchableError
   NodeKind* = enum
     column, row, text, button, input, checkbox, toggle, progress, tag,
-    separator, spinner, virtualList, navigation
+    separator, spinner, virtualList, navigation, canvasHost
   EventKind* = enum
-    click, change, submit, back
+    click, change, submit, back, canvasInput
   CompositionPhase* = enum
     ## Additive native IME/editing phase metadata. `compositionNone` is the
     ## default so existing events and JSON are unchanged.
@@ -31,6 +35,7 @@ type
     checked*: bool
     composition*: CompositionPhase
     navigationRequestId*: uint64
+    canvas*: CanvasDelivery
   Callback* = proc(event: Event) {.closure.}
   Styles* = Table[string, string]
   Node* = ref object
@@ -41,6 +46,7 @@ type
     descendants: seq[Node]
     handlers: array[EventKind, Callback]
     navigation: Option[HostNavigationProps]
+    canvas: Option[CanvasFrame]
     source: ListSource
   RowBuilder* = proc(index: int): Node {.closure.}
   ListSource* = ref object
@@ -67,6 +73,8 @@ type
     title*: string
     width*, height*: int
     nativeTheme*: NativeTheme
+    motionPolicy*:MotionPolicy
+    canvasRenderer*: CanvasRenderer
     executionScope*: ExecutionScope
     driverFactory: proc(owner:Runtime):RuntimeDriver {.closure.}
   RuntimeDriver* = ref object of RootObj
@@ -125,6 +133,11 @@ proc withNativeTheme*(app: Application, theme: NativeTheme): Application =
   result = app
   result.nativeTheme = theme
 
+proc withMotionPolicy*(app:Application,policy:MotionPolicy):Application=
+  result=app
+  result.motionPolicy=policy
+proc reducedMotionInternal*(runtime:Runtime):bool=runtime.app.motionPolicy==MotionPolicy.reduced
+
 proc runtimeIdentity*(runtime:Runtime):uint64=runtime.executionId
 proc executionRuntimeIdentity*():uint64=executingRuntimeId
 
@@ -139,6 +152,8 @@ method publish*(driver:RuntimeDriver) {.base,raises:[].}=discard
 method finishCommit*(driver:RuntimeDriver) {.base,raises:[].}=discard
 method validateCommit*(driver:RuntimeDriver) {.base.}=discard
 method reject*(driver:RuntimeDriver) {.base,raises:[].}=discard
+method animationPumpPendingDriverInternal*(driver:RuntimeDriver):bool {.base.}=false
+method pumpAnimationsDriverInternal*(driver:RuntimeDriver,monotonicMs:float64,visible:bool):AnimationPumpReport {.base.}=default(AnimationPumpReport)
 method taskPumpPendingDriverInternal*(driver:RuntimeDriver):bool {.base.}=false
 method pumpDeferred*(driver:RuntimeDriver):TaskPumpReport {.base.}=
   newTaskPumpReportInternal(0,0,0,0,false)
@@ -152,6 +167,9 @@ method retireDeferred*(driver:RuntimeDriver) {.base,raises:[].}=discard
 method closeDeferred*(driver:RuntimeDriver) {.base.}=discard
 method deferredRetiredInternal*(driver:RuntimeDriver):bool {.base.}=false
 proc runtimeDriver*(runtime:Runtime):RuntimeDriver=runtime.driver
+proc withCanvasRenderer*(app: Application, renderer: CanvasRenderer): Application =
+  result = app
+  result.canvasRenderer = renderer
 proc applicationConfig*(runtime:Runtime):tuple[title:string,width,height:int]=
   (runtime.app.title,runtime.app.width,runtime.app.height)
 proc newDriverApplication*(title:string,width,height:int,
@@ -183,6 +201,11 @@ proc attributes*(node: Node): Styles = node.nodeAttributes
 proc children*(node: Node): seq[Node] = node.descendants
 proc listSource*(node: Node): ListSource = node.source
 proc navigationProps*(node: Node): Option[HostNavigationProps] = node.navigation
+proc canvasFrame*(node: Node): Option[CanvasFrame] = node.canvas
+proc withCanvasPresentationInternal*(node:Node,frame:CanvasFrame):Node=
+  result=Node()
+  result[]=node[]
+  result.canvas=some(frame)
 proc handler*(node: Node, event: EventKind): Callback = node.handlers[event]
 
 proc node*(mounted: MountedNode): Node = mounted.description
@@ -207,8 +230,9 @@ proc ui*(kind: NodeKind, key = "", text = "", placeholder = "",
          children: seq[Node] = @[], styles: Styles = default(Styles),
          attributes: Styles = default(Styles), disabled = false,
          onClick: Callback = nil, onChange: Callback = nil,
-         onSubmit: Callback = nil, onBack: Callback = nil,
-         navigation: Option[HostNavigationProps] = none(HostNavigationProps)): Node =
+         onSubmit: Callback = nil, onBack: Callback = nil, onCanvasInput: Callback = nil,
+         navigation: Option[HostNavigationProps] = none(HostNavigationProps),
+         canvas: Option[CanvasFrame] = none(CanvasFrame)): Node =
   for value in [key, text, placeholder]: validString(value)
   for pairs in [styles, attributes]:
     for name, value in pairs:
@@ -221,15 +245,19 @@ proc ui*(kind: NodeKind, key = "", text = "", placeholder = "",
     fail("change requires an input, checkbox or switch")
   if onSubmit != nil and kind != input: fail("submit requires an input")
   if onBack != nil and kind != NodeKind.navigation: fail("back requires a navigation host")
+  if onCanvasInput != nil and kind != NodeKind.canvasHost: fail("Canvas input requires a Canvas host")
   if (kind == NodeKind.navigation) != navigation.isSome:
     fail("navigation metadata must belong to a navigation host")
   if navigation.isSome:
     let reason = navigation.get.invalidReason(MaxNodes)
     if reason.len != 0: fail(reason)
+  if (kind == NodeKind.canvasHost) != canvas.isSome:
+    fail("Canvas frame must belong to a Canvas host")
+  if canvas.isSome and canvas.get.isNil: fail("Canvas frame is missing")
   Node(nodeKind: kind, nodeKey: key, label: text, hint: placeholder,
     descendants: children, nodeStyles: styles, nodeAttributes: attributes,
-    inactive: disabled, handlers: [onClick, onChange, onSubmit, onBack],
-    navigation: navigation)
+    inactive: disabled, handlers: [onClick, onChange, onSubmit, onBack, onCanvasInput],
+    navigation: navigation, canvas: canvas)
 
 proc virtualList*(key: string, keys: seq[string], builder: RowBuilder,
                   rowHeight = 0.0, estimatedHeight = 100.0, overscan = 2,
@@ -444,6 +472,19 @@ proc pumpTasks*(runtime:Runtime):TaskPumpReport=
     fail("cannot pump another executing Runtime")
   if runtime.driver==nil:return newTaskPumpReportInternal(0,0,0,0,false)
   runtime.driver.pumpDeferred()
+
+proc animationPumpPending*(runtime:Runtime):bool=
+  if runtime==nil:fail("missing Runtime")
+  runtime.driver!=nil and not runtime.runtimeClosedInternal and runtime.driver.animationPumpPendingDriverInternal()
+
+proc pumpAnimations*(runtime:Runtime,monotonicMs:float64,visible=true):AnimationPumpReport=
+  if runtime==nil:fail("missing Runtime")
+  if runtime.isCandidate or runtime.inUpdate or runtime.hookInstallation:
+    fail("animation pump requires an ordinary UI safe point")
+  if executionRuntimeIdentity()!=0 and executionRuntimeIdentity()!=runtime.executionId:
+    fail("cannot pump another executing Runtime")
+  if runtime.driver==nil or runtime.runtimeClosedInternal:return
+  runtime.driver.pumpAnimationsDriverInternal(monotonicMs,visible)
 
 proc taskPumpPending*(runtime:Runtime):bool=
   if runtime==nil:fail("missing Runtime")
@@ -858,6 +899,7 @@ proc kindName*(kind: NodeKind): string =
   case kind
   of toggle: "switch"
   of virtualList: "virtual_list"
+  of canvasHost: "canvas"
   else: $kind
 
 proc toJson*(root: MountedNode): JsonNode =

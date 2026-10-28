@@ -1,7 +1,7 @@
 ## Immutable host/component descriptions. Erased models remain in Nim; neither
 ## component definitions nor callbacks are part of the host wire protocol.
 import std/[options,tables,sets,macros,unicode]
-import ./[core,component_state,task_service]
+import ./[core,component_state,task_service,animation_binding]
 export component_state.State,component_state.StateWriteResult,
   component_state.StateEqual,component_state.StateSnapshot
 
@@ -20,6 +20,8 @@ type
     ownedBytes:int
     sealed:bool
     registration:OwnerRegistration
+    animations:seq[AnimationBinding]
+    reducedMotion:bool
   ComponentContext* = ref object
     store:StateStore
     attempt:StateAttempt
@@ -30,6 +32,10 @@ type
     initialize:proc(ctx:MountContext,props:P):M {.closure.}
     compute:proc(ctx:ComponentContext,props:P,model:M):UiDescription {.closure.}
     compare:StateEqual[P]
+  StateValueConfig*[T] = object
+    initial:T
+    equal:StateEqual[T]
+    snapshot:StateSnapshot[T]
   ComponentModel* = ref object of RootObj
   ModelBox[M] = ref object of ComponentModel
     value:M
@@ -85,9 +91,9 @@ proc children*(description:UiDescription):seq[UiDescription]=description.nested
 proc erased*(description:UiDescription):ErasedComponent=
   if description==nil or description.descriptionKind!=DescriptionKind.component:fail("description is not a component")
   description.instance
-proc newMountContext*(store:StateStore,owner:uint64,registration:OwnerRegistration=nil):MountContext=
+proc newMountContext*(store:StateStore,owner:uint64,registration:OwnerRegistration=nil,reducedMotion=false):MountContext=
   if registration!=nil:registration.requireOwnerRegistrationInternal(store,owner)
-  MountContext(store:store,owner:owner,registration:registration)
+  MountContext(store:store,owner:owner,registration:registration,reducedMotion:reducedMotion)
 proc lifecycleRegistrationInternal*(ctx:MountContext):OwnerRegistration=
   if ctx==nil:fail("missing mount context")
   if ctx.sealed:fail("mount context is already closed")
@@ -118,6 +124,15 @@ proc ownedDescriptionBytes*(ctx: MountContext): int =
   ## Read-only accumulated owner cost, usable after initialization returns.
   if ctx == nil: return 0
   ctx.ownedBytes
+proc reducedMotionInternal*(ctx:MountContext):bool=ctx!=nil and ctx.reducedMotion
+proc animationBindingsInternal*(ctx:MountContext):seq[AnimationBinding]=
+  if ctx!=nil:result=ctx.animations
+proc registerAnimationInternal*(ctx:MountContext,binding:AnimationBinding)=
+  ctx.accountOwnedDescriptionBytes(512)
+  if ctx.animations.len>=MaxNodes:fail("component exceeds animation binding limit")
+  ctx.animations.add(binding)
+proc ownsAnimationStateInternal*[T](ctx:MountContext,state:State[T]):bool=
+  ctx!=nil and stateOwnerMatches(state,ctx.store,ctx.owner)
 proc ownsState*[T](ctx: ComponentContext, state: State[T]): bool =
   ## Internal context/owner validation; excluded from the components aggregate.
   if ctx == nil: return false
@@ -144,6 +159,27 @@ proc outletSpec*(description: UiDescription): PageOutletSpec =
 proc state*[T](ctx:MountContext,initial:T,equal:StateEqual[T]=nil,snapshot:StateSnapshot[T]=nil):State[T]=
   if ctx==nil or ctx.store.phase!=StatePhase.initializing:fail("State slots require mount initialization")
   ctx.store.allocateState(ctx.owner,initial,equal,snapshot)
+proc stateValue*[T](initial:T,snapshot:StateSnapshot[T]=nil,
+    equal:StateEqual[T]=nil):StateValueConfig[T]=
+  ## Explicit ownership policy for managed variables with mutable values.
+  StateValueConfig[T](initial:initial,snapshot:snapshot,equal:equal)
+
+proc managedStateInternal*[T](ctx:MountContext,initial:T):State[T]=
+  if ctx==nil or ctx.store.phase!=StatePhase.initializing:
+    fail("managed variables require mount initialization")
+  when compiles(initial==initial):
+    ctx.store.allocateManagedState(ctx.owner,initial,equal=proc(a,b:T):bool=a==b)
+  else:
+    ctx.store.allocateManagedState(ctx.owner,initial)
+
+proc managedStateInternal*[T](ctx:MountContext,config:StateValueConfig[T]):State[T]=
+  if ctx==nil or ctx.store.phase!=StatePhase.initializing:
+    fail("managed variables require mount initialization")
+  ctx.store.allocateManagedState(ctx.owner,config.initial,config.equal,config.snapshot)
+
+proc componentInstanceInternal*[P,M](definition:ComponentDef[P,M],props:P,key="",
+    revision:Option[uint64]=none(uint64)):UiDescription
+
 proc set*[T](state:State[T],value:T):StateWriteResult {.discardable.}=state.queueSet(value)
 proc update*[T](state:State[T],f:proc(previous:T):T {.closure.}):StateWriteResult {.discardable.}=state.queueUpdate(f)
 proc read*[T](state:State[T]):T=state.readAccepted()
@@ -168,6 +204,10 @@ proc component*[P,M](definition:ComponentDef[P,M],props:P,key="",
     if definition.compare==nil or not (previous.props of PropsBox[P]):return false
     definition.compare(PropsBox[P](previous.props).value,props)
   UiDescription(descriptionKind:DescriptionKind.component,instance:erased,instanceKey:key)
+proc componentInstanceInternal*[P,M](definition:ComponentDef[P,M],props:P,key="",
+    revision:Option[uint64]=none(uint64)):UiDescription=
+  component(definition,props,key,revision)
+
 proc memo*[P,M](definition:ComponentDef[P,M],compare:StateEqual[P]):ComponentDef[P,M]=
   if compare==nil:fail("memo needs a safe props comparator")
   result=definition
