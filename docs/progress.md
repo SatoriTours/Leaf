@@ -662,3 +662,7 @@ Tween静态视觉限定独立通过（96DPI/software，含同EXE等待600ms的�
 - 测量609源码b40bb8f…、EXE04b390bf…、原工具链a93f3369…；Git交付含独立接受的CI选择器overlay与后续事实文档，不伪称整棵Git树就是旧609。原始档案不覆写。主控裁决纠正审查中FLT_MAX“缝隙”误报（常量二进制恰为扩展FLT_MAX）及旧zero语义误述。
 - 用户已明确授权“提交代码”：当前main整合本任务源／测试／文档→push核实GitHub远端→跟进同SHA四个自动workflow及必需产物，完成后按安全条件核本任务空间归档。当前尚未push／核CI，不把交付准备写成成功；实际SHA／Actions／资源及空间结果保存在统一canvas-input-next-integration.md。
 - Task4/5整项及硬件／高DPI／AT／video继续未完成；历史全仓540s timeout不改称当前通过，新的整仓CI结论以本次SHA为准。此前“无提交授权／性能未实现”等段落均属所标历史批次，不覆盖本条最新状态。
+
+### 2026-10-29 提交后CI兼容修复
+
+首批87路径已以1b56ba8推main。其Windows原生／SDK／数据库通过；共享runtime发现新增canvasInput被无条件序列化进旧Node快照，旧契约fields4!=3真实RED。仅改core.toJson一行、补Canvas无handler／注册handler两例，保留旧oracle；开发与独立4套31项全绿，独立旧核两处RED及back兼容2项通过。原正式b40/04b数据不变，修复另列交付overlay。Model macOS未分配runner／无steps、平台容量取消，不视为通过；不改runner／权限，跟进本修复SHA全部相关Actions。最终交付结果／空间及资源状态保存于统一证据索引，不将此准备段写成CI全绿。

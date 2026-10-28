@@ -1,9 +1,10 @@
-import std/[unittest, options, tables]
+import std/[unittest, options, tables, json]
 import leaf
 from leaf/canvas_input import PointerTarget, PointerSample, CanvasRouteTarget,
   newCanvasPointerMachine, press, release, drain, canvasDeliveryInternal, pointerTargetInternal
 import leaf/[backend, backend_session, host_reconcile, native_host_adapter]
 import leaf/backends/headless
+import ../fixture_app
 
 component InteractiveScene:
   state:
@@ -180,3 +181,32 @@ static:
           center: (id * 10, 0)
           radius: 3
           onClick: discard)
+
+
+suite "Canvas optional snapshot event metadata":
+  test "unhandled Canvas does not add an event key to legacy snapshot fields":
+    proc render(): Node =
+      canvas:
+        circle:
+          center: (20, 20)
+          radius: 10
+    let runtime = newRuntime(fixtureApplication(render, "plain Canvas", 100, 100))
+    defer: runtime.closeRuntime()
+    let events = runtime.snapshot.toJson()["root"]["events"]
+    check events.len == 3
+    check not events.hasKey("canvasInput")
+    check not events.hasKey("back")
+
+  test "registered Canvas input remains observable as an optional event key":
+    proc render(): Node =
+      canvas:
+        circle:
+          center: (20, 20)
+          radius: 10
+          onClick: discard
+    let runtime = newRuntime(fixtureApplication(render, "interactive Canvas", 100, 100))
+    defer: runtime.closeRuntime()
+    let events = runtime.snapshot.toJson()["root"]["events"]
+    check events.len == 4
+    check events["canvasInput"].getBool
+    check not events.hasKey("back")

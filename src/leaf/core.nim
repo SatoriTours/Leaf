@@ -915,7 +915,7 @@ proc toJson*(root: MountedNode): JsonNode =
   for key, value in n.nodeAttributes: attributes[key] = %value
   var events = newJObject()
   for event in EventKind:
-    if event != back or n.handlers[event] != nil:
+    if event in {click, change, submit} or n.handlers[event] != nil:
       events[$event] = %(n.handlers[event] != nil)
   result = %*{"kind": n.nodeKind.kindName, "id": root.identity,
     "text": n.label, "placeholder": n.hint, "disabled": n.inactive,

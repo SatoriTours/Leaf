@@ -204,3 +204,8 @@ index `980d23fc4e89228f18b78677d0f6253c0bd0af8c95bbeba56b5df4fcf4802f6c`。
 最终裁决 `implementation/canvas-opt-parent-evidence.json`，独立报告
 `canvas-opt-independent-functional.md`／`canvas-opt-independent-visual-recovery1.md`。
 硬件／高DPI／AT／视频与Task4/5整体仍开放；Git交付及本次SHA Actions结果另存统一证据索引。
+
+交付CI另发现并修复旧快照JSON兼容：`MountedNode.toJson`仅三旧事件字段恒在，
+`back/canvasInput`等可选字段有handler才输出；原旧快照断言不改。两路径修复经独立
+31项／旧核行为RED及back兼容检查通过。这是额外交付修复，不是b40/04b测量源码；
+producer无MountedNode/Snapshot JSON采样调用，绘制与事务代码未改，不重标或重收原27数据。
