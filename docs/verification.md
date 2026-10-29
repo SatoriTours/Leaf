@@ -1,8 +1,18 @@
 # 验证范围与历史记录
 
-> **当前范围（2026-10-25）：** Windows 默认使用系统原生控件；GPUI/Rust 桥接已移除，Linux/macOS GUI 暂缓。`c72ca99` 的 Windows 原生 beta 已交付，但整体迁移验收尚未完成。下面折叠区仅保留历史证据，**不是当前依赖安装说明，也不代表当前快照通过**。最新状态见[开发进度](progress.md)，命令见[源码开发](development.md)。
+> **当前范围（2026-10-29）：** Windows 优先的原生 beta，本轮变更前产品交付基线 `db34265`。完整当前状态统一维护在[开发进度总览](progress.md#当前总览2026-10-29)，命令见[源码开发](development.md)。下面保留历史证据，不把旧快照或旧渲染器当作当前输入。
+
+> **本次列表修复：** 用户已授权提交代码；上述历史基线的 CI 不覆盖此补丁，须按本次最终提交 SHA 单独核验。真实系统拖动、两侧部分行64项区域、返顶、开发者截图复验及39项受影响原生回归／example／专用clipping程序已通过；独立功能／代码复核通过（无Critical／Important），但验收模型不支持图像输入，独立视觉仍阻塞，不判整体验收通过。详见[当前进度](progress.md)。
 
 ## 当前证据与未关闭门
+
+- **历史基线自动化通过**：`db34265` 的共享 Runtime／Windows 原生、SDK、Model／数据库三平台四条工作流及 11 个 job 均 success，固定链接见进度总览。本次新 SHA 的全量结果另见交付证据；旧本地超时和失败记录保留，不代替任何新结果。
+- **限定验收通过**：Canvas 交互、tween／transition、实验室和正式 CPU 侧性能采集已有独立功能证据及适用的静态视觉证据；主要为 Windows VM／96 DPI／software，不是硬件、动态视觉或显示 FPS 证明。
+- **未完成**：cold USER/GDI 原预算失败仍未关闭；部分滚动视觉、完整 T2/T3/M4、真实中文 IME、物理混合 DPI／多屏、辅助技术、长期资源留存仍需证据。原生主题的开发自测不等于独立验收，见[主题状态](design/native-skin-status.md)。
+- **平台边界**：Linux/macOS GUI 尚未实现；Model／数据库三平台成功不代表三平台 GUI 可用。Android 既有设备证据不代表完整设备矩阵。
+- **复验原则**：同 SHA 已有完整自动化证据直接复用；新修复按受影响范围验证并绑定输入。缺证据为阻塞／未完成，确认缺陷为不通过，不以 CI 或滚动 beta 标签替代现场验收。
+
+## 2026-10-25 历史证据与当时未关闭门
 
 - **提交前基线 c72ca99 的 CI**：[40156213233](https://github.com/SatoriTours/Leaf/actions/runs/40156213233) 实际运行 145 套共享 Nim 测试和 18 套 Windows Host 测试成功；Model／数据库三平台工作流最终成功。Windows runner 只扫描 `test_*.nim`，不意味着 `probe_*.nim` 或全部现场矩阵均已执行。
 - **提交前基线发布 SDK**：[40156213210](https://github.com/SatoriTours/Leaf/actions/runs/40156213210) 的安装、重定位、Model CRUD／持久化及后台任务检查成功；对应 `beta.c72ca99dfad6`。安装说明见[这里](installation.md)。

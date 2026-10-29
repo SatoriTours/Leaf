@@ -61,7 +61,9 @@ nim c -d:release --out:target/nim/leaf-performance scripts/performance.nim
 target/nim/leaf-performance --suite runtime --output artifacts/performance
 ```
 
-运行时工作负载保留原始样本、校验与构建身份。`--suite native/all` 当前因原生测量 producer 未实现而明确失败，不再运行旧绘制基准。
+运行时工作负载保留原始样本、校验与构建身份。这个通用入口的 `--suite native/all` 仍因对应原生 producer 未实现而明确失败，不再运行旧绘制基准；不表示所有原生性能采集均未实现。
+
+**专用 Canvas 原生采集已实现**：`benchmarks/canvas_native.nim` 与 `scripts/canvas_performance.ps1` 使用真实 Windows、显式软件渲染和独立进程，产出 JSON／CSV。构建 define、正式 5s／30s／三重复方法、运行命令及原始基线见 [Canvas 性能说明](../benchmarks/CANVAS_PERFORMANCE.md)。该入口与上述通用 `--suite` 不互相替代；CPU 操作耗时不是 GPU 时间或显示 FPS。
 
 `benchmarks/components.nim` 仅测 managed Runtime 与 Host 批次准备；无原生 apply/layout/frame 数据。Nim 分配次数、存活堆、RSS 与 CPU 时间是不同指标，不能互相替代，也不能由 headless 微基准推断窗口 FPS。
 

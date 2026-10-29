@@ -1,5 +1,79 @@
 # 开发进度与下一步
 
+## 当前总览（2026-10-29）
+
+**阶段：Windows 优先的可用 beta；既有交付基线与本次修复分开记录，稳定版／完整平台验收未完成。**
+本节是当前状态入口；下方日期化记录保留各批次的输入与失败，其中“未实现／未提交／待 CI”等措辞只适用于当时快照，不覆盖本节。
+
+### 已交付基线与自动化
+
+- 本轮变更前已交付的 `main` 基线：`db34265ad8a4f2a29448ec20a9b4b9981fdb8f0a`。以下固定 CI 链接只覆盖该历史基线；本次列表修复按新提交 SHA 单独核验。
+- 同 SHA 四条自动工作流、11 个 job 全部 success：
+  [共享 Runtime／Windows 原生](https://github.com/SatoriTours/Leaf/actions/runs/40749790358)、
+  [Windows SDK](https://github.com/SatoriTours/Leaf/actions/runs/40749790396)、
+  [Model 三平台](https://github.com/SatoriTours/Leaf/actions/runs/40749790392)、
+  [数据库三平台](https://github.com/SatoriTours/Leaf/actions/runs/40749790397)。
+- 共享完整 `scripts/test.nim`、无界面示例及 Windows 官方测试入口已成功；不是只做代码生成。既有交付台账记录两份必需构建产物的 ZIP CRC／内层 SHA256 校验、SDK commit 与 Windows PE 核验。历史本地 540 秒超时仍保留，不改写为成功。
+- 自动化通过不代表全部 `probe_*.nim`、现场输入、视觉、资源预算或全平台矩阵通过。
+
+### 功能与验收边界
+
+| 模块 | 当前实现与证据 | 尚未关闭 |
+| --- | --- | --- |
+| 组件与状态 | 编译期 DSL、托管变量、候选接受／拒绝、生命周期、路由及后台任务 | 不据共享测试推导全部平台行为 |
+| Win32 应用链路 | 原生表单、虚拟列表、导航、SQLite Model／迁移、CRUD 脚手架、SDK 与打包 | 部分滚动视觉、完整 T2/T3/M4、cold USER/GDI 预算 |
+| 原生主题 | 浅／深／系统主题、表单／列表／生成应用；开发自测及真实入口通过 | 主题独立功能／视觉验收、整套 App 风格；ComboBox 无当前使用需求，后置，不作为既有功能收口要求；见[主题状态](design/native-skin-status.md) |
+| Canvas 交互 | 绘图、SDK 几何命中、点击／拖动、捕获／失焦取消、滚轮／键盘；限定独立功能与静态视觉通过 | 逐图元辅助技术、硬件 GPU／故障、高 DPI／跨屏 |
+| 动画与实验室 | tween、控制／Finish、presentation-only transition、隐藏／最小化暂停；三类固定 seed 负载 × 100／1000／10000 对象；限定独立验收通过 | Task4/5 整体验证矩阵、动态视觉／参考视频对齐 |
+| Canvas 性能采集 | Release、5 秒预热／30 秒采样／三独立进程，九负载共 27 进程；正式 JSON／CSV 基线与验证器已落地 | 显示 FPS／GPU 时间、长期留存与可推广回归阈值 |
+
+Canvas／动画／实验室的真实入口证据主要限定于 **Windows VM、非提权 Session 1、96 DPI、显式 software**。系统鼠标／键盘自动化不等于物理输入；静态截图不证明动画连续性或 FPS。主题与 Canvas 是不同验收范围，不能互相代替。
+
+性能：最终同会话 properties-10000 配对观察 CPU p95 中位数下降 **22.88%**；优化后正式 properties／geometry 的 10k CPU p95 分别 **22.4941／19.9402 ms**，仍超过 16.667 ms，不宣称 60 FPS。2026-10-29 新增 staticFrame-1000 同会话交替六进程，旧／新 p95 中位数 **2.6168／2.5680 ms**，未复现该负载此前跨会话的 +58.61%，但不能排除其他负载回归或据此归因宿主。已有 10k 原始样本的每进程阶段时间累计显示，draw／EndDraw 占总 CPU 侧时间约 **49–53%**；不是把分段 p95 相加。数据、方法及限制见[Canvas 性能](../benchmarks/CANVAS_PERFORMANCE.md)。
+
+### 未关闭门与下一步（按优先级）
+
+1. **资源根因与现场可靠性（阻塞／未完成）**：已复核旧冷预算 USER4>3／GDI10>2 失败和最终 cf58 诊断；26 次 DrawText 无观测增量，52 组字体／DC 恢复归还凭证正常，额外 GDI 在首个 GetDC 前已可见。不能归属隐式对象，也不能判为 OS 缓存或产品无漏；既有累计止损继续有效，不再拆总数／追加 API 变体。后续已获准用便携 GDIView 做一次对象级观察：归档 cf58 诊断副本仅加入三处有界停留，一次编译／目标进程，建窗后6个可枚举对象、关窗后进程存活时7个，多观察到一个 Region；All GDI 为9→10，但 USER5 与历史4不同，不能视作联合模式完全复现。首轮 GDB/MI 栈追踪因控制器设置／转义失败，目标建窗前中止；之后获准复用原 EXE 追加一个目标，已采到475条 API 入口／474条返回（含118次 CreateRectRgn 返回）的真实栈前缀，但有界读取超时、没有关窗快照，目标被中止。公开 API 地址与部分入口／返回采集可用，完整 Region／原失败关联仍未完成，不把前缀当根因或预算通过。Region 的创建栈／归属／应释放责任仍未证，不直接修产品；见[对象级观察与限制](windows-acceptance.md#2026-10-29-资源与现场门复核)。现有 VM 本轮用户语言为 en-US，样本 96 DPI；未取得真实中文 IME、物理混屏／键鼠、屏幕阅读器证据，不安装组件、改系统设置或提权凑验收。
+2. **性能归因（两轮有界诊断已完成）**：已从既有样本拆解 10k 成本，并完成 staticFrame-1000 同环境配对。继续尝试 draw 内同色 `SetColor` 去重，真实 Direct2D RED→GREEN 及候选 27 项受影响测试通过，但 properties-10000 六进程配对的 CPU p95 中位数仅观察到 20.1362→19.9160 ms（−1.09%），未建立可信的端到端收益，故保存候选补丁／夹具后撤回，产品／测试源码恢复 HEAD。两轮各六份 index 均经既有离线验证器校验；不把调用次数下降当性能改善。其余低负载／staticFrame-100／10000 的升高原因仍未定位；后续需更细的 draw／EndDraw 或帧／资源准备归因，不继续堆叠同类微优化，也不以 p95 倒数宣称 FPS。
+3. **先收口既有功能，不扩功能**：按用户最新要求，先处理已有链路的缺陷与未完成验收（包括列表部分滚动、主题关键路径），区分“未实现”和“已有实现但缺证据”，不重复开发已完成的 Canvas／动画／实验室。真实 IME、物理混屏／输入及辅助技术缺环境时单列阻塞，不写成通过。ComboBox 无当前使用需求；原生 watch 等能力补齐后置，不为填组件清单而开发。资源诊断仍受既有止损和目标次数边界约束，不能由本次优先级要求推定获准追加目标。
+
+平台：Windows x64 是当前桌面目标；Linux/macOS 仅共享 headless，GUI 尚未实现。Android 保留原生路径，但 API／架构／页大小设备矩阵仍未完整验收。原生 `--watch` 暂不支持；通用旧性能入口 `--suite native/all` 与已实现的专用 Canvas producer 是两条不同路径。
+
+本次提交包含文档整理、一个产品文件与两个列表回归文件，不能把上述历史基线的 CI 称作新补丁全量通过。冻结快照的受影响回归与完整链路限制见下节；独立功能／代码已通过，图像能力缺失仍阻塞独立视觉。用户已授权“提交代码”，不包含版本 Tag 或绕过验收门。
+
+证据索引：`~/.local/state/agent-artifacts/leaf/2026-10-26-graphics-api-design/implementation/canvas-input-next-integration.md`；
+最终交付台账 `canvas-opt-code-delivery.json`。当前验收门见[验证范围](verification.md)与[Windows 验收](windows-acceptance.md)。
+
+## 本次提交代码（2026-10-29）
+
+用户已授权在当前 `wks_ed305ebf72040848`／local checkout／`main` 提交本任务九个文件并推送已核实的 `SatoriTours/Leaf` 默认主分支；不新建分支／空间、不打版本 Tag。当前仅此一份 checkout，无其他本任务关联 worktree 待整合。产品／测试输入沿用独立复核的615文件冻结快照；文档仅补当前交付状态。全量自动化交给新 SHA 的四条 push 工作流：共享 Runtime／Windows 官方 runner（动态扫描当前25套）、Model 三平台、数据库三平台及 Windows SDK 构建／安装／重定位。已有同输入局部及系统交互证据直接复用，不重开 VM；CI 不替代尚缺的独立视觉。
+
+本轮最终提交、Actions、构建产物与空间保留原因统一记录在证据索引同目录 `partial-scroll/code-delivery.json`。该记录以最终 SHA 的实际结果为准；提交／CI 成功不关闭资源、10k性能、独立视觉及其他现场门，未满足归档条件时保留当前空间。
+
+## 列表滚动与裁剪修复（2026-10-29）：功能／代码独立通过，视觉验收阻塞
+
+- **原生鼠标入口**：`STATIC` 视口的滚动条命中先为 `HTTRANSPARENT=-1`；仅 `SS_NOTIFY` 的候选返回 `HTCLIENT=1`，已撤销。单独修正 `WM_NCHITTEST` 后 hit=7，但真实输入观察证明 `WM_NCLBUTTONDOWN` 到达后立即返回、无捕获／`WM_VSCROLL`。最终两个非客户区入口均委托 `DefWindowProcW`，保留唯一滚动意图处理；同一新增原生下箭头回归从 intent0／run1 变为 intent96／run0。
+- **真实部分滚动揭出的裁剪缺陷**：恢复系统拖动后，7px 恰落在整行边界；1px 才覆盖上下两侧 partial，并复现子树区域11项失败。负坐标半像素下单独 round(parent-local) 与 viewport region 相差1px；完全离屏区域的反序坐标又被 `CreateRectRgn` 正规化为非空。现采用先 round 共享 viewport 边界、再减父像素原点，并 clamp 区域两端；无输入的专用 `test_win32_list_clipping.nim` 先真实失败再通过，10个实际 HWND 区域及返顶验证通过。
+- **最终真实入口开发复验通过**：615文件冻结 aggregate `dc909af262215e35893ad9c6003aeb6e00e30bb7a6b97b9e505617e330acce83`，无观察器／无源码 overlay 构建 `examples/native_list/main.nim`。一次实测系统滑块动作后，上侧row23为−32..64、下侧row28为448..544（视口480）；全部64项实际区域检查通过。初始48项及返顶48项同样通过；原会话实际看过三张截图，顶部／底部裁剪及返顶布局符合这些状态。这是开发者视觉复验，**不是独立视觉验收**。
+- **受影响回归**：同一最终快照的实际 example（保存／关闭同库重开）及 keyboard3、navigation2、wheel3、failures15、lists16，六个程序全部 compile／run0；五套共39项，另有前述专用 clipping 程序。不是全量共享／Windows 测试或新 SHA CI。最终应用自然exit0，无deadline／强制终止／残留目标；关闭后SQLite只读检查零编辑记录、integrity_check=ok。
+- **独立功能／代码已通过，视觉仍阻塞**：旧验收端及一次恢复的输出截断失败保留；用户随后明确授权同模型新冷上下文。新独立端已逐项核615个本地及Guest源hash、实际EXE、原始RED→GREEN／六程序回归、关库DB，并不依赖 `passed` 字段重算48／64／48条区域，均相符；代码无Critical／Important，四条Minor建议记录于独立报告。读取PNG时明确返回模型不支持图像输入，未完成独立语义视觉检查；不以实现者看图／几何／图片hash代替。故本片整体仍为**阻塞**，并非产品失败。未换模型／预算／认证或启动新目标。资源预算、10k性能及其他现场门保持原状态；本轮提交／推送和全量 CI 另见交付证据，不改写这些门的结论。
+
+唯一连续证据索引同前；本片最新 `partial-scroll/final-parent-evidence.json`、`final-product.diff`、`independent-review-fresh.md`（事实澄清版v2）与 `review-runtime-failure.json`。最终现场原始标签 `quality-list-final-ui-1029`；输入、原生下箭头与裁剪的所有早期失败和拒绝候选均保留。产品变更仅 `backend.nim`，新增／修改两个列表回归文件。
+
+## 列表部分滚动续验（2026-10-29）：控制器失败，仍未完成
+
+本轮没有产品修复。当前 HEAD 的 614 文件输入经 Guest 逐 hash 校验，实际 `examples/native_list/main.nim` 编译成功；复用同一 EXE（SHA256 `1e2906c52531e256e2b8c2ff7edc85fa1c6177218fd525e9258ccda6257231d7`）共启动两次应用，均自然退出 0、无强制终止或遗留目标。
+
+- 首次控制脚本的无 BOM UTF-8 中文标签被 Windows PowerShell 5.1 按 ANSI 解析，控件查找失败；零目标 AST 检查确认错误码点。改为 ASCII 字符码构造，零目标校验通过。
+- 补验通过初始未滚动负控及初始原生 region 检查，随后控制器 `Get-FileHash` 读取应用仍打开的 SQLite 文件被共享锁拒绝。失败发生在任何滑块拖动之前，不能说明产品滚动失败，也不能算部分滚动通过。
+- 停止追加目标：本片共一次编译、两次应用启动，失败原文及脚本均保留。新方法的 `GetScrollBarInfo` 定位和实际拖动路径尚未现场验证；不能用初始截图或正常退出替代部分滚动／独立验收。全量自动化沿用原产品 HEAD 的 CI，不宣称本轮新全量通过。
+
+证据位于统一证据索引同目录的 `partial-scroll/summary.json`；原始运行标签为 `quality-list-partial-1029`、`quality-list-partial-reuse-1029`。后续先将数据库检查移出应用持有期或采用一致性查询，再决定是否继续现场验证；本片未授权无限重跑，资源追踪预算不变。
+
+## 历史执行记录
+
+以下按原日期保留，不作为当前总览。
+
 ## 2026-10-27 Canvas 真实交互切片（96 DPI／software 限定独立通过）
 
 已接通 Windows 鼠标点击／拖动、捕获及失焦取消、原始 Pointer／滚轮／键盘、修饰键、Tab／焦点提示与 Canvas 级可访问名称。业务回调仍在普通 UI turn，通过既有 Session FIFO 和托管状态事务交付；补充稳定身份、退休事件丢弃及溢出故障释放。最小可运行入口为 `examples/canvas_interaction.nim`，使用软件渲染；不宣称逐图元 UI Automation。

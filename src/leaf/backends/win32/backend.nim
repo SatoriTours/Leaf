@@ -293,6 +293,11 @@ proc listProc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM,
       of WM_COMMAND:
         if list.commands != nil and list.commands(window, wp, lp): return 0
         return DefSubclassProc(window, message, wp, lp)
+      of 0x0084'u32, 0x00A1'u32: # WM_NCHITTEST, WM_NCLBUTTONDOWN
+        # STATIC neither identifies its scrollbar nor starts native tracking.
+        # Delegate both non-client entry messages to USER32; it emits the same
+        # WM_VSCROLL intents handled below, without adding another authority.
+        return DefWindowProcW(window, message, wp, lp)
       of WM_VSCROLL:
         if list.handleScrollCode(int(wp and 0xFFFF)): return 0
         return DefSubclassProc(window, message, wp, lp)
@@ -1499,20 +1504,29 @@ proc applyRowBoxes(win: Win32Backend, boxes: seq[ListRowBox], dpi: int32) =
   for item in boxes:
     let control = win.controls.getOrDefault(item.handle)
     if control == nil: continue
-    let local = pixelEdges(item.local, int(dpi))
-    if win.calls.windowPos(control.window, nil, int32(local.left), int32(local.top),
-        int32(max(0, local.right - local.left)), int32(max(0, local.bottom - local.top)),
+    # Round shared viewport boundaries BEFORE subtracting the parent origin.
+    # Rounding a parent-local half pixel separately can move a negative row's
+    # child by one pixel relative to the viewport-space region below.
+    let bp = pixelEdges(item.rect, int(dpi))
+    let parent = pixelEdges(DipRect(x: item.rect.x - item.local.x,
+      y: item.rect.y - item.local.y), int(dpi))
+    let width = max(0, bp.right - bp.left)
+    let height = max(0, bp.bottom - bp.top)
+    if win.calls.windowPos(control.window, nil, int32(bp.left - parent.left), int32(bp.top - parent.top),
+        int32(width), int32(height),
         SWP_NOZORDER or SWP_NOACTIVATE) == 0:
       nativeError("SetWindowPos row subtree")
     # Region coordinates are window-local. Subtract the window's viewport
     # rect from the viewport clip, NOT its parent-local placement: descendants
     # of nonzero/partially scrolled rows otherwise receive displaced regions.
-    let bp = pixelEdges(item.rect, int(dpi))
     let cp = pixelEdges(item.clip, int(dpi))
-    let region = win.calls.rectRegion(int32(max(0, cp.left - bp.left)),
-      int32(max(0, cp.top - bp.top)),
-      int32(max(0, min(bp.right, cp.right) - bp.left)),
-      int32(max(0, min(bp.bottom, cp.bottom) - bp.top)))
+    let left = clamp(cp.left - bp.left, 0, width)
+    let top = clamp(cp.top - bp.top, 0, height)
+    let right = max(left, clamp(cp.right - bp.left, 0, width))
+    let bottom = max(top, clamp(cp.bottom - bp.top, 0, height))
+    # CreateRectRgn normalizes inverted edges: clamp BOTH ends so completely
+    # clipped overscan stays empty instead of becoming a positive rectangle.
+    let region = win.calls.rectRegion(int32(left), int32(top), int32(right), int32(bottom))
     if region == nil: nativeError("CreateRectRgn row subtree")
     win.pendingRegions.add(region)
     var primary: ref CatchableError

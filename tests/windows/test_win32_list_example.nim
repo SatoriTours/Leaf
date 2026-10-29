@@ -147,6 +147,34 @@ proc runWindow(storage: ListStore, reopen: bool) =
         var client: RECT
         require(GetClientRect(port, addr client) != 0 and client.bottom == 480,
           "actual 480px list viewport")
+        # Real STATIC hit testing must expose its native scrollbar, otherwise
+        # physical/system mouse input passes through the painted scroll strip.
+        # Message-only WM_VSCROLL tests cannot catch that missing input route.
+        var portScreen: RECT
+        require(GetWindowRect(port, addr portScreen) != 0, "viewport screen rect")
+        let hitX = portScreen.right - 8
+        let hitY = portScreen.top + 40
+        let screenPoint = LPARAM((uint32(hitX) and 0xFFFF'u32) or
+          ((uint32(hitY) and 0xFFFF'u32) shl 16))
+        let scrollHit = SendMessageW(port, 0x0084, 0, screenPoint) # WM_NCHITTEST
+        echo "scrollbar_hit=", scrollHit, " expected=7"
+        require(scrollHit == 7, "actual scrollbar hit test must return HTVSCROLL, not pass through")
+        # Exercise USER32's non-client down-arrow dispatch, not a fabricated
+        # WM_VSCROLL. Queue release first so native modal tracking is bounded
+        # without moving the physical cursor or requiring a held mouse button.
+        # This is a message-path regression, not real mouse/visual acceptance.
+        let arrowPoint = LPARAM((uint32(hitX) and 0xFFFF'u32) or
+          ((uint32(portScreen.bottom - 8) and 0xFFFF'u32) shl 16))
+        require(PostMessageW(port, 0x0202, 0, 0) != 0, "queue native tracking release")
+        discard SendMessageW(port, 0x00A1, 7, arrowPoint) # WM_NCLBUTTONDOWN / HTVSCROLL
+        let arrowIntent = win.listIntentForTest(list)
+        echo "native_arrow_intent=", arrowIntent.desiredOffset
+        require(arrowIntent.valid and arrowIntent.desiredOffset > 0,
+          "native scrollbar down-arrow must produce scroll intent")
+        require(GetCapture() != port, "queued release ends native scrollbar capture")
+        discard SendMessageW(port, WM_VSCROLL, SB_TOP, 0)
+        require(win.listIntentForTest(list).desiredOffset == 0,
+          "restore unscrolled fixture after native arrow dispatch")
         checkRows(0, 6)
         checkVisibleRows(0)
         edit = control(row, "EDIT", "", false)

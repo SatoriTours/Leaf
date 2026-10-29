@@ -110,7 +110,7 @@ JSON alone、一个 complete 字段或 controller 收集 exit0 都不能代替 p
 
 目前只有 Windows VM 的 software 环境；没有硬件 GPU 时间／present 观测、物理显示 FPS、
 150%／200%／mixed-DPI、设备丢失或 10,000 对象稳定 60FPS 证明。截图只验静态入口／布局。
-全仓回归的历史 540 秒 timeout 仍未闭合，不因本 producer 的局部通过而改称全仓成功。
+本地历史 540 秒 timeout 那次仍未完成，不因本 producer 的局部通过而改称成功；后续最终交付 SHA `db34265` 的完整共享／Windows 官方入口已在 CI 成功，固定链接见[当前总览](../docs/progress.md#当前总览2026-10-29)。CI 不覆盖全部现场门。
 
 
 ## 2026-10-28 首份正式基线（已限定独立验收）
@@ -209,3 +209,67 @@ index `980d23fc4e89228f18b78677d0f6253c0bd0af8c95bbeba56b5df4fcf4802f6c`。
 `back/canvasInput`等可选字段有handler才输出；原旧快照断言不改。两路径修复经独立
 31项／旧核行为RED及back兼容检查通过。这是额外交付修复，不是b40/04b测量源码；
 producer无MountedNode/Snapshot JSON采样调用，绘制与事务代码未改，不重标或重收原27数据。
+
+## 2026-10-29 定点复核：staticFrame-1000 同会话 A/B
+
+仅针对此前跨会话 +58.61% 的 staticFrame-1000，复用上文已经绑定源码的旧／新 EXE，
+不重新构建产品，不改负载、采集器、工具链或系统设置。Windows VM、非提权 Session 1、
+96 DPI、software，顺序 A1→B1→B2→A2→A3→B3；每次独立进程、5s 预热＋30s 采样。
+
+| CPU total process p95（ms） | 第1次 | 第2次 | 第3次 | 三 process 中位数 |
+| --- | ---: | ---: | ---: | ---: |
+| A：旧 EXE 35fe99d8… | 2.6168 | 2.5673 | 2.9264 | 2.6168 |
+| B：新 EXE 04b390bf… | 2.5680 | 2.8119 | 2.4771 | 2.5680 |
+
+六进程 actual exit0、无超时、PID 均不同，共 10,793 个样本；环境、工具链与时长一致。
+逐份使用既有离线验证器复算 raw summary、CSV 字节、报告 hash、环境、退出及 tracked
+native 清理，六份均 `validated-smoke`：这是因为每个 index 只有一个负载／一次独立运行，
+**不是**重新取得九负载×三重复的完整正式基线，也未合并／改写原始 index 来伪造 formal。
+
+新／旧中位数差 −1.86%，本轮没有复现该单负载此前跨会话的 +58.61%；三次观察的离散
+不能支持显著改善、等价／无回归保证或宿主负载因果归属。原跨会话升高如实保留，
+staticFrame-100／10000 和低计数动态场景尚未配对，不能外推。旧／新 EXE 是各自的归档
+测量快照，不冒称重建了最终 db34265 SDK 或做了新 UI 验收。
+
+另从既有优化后正式 properties／geometry-10000 的三进程原始样本计算：
+**每进程将各 stage 累计时间除以该进程 total_ms 累计时间**，draw／EndDraw 约占
+51.4–52.6%／49.0–49.2%，frame build/validate 约18.5–19.0%，native resource
+约16.9–17.5%；并非相加 p95 或从其推出同一帧百分比。优先调查绘制提交与帧／资源准备，
+不据此臆造 SDK／GPU 内部瓶颈，也不做未经 RED／回归的产品改动。
+
+tag `quality-static-paired-1029`，原始六份 index／JSON／CSV 与 Session／工具能力检查：
+`~/.local/share/leaf/windows-acceptance/shared/evidence/quality-static-paired-1029/`。
+离线核验与阶段统计：主证据索引同目录下 `quality-1029/static-paired-summary.json`、
+`quality-1029/existing-dynamic-attribution.json` 和 `quality-1029/verified-{A1,B1,B2,A2,A3,B3}.json`。
+此处只增加诊断证据；60FPS、hardware／高 DPI／AT、资源预算和长期留存门仍开放。
+
+## 2026-10-29 后续诊断：同色画刷状态去重候选已撤回
+
+原绘制循环对每个 fill／stroke 都调用 `SetColor`。尝试仅在一次 draw 内对连续相同
+RGBA 去重；不跨帧缓存、不改变换／裁剪或资源归属。独立测试程序包含真实 C bridge，
+观察并转发真实 Direct2D 画刷调用，同步读取实际窗口像素（仅颜色数值回归，不是语义视觉验收）。
+旧产品测试得到同色更新 3→预期1、fill／stroke 序列6→预期4 两项 RED，alpha 变化项通过；
+候选三项均 GREEN，覆盖首次绘制／repaint／target rebuild 与资源计数恢复，既有 Canvas
+23 项和 CPU 测量1项亦通过。测试进程均在非提权 Session1，未改变系统设置。
+
+随后同 VM／96 DPI／software、相同工具链及负载，按 A1→B1→B2→A2→A3→B3，
+每进程5s预热＋30s采样，定点测 properties-10000：
+
+| CPU total process p95（ms） | 第1次 | 第2次 | 第3次 | 三 process 中位数 |
+| --- | ---: | ---: | ---: | ---: |
+| A：本次未优化基线 | 18.7118 | 22.7794 | 20.1362 | 20.1362 |
+| B：draw-local RGBA 去重候选 | 19.4268 | 21.6692 | 19.9160 | 19.9160 |
+
+六进程共9,353个样本，actual exit0／无超时、进程身份不重复、tracked native 均归零；
+每份 index 经既有离线验证器重算 summary／CSV／hash／环境／清理，均 `validated-smoke`，
+不是新的全矩阵正式基线。−1.09%仅为观察值，离散且方向不一致，**未建立可信的端到端收益**；
+不据此声称统计显著、等价／无回归、宿主因果、GPU／显示 FPS 或 60FPS 达标。
+为避免引入无已证收益的状态逻辑和测试维护负担，候选及夹具已归档后从工作树撤回，
+产品／测试源码恢复 `db34265`，不再为此候选追加测量；这不等于证明所有画刷去重均无效。
+
+源码快照A／B aggregate `82698bb7…`／`0d96cd72…`，仅 C bridge 不同；EXE
+`2aeefcfd…`／`a33d7f15…`，工具链与上文相同。原始证据 tags：
+`quality-brush-red3-1029`、`quality-brush-green-1029`、`quality-brush-paired2-1029`。
+统一证据索引下 `quality-1029/brush-paired-summary.json`、`brush-candidate.patch`、
+`brush-verified-{A1,B1,B2,A2,A3,B3}.json` 保存结果、可回放补丁和离线校验；
+前置链接／打包／启动夹具失败亦保留，不计为产品 RED。该诊断结束时仅文档改动，未提交／推送；后续列表修复及代码提交状态见[当前进度](../docs/progress.md)。
