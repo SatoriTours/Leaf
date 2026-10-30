@@ -30,6 +30,9 @@ int32_t leaf_canvas_draw(LeafCanvasSurface *surface, LeafCanvasScene *scene, int
 int32_t leaf_canvas_rebuild(LeafCanvasSurface *surface);
 void leaf_canvas_validate_paint(LeafCanvasSurface *surface);
 void leaf_canvas_counts(LeafCanvasCounts *output);
+#ifdef LEAF_CANVAS_CYCLE_PROBE
+int32_t leaf_canvas_draw_cycle_counts(LeafCanvasSurface *surface, uint64_t *record, uint64_t *endDraw);
+#endif
 #ifdef __cplusplus
 }
 #endif

@@ -740,3 +740,36 @@ Tween静态视觉限定独立通过（96DPI/software，含同EXE等待600ms的�
 ### 2026-10-29 提交后CI兼容修复
 
 首批87路径已以1b56ba8推main。其Windows原生／SDK／数据库通过；共享runtime发现新增canvasInput被无条件序列化进旧Node快照，旧契约fields4!=3真实RED。仅改core.toJson一行、补Canvas无handler／注册handler两例，保留旧oracle；开发与独立4套31项全绿，独立旧核两处RED及back兼容2项通过。原正式b40/04b数据不变，修复另列交付overlay。Model macOS未分配runner／无steps、平台容量取消，不视为通过；不改runner／权限，跟进本修复SHA全部相关Actions。最终交付结果／空间及资源状态保存于统一证据索引，不将此准备段写成CI全绿。
+
+### 2026-10-30 Canvas 优化续接：固定工作量诊断
+- 上轮 binding 准备候选已因整帧 p95 无改善撤回，本轮不恢复该候选、不重复旧时间驱动矩阵。
+- 仅 benchmark 专用编译开关增加固定 phase／帧数和 UI 线程／进程 CPU 计时；产品 src、呈现策略与默认正式协议未改。使用方式和量化限制见 benchmarks/CANVAS_PERFORMANCE.md。
+- 四套受影响测试组合32项通过；同源两个 producer 重建，普通模式既有离线验证器 validated-smoke。实际三个独立进程各240 EndDraw／exit0，720样本顺序与hash核对一致；零预热静态2帧另通过。非最终全仓／正式基线。
+- 三进程 total wall 均值42.87／45.16／44.50ms，同时有大量 UI 线程 CPU 记账；不能归结纯呈现等待，也不能据此定位单阶段、GPU或宿主原因。没有产品提速结论，整体10k／60FPS优化仍未完成。
+- 独立源码／证据离线复核限定通过，旧resources.cpu_ms在本工具链实际跟随wall，不用作CPU证据；新增CPU量化只作累计观察，不解读单帧分位或作±1tick总误差保证。报告采样整段均值与操作均值、插值与最近秩p95的口径差异已在benchmark文档裁明，原报告保留。
+- 统一索引 canvas-input-next-integration.md 链接 canvas-fixed-diagnostic/ 的冻结输入、原始失败、统计及独立复核。VM已核正常ACPI关闭、exited/PID0/nonOOM；未提交／推送，本轮全量CI未执行。
+
+### 2026-10-30 Canvas CPU阶段定位与一次候选撤回
+- 在固定工作量诊断下追加当前 UI 线程 QueryThreadCycleTime；默认产品路径／正式协议不启用。三进程 draw submit 占周期计数51.95–53.42%，frame build18.45–19.47%，native resources16.46–16.82%；不把周期当毫秒、GPU／全部进程CPU或阶段wall分位占比。
+- 一个基于热点的 deferred-transform 候选实际SDK调用计数RED→GREEN，真实窗口RGB差分及候选36项受影响检查通过；但固定序列六进程 p95中位43.4861→45.6015ms（观察+4.86%），未证明收益，候选／专用测试已撤回。保留补丁／失败／所有实跑，不恢复旧binding／brush，不扩旧时长矩阵找绿。
+- 最终仅保留诊断。单进程240帧进一步划分 native draw：record／EndDraw 占draw周期92.23%／7.70%；record包括setup/clear/clip和SDK调用，不定位driver/worker/GPU/等待。后续应设计降低实际绘制调用数量的原生合批／retained方案，属待确认架构取舍，未实现或保证收益。
+- 最终622源9e3d9e27…／EXE8f12f3dd…，33项受影响测试通过，普通实际producer validated-smoke、固定kind负控拒绝；普通桥接.o与加子阶段前逐字节相同。最后脚本的测量后缓存路径检查失败保留，另只读校正检查，不重采样。独立源码／证据复核限定通过；文档已区分运行期包含检查与离线逐帧重建、Resize稳态跳过、A/B属于子阶段划分前快照。负控由持久index及原fixed字节重建布局，既有ELF验证器实际重放拒绝，无需Nim；原失败记录保留。未全量／新CI／提交推送，10k/60FPS整项目标仍未完成。详细数据／限制见benchmarks/CANVAS_PERFORMANCE.md及统一索引下canvas-cpu-stages/summary.json；VM正常关闭并核exited/PID0/nonOOM，任务临时文件已清理。
+
+
+### 2026-10-30 保守原生合批原型：未提速，已撤回
+- 用户续接批准后实现默认关闭的whole-scene GeometryGroup原型，仅单色、bounds证明无AA交叠、无裁剪／描边／evenOdd、32–10000图元且software/96DPI/根单位变换适用；否则完整回退，不改公开API／画质。真实SDK填充调用60→1与初画／重画／rebuild整窗RGB契约、所有安全回退通过。
+- 同628源bf4bee10…构建A与B（B加prototype开关），固定A1/B1/B2/A2/A3/B3共1440样本。B720帧实际batch1/fallback0，但total均值中位29.6088→38.9224ms（+31.46%）、最近秩p95中位36.1232→48.4068ms（+34.00%）；准备wall4.7690→12.5100ms，draw wall亦未降。周期不能换wall／解释GPU／等待，少SDK调用不等于整帧快，不与旧会话诊断直接比。
+- 候选开关两侧合计81项受影响检查通过；普通实际producer validated-smoke，fixed kind实际拒绝。初版unittest helper局部标签问题及小场景物理计数失败均保留，template／最小32图元门经实际RED→GREEN解决，旧oracle不变；不称全量或完整产品视觉验收。
+- 无收益即精确hash撤回四个运行时文件及六个专用资产，补丁／候选ZIP／失败和成功样本留canvas-native-batch/。撤回后622源码与此前9e3d9e27…逐文件全等，沿用33项证据，不伪称当前树新增81项。当前只保留原固定诊断与CPU阶段探针；独立源码／原始证据复核对负结果及精确撤回限定通过，0 Critical/Important。已补清fill调用口径、SDK私有分配不受owned-data字节保证、人工负控和独立组中位数；复核后只改文档，不重跑或改变原样本。报告／父裁决及资源状态见该目录summary.json。
+- 不恢复binding／brush／transform候选、不扩大矩阵找绿；下一方向需先设计避免逐帧native重建的retained表示及生命周期，未实施。未提交／推送／新CI／全仓或正式新baseline，10k/60FPS仍未完成。细节见benchmarks/CANVAS_PERFORMANCE.md及唯一证据索引。
+
+
+### 2026-10-30 120Hz按需帧驱动：轻量实际入口有收益，10k目标仍未完成
+
+- 用户提高目标到至少120Hz并尽量低CPU，允许优化试错。当前保留Win32内部帧钟改动：解除原16ms USER32 timer上限，one-shot高分辨率waitable timer＋消息感知阻塞等待；慢帧舍弃missed deadline、idle/窗口隐藏停钟，无busy-spin/线程/timeBeginPeriod。task16ms/close30ms保留，旧Win10不支持精度时显式compatibility，owned kernel handle失败可重试回收。活动帧使用Peek(PM_REMOVE)，避免spurious/sent wake后GetMessage阻塞；SDK Win10输入mask包含touch/pointer。
+- 最终626源b8b222db…，12个受影响Host/task/animation/Canvas程序115项exit0；不是全仓/CI。保留旧驱动timerArms1期望0、实际frameCloses0、spurious emptyRead=true、guarded GetMessage activeBlockingReads57期望0的RED和最终GREEN，未放松结果断言。
+- 实际轻量入口仅1个移动圆＋native text，software，3s动画＋至少1.5s idle；同fixture/toolchain A1/B1/B2/A2全exit0，accepted与成功绘制计数A103/108、B362/362，组均值34.978→120.618次/s。非显示FPS，view间隔p95仍8.65–8.66ms，非稳定8.33ms保证；不冒充10k或正式baseline。
+- 每accepted帧UI/进程原始周期组均值约-18.36%/-18.13%，不同cadence工作量及频率/虚拟化/watchdog摊销限制，不换CPU时间/利用率。总周期增加，总CPU下降未成立（约3s accounted CPU A0–15.625ms/B343.75–421.875ms）；idle无额外绘制且停钟，但原始cycles非零，CPU刻度0非0%CPU。
+- 唯一索引下canvas-120hz-frame-clock/summary.json记录源hash、真实结果、独立验收及资源收尾；独立验收此时进行中。主会话/main/共享空间不变，无提交/推送/全仓/新CI；10k120Hz、降低总CPU及实际120Hz显示/GPU/高DPI/完整视觉仍未完成。
+
+- 本轮独立复核指出task+animation无共存直测（Important），父不接受该缺口下的PASS；补同机真实task/SDK双timer测试，单一needsTaskTick误驱动画负控精确失败taskAdvanced=true，未改运行时3项通过。两次fixture失败（effects、IsDialogMessage会自行dispatch导致旧observer漏WM_TIMER）保留并修正，未弱化断言。新626源195c551b…仅animation测试变更，113旧检查+新3替换旧2形成116个不同检查组合证据，不称新源全跑或全仓；测量B仍b8b222db…、产品字节一致。独立I1聚焦复验已闭环，0 Critical/0 Important；三个Minor限制保留，整体性能目标仍未完成。原/补充报告d863889a…/8c18b871…保存，父核625源码+1fixture仍完全匹配195c551b…；VM正常ACPI shutdown completed、容器exited/PID0/nonOOM，22私有临时文件等hash保留后删除，验收代理官方关闭确认closed/archivedAt null，主会话/共享SDK/磁盘/缓存/历史保留。无提交/推送。

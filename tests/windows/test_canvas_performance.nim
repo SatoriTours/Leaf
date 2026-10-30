@@ -18,15 +18,30 @@ suite "real opt-in Canvas CPU measurement":
         let prepared = surface.diagnostics()
         check prepared.resourcePreparationNs > 0
         check prepared.drawSubmitNs == 0
+        when defined(leafCanvasFixedDiagnostic):
+          check prepared.resourcePreparationCycles > 0
+          check prepared.drawSubmitCycles == 0
+          check prepared.drawRecordCycles == 0
+          check prepared.endDrawCycles == 0
         check surface.presentPrepared()
         surface.acceptPrepared()
         let presented = surface.diagnostics()
         check presented.resourcePreparationNs == prepared.resourcePreparationNs
         check presented.drawSubmitNs > 0
+        when defined(leafCanvasFixedDiagnostic):
+          check presented.resourcePreparationCycles == prepared.resourcePreparationCycles
+          check presented.drawSubmitCycles > 0
+          check presented.drawRecordCycles > 0
+          check presented.endDrawCycles > 0
         check surface.paintAccepted()
         let repainted = surface.diagnostics()
         check repainted.resourcePreparationNs == presented.resourcePreparationNs
         check repainted.drawSubmitNs > presented.drawSubmitNs
+        when defined(leafCanvasFixedDiagnostic):
+          check repainted.resourcePreparationCycles == presented.resourcePreparationCycles
+          check repainted.drawSubmitCycles > presented.drawSubmitCycles
+          check repainted.drawRecordCycles > presented.drawRecordCycles
+          check repainted.endDrawCycles > presented.endDrawCycles
         check repainted.successfulDraws == presented.successfulDraws+1
       finally:
         surface.close()

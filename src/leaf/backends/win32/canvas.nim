@@ -5,6 +5,9 @@ import std/[os, strutils, options, unicode]
 import ../../[core, graphics, canvas_hit, canvas_input, canvas_bindings]
 import ./api
 when defined(leafCanvasMeasure): import std/[monotimes, times]
+when defined(leafCanvasFixedDiagnostic):
+  import ./canvas_cpu_probe
+  {.passC:"-DLEAF_CANVAS_CYCLE_PROBE".}
 
 const BridgeHeader = (currentSourcePath.parentDir / "canvas_bridge.h").replace('\\', '/')
 {.compile: "canvas_bridge.c".}
@@ -31,6 +34,9 @@ type
     rebuildPending*, faulted*: bool
     when defined(leafCanvasMeasure):
       resourcePreparationNs*, drawSubmitNs*: int64
+    when defined(leafCanvasFixedDiagnostic):
+      resourcePreparationCycles*, drawSubmitCycles*: uint64
+      drawRecordCycles*, endDrawCycles*: uint64
   GeometryLease = ref object
     scene: ptr NativeScene
     owner: DWORD
@@ -54,6 +60,8 @@ type
     frameId, attempts, successes: uint64
     when defined(leafCanvasMeasure):
       resourcePreparationNs, drawSubmitNs: int64
+    when defined(leafCanvasFixedDiagnostic):
+      resourcePreparationCycles, drawSubmitCycles: uint64
     when defined(leafProtocolProbes):
       nextDrawFailure, nextRebuildFailure: int32
 
@@ -72,6 +80,8 @@ proc nativeDraw(surface: ptr NativeSurface, scene: ptr NativeScene, width, heigh
 proc nativeRebuild(surface: ptr NativeSurface): int32 {.importc: "leaf_canvas_rebuild", header: BridgeHeader.}
 proc validatePaint(surface: ptr NativeSurface) {.importc: "leaf_canvas_validate_paint", header: BridgeHeader.}
 proc nativeCounts(output: ptr CanvasResourceCounts) {.importc: "leaf_canvas_counts", header: BridgeHeader.}
+when defined(leafCanvasFixedDiagnostic):
+  proc nativeDrawCycleCounts(surface:ptr NativeSurface,record,ending:ptr uint64):int32 {.importc:"leaf_canvas_draw_cycle_counts",header:BridgeHeader.}
 
 proc checkStatus(status: int32, operation: string) =
   if status < 0: fail(operation & " failed: HRESULT 0x" & toHex(cast[uint32](status), 8))
@@ -192,6 +202,8 @@ proc prepareFrame*(surface: CanvasSurface, frame: CanvasFrame,
   if frame.isNil: fail("Canvas frame is missing")
   if (inputSession == 0) != (inputMount == 0): fail("incomplete Canvas input namespace")
   if surface.frameId == high(uint64): fail("Canvas frame identity exhausted")
+  when defined(leafCanvasFixedDiagnostic):
+    let resourceCpuStarted = queryUiCycles()
   when defined(leafCanvasMeasure):
     let resourceStarted = getMonoTime()
   surface.retirePrepared()
@@ -227,6 +239,8 @@ proc prepareFrame*(surface: CanvasSurface, frame: CanvasFrame,
     checkStatus(sceneReady(scene), "Canvas scene validation")
     when defined(leafCanvasMeasure):
       surface.resourcePreparationNs += (getMonoTime()-resourceStarted).inNanoseconds
+    when defined(leafCanvasFixedDiagnostic):
+      surface.resourcePreparationCycles += cycleDelta(queryUiCycles(),resourceCpuStarted)
     var bindings: seq[HitBinding]
     var interactive = false
     var rootIgnored = false
@@ -293,6 +307,8 @@ proc draw(surface: CanvasSurface, scene: ptr NativeScene, frame: CanvasFrame): b
   when defined(leafProtocolProbes):
     status = surface.nextDrawFailure
     surface.nextDrawFailure = 0
+  when defined(leafCanvasFixedDiagnostic):
+    let drawCpuStarted = queryUiCycles()
   when defined(leafCanvasMeasure):
     let drawStarted = getMonoTime()
   if status == 0:
@@ -300,6 +316,8 @@ proc draw(surface: CanvasSurface, scene: ptr NativeScene, frame: CanvasFrame): b
       addr matrix[0], addr background[0], nativeFloat(box.x), nativeFloat(box.y))
   when defined(leafCanvasMeasure):
     surface.drawSubmitNs += (getMonoTime()-drawStarted).inNanoseconds
+  when defined(leafCanvasFixedDiagnostic):
+    surface.drawSubmitCycles += cycleDelta(queryUiCycles(),drawCpuStarted)
   if status < 0:
     if cast[uint32](status) == 0x8899000C'u32: surface.rebuildPending = true
     else: surface.faulted = true
@@ -406,6 +424,11 @@ proc diagnostics*(surface: CanvasSurface): CanvasDiagnostics =
   when defined(leafCanvasMeasure):
     result.resourcePreparationNs = surface.resourcePreparationNs
     result.drawSubmitNs = surface.drawSubmitNs
+  when defined(leafCanvasFixedDiagnostic):
+    result.resourcePreparationCycles = surface.resourcePreparationCycles
+    result.drawSubmitCycles = surface.drawSubmitCycles
+    if surface.native != nil:
+      checkStatus(nativeDrawCycleCounts(surface.native,addr result.drawRecordCycles,addr result.endDrawCycles),"Canvas draw cycle diagnostics")
 proc releaseCanvasInternal*(surface: CanvasSurface) {.raises: [].} =
   if surface == nil or surface.native == nil: return
   # Irreversible HWND teardown may call this too. All pointers belong to this

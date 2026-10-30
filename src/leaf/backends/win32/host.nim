@@ -1,11 +1,13 @@
 ## Owned Unicode top-level Host. WndProc never calls business or disposes a
 ## Session; all such work runs after native dispatch at an ordinary Nim boundary.
 import std/[tables, unicode, math, atomics, monotimes]
-import ../../[core, backend, backend_session, native_layout, windows_dpi, native_theme]
+import ../../[core, backend, backend_session, native_layout, windows_dpi, native_theme, frame_clock]
 import ./[api, calls, host_state, host_bridge, navigation_input, skin]
 export host_bridge
 
 type
+  FrameClockQuality* = enum
+    frameClockUnused, frameClockHighResolution, frameClockCompatibility
   Win32Host* = ref object
     owner: DWORD
     theme: NativeTheme
@@ -15,6 +17,10 @@ type
     className: seq[WCHAR]
     ownsClass, rooted, counted: bool
     timer, taskTimer: UINT_PTR
+    frameTimer: HANDLE
+    frameDeadline: int64
+    frameArmed, needsAnimationTick: bool
+    frameQuality: FrameClockQuality
     taskCookie: uint
     sessionToken: uint64
     needsTaskTick, tasksRetired, animationVisible: bool
@@ -39,6 +45,8 @@ type
     liveWindows*, liveRoots*: int
     callbackErrors*: uint64
     pendingClose*: bool
+    frameClockQuality*: FrameClockQuality
+    frameClockArmed*: bool
 
 var roots {.threadvar.}: Table[uint, Win32Host]
 var liveWindowCount {.threadvar.}: int
@@ -152,19 +160,54 @@ proc disarmTaskTick(host: Win32Host) =
   host.needsTaskTick = false
 proc animationsVisible(host:Win32Host):bool=
   host.window!=nil and IsWindowVisible(host.window)!=0 and IsIconic(host.window)==0
-proc frameWork(host:Win32Host):bool=
-  host.session.runtime.taskPumpPending() or
-    (host.animationsVisible() and host.session.runtime.animationPumpPending())
+proc disarmFrameTick(host:Win32Host) =
+  if host.frameArmed:
+    if host.calls.cancelFrameTimer(host.frameTimer)==0:nativeError("CancelWaitableTimer frame")
+    host.frameArmed=false
+  host.frameDeadline=0
+  host.needsAnimationTick=false
+proc closeFrameClock(host:Win32Host) =
+  host.disarmFrameTick()
+  if host.frameTimer!=nil:
+    if host.calls.closeFrameTimer(host.frameTimer)==0:nativeError("CloseHandle frame")
+    host.frameTimer=nil
+proc armFrameTick(host:Win32Host) =
+  if host.window==nil or host.close.pending or host.close.complete or
+      not host.currentTaskSession() or host.session.closing or
+      not host.animationsVisible() or not host.session.runtime.animationPumpPending():
+    host.disarmFrameTick()
+    return
+  if host.frameArmed:return
+  if host.frameTimer==nil:
+    host.frameTimer=host.calls.createFrameTimer(true)
+    if host.frameTimer==nil:
+      # Windows10 pre1803: keep compatibility, expose the weaker capability.
+      # Do not mask allocation, permission or other native errors.
+      if lastError()!=87:nativeError("CreateWaitableTimerExW high-resolution frame")
+      host.frameTimer=host.calls.createFrameTimer(false)
+      if host.frameTimer==nil:nativeError("CreateWaitableTimerExW compatibility frame")
+      host.frameQuality=frameClockCompatibility
+    else:host.frameQuality=frameClockHighResolution
+  let now=getMonoTime().ticks
+  let deadline=nextFrameDeadline(host.frameDeadline,now)
+  if host.calls.armFrameTimer(host.frameTimer,frameDue100ns(deadline,now))==0:
+    nativeError("SetWaitableTimerEx frame")
+  host.frameDeadline=deadline
+  host.frameArmed=true
 proc armTaskTick(host: Win32Host) =
   if host.window == nil or host.close.pending or host.close.complete or
-      not host.currentTaskSession() or host.session.closing or not host.frameWork():
+      not host.currentTaskSession() or host.session.closing:
     host.disarmTaskTick()
+    host.disarmFrameTick()
     return
-  if host.taskTimer == 0:
+  if not host.session.runtime.taskPumpPending():
+    host.disarmTaskTick()
+  elif host.taskTimer == 0:
     let timer = host.calls.setTimer(host.window, host.taskCookie, 16, nil)
     if timer == 0: nativeError("SetTimer task")
     host.taskTimer = timer
     if timer == host.timer: fail("task and close timers must have distinct identities")
+  host.armFrameTick()
 
 proc delayed(host: Win32Host) =
   if host.window == nil or host.timer != 0 or host.close.complete: return
@@ -304,6 +347,7 @@ proc nativeCleanup(host: Win32Host) =
   var cleanupError: ref CatchableError
   try:
     host.disarmTaskTick()
+    host.closeFrameClock()
     if host.timer != 0:
       if host.calls.killTimer(host.window, host.timer) == 0: nativeError("KillTimer")
       host.timer = 0
@@ -348,6 +392,7 @@ proc release(host: Win32Host) =
   try:
     host.retireTasks()
     host.disarmTaskTick()
+    host.disarmFrameTick()
     if host.session != nil:
       host.session.dispose()
       if not host.session.disposed: fail("Session release did not complete")
@@ -363,7 +408,9 @@ proc safeTurn(host: Win32Host) =
   host.checkCallback()
   if host.close.pending:
     host.retireTasks()
-    try: host.disarmTaskTick()
+    try:
+      host.disarmTaskTick()
+      host.disarmFrameTick()
     except CatchableError as error:
       host.cleanupFailure = error
       host.close.closeFailed()
@@ -385,7 +432,8 @@ proc safeTurn(host: Win32Host) =
     finally: dec host.tickDepth
   if not host.close.pending and host.currentTaskSession() and not host.session.closing:
     let visible=host.animationsVisible()
-    let animationDue=host.needsTaskTick or ordinaryTick or visible!=host.animationVisible
+    let animationDue=host.needsAnimationTick or ordinaryTick or visible!=host.animationVisible
+    host.needsAnimationTick=false
     host.animationVisible=visible
     if host.needsTaskTick or host.session.runtime.taskPumpPending():
       host.needsTaskTick = false
@@ -409,6 +457,7 @@ proc safeTurn(host: Win32Host) =
     if not host.close.pending: host.armTaskTick()
   else:
     host.disarmTaskTick()
+    host.disarmFrameTick()
   if not host.close.pending and host.lease != nil and not host.busy(): host.bridge.nativeTick()
   if host.close.pending and (host.session != nil or host.lease != nil) and not host.busy() and not host.retryDeferred:
     try:
@@ -501,7 +550,8 @@ proc windowHandle*(host: Win32Host): HWND =
 proc diagnostics*(host: Win32Host): HostDiagnostics =
   host.ownerCheck()
   HostDiagnostics(liveWindows: liveWindowCount, liveRoots: roots.len,
-    callbackErrors: host.errorCount, pendingClose: host.close.pending)
+    callbackErrors: host.errorCount, pendingClose: host.close.pending,
+    frameClockQuality:host.frameQuality,frameClockArmed:host.frameArmed)
 proc bindSession*(host: Win32Host, session: BackendSession,
                   scopeBusy: proc(): bool {.closure, raises: [].}) =
   host.liveCheck()
@@ -535,6 +585,7 @@ proc destroyHost*(host: Win32Host) =
   try:
     host.retireTasks()
     host.disarmTaskTick()
+    host.disarmFrameTick()
     if host.busy(): fail("Win32 Host release is busy; retry after the full UI scope")
     host.release()
   except CatchableError as error:
@@ -583,7 +634,32 @@ proc pump*(host: Win32Host): int =
       if host.window == nil:
         fail("Host native cleanup is incomplete; call destroyHost to retry")
       if host.session == nil and host.lease == nil and host.close.pending: return 0
-      let status = host.calls.getMessage(addr message, nil, 0, 0)
+      var status: BOOL
+      if host.frameArmed:
+        let ready=host.calls.waitFrameMessage(host.frameTimer)
+        case ready
+        of 0'u32:
+          host.frameArmed=false # auto-reset signal consumed by the ordinary pump.
+          host.needsAnimationTick=true
+          host.safeTurn()
+          # Busy/nested scopes may defer business; still schedule a future wait
+          # instead of spinning or losing the one-shot wakeup.
+          if not host.close.pending and not host.close.complete:host.armTaskTick()
+          continue
+        of 1'u32:
+          # A system/sent-message wake need not leave a queued message.
+          # Remove input nonblocking: a Peek-then-GetMessage sequence can race
+          # a sent message that consumes the peeked input and blocks the UI.
+          let queued=host.calls.peekMessage(addr message,nil,0,0,PM_REMOVE)
+          host.checkCallback()
+          if queued==0:
+            host.safeTurn()
+            continue
+          status=if message.message==WM_QUIT:0'i32 else:1'i32
+        of 0xffffffff'u32:nativeError("MsgWaitForMultipleObjectsEx frame")
+        else:fail("unexpected frame wait result")
+      else:
+        status=host.calls.getMessage(addr message, nil, 0, 0)
       if status == -1: nativeError("GetMessageW")
       if status == 0: return int(cast[int32](message.wParam))
       host.dispatch(message)

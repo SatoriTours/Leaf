@@ -24,6 +24,12 @@ type Win32Calls* = object
   setTimer*: proc(window: HWND, timer: UINT_PTR, interval: UINT, callback: TIMERPROC): UINT_PTR {.closure, raises: [CatchableError].}
   killTimer*: proc(window: HWND, timer: UINT_PTR): BOOL {.closure, raises: [CatchableError].}
 
+  createFrameTimer*: proc(highResolution:bool):HANDLE {.closure,raises:[CatchableError].}
+  armFrameTimer*: proc(timer:HANDLE,due100ns:int64):BOOL {.closure,raises:[CatchableError].}
+  cancelFrameTimer*: proc(timer:HANDLE):BOOL {.closure,raises:[CatchableError].}
+  closeFrameTimer*: proc(timer:HANDLE):BOOL {.closure,raises:[CatchableError].}
+  waitFrameMessage*: proc(timer:HANDLE):DWORD {.closure,raises:[CatchableError].}
+
   immContext*: proc(window: HWND): HIMC {.closure, raises: [CatchableError].}
   immRelease*: proc(window: HWND, context: HIMC): BOOL {.closure, raises: [CatchableError].}
   immNotify*: proc(context: HIMC, action, index, value: DWORD): BOOL {.closure, raises: [CatchableError].}
@@ -78,6 +84,20 @@ proc systemWin32Calls*(): Win32Calls =
   result.postMessage = proc(window: HWND, message: UINT, wparam: WPARAM, lparam: LPARAM): BOOL = PostMessageW(window,message,wparam,lparam)
   result.setTimer = proc(window: HWND, timer: UINT_PTR, interval: UINT, callback: TIMERPROC): UINT_PTR = SetTimer(window,timer,interval,callback)
   result.killTimer = proc(window: HWND, timer: UINT_PTR): BOOL = KillTimer(window,timer)
+
+  result.createFrameTimer = proc(highResolution:bool):HANDLE =
+    # TIMER_MODIFY_STATE | SYNCHRONIZE, minimum access for this owned handle.
+    CreateWaitableTimerExW(nil,nil,if highResolution:2'u32 else:0'u32,0x00100002'u32)
+  result.armFrameTimer = proc(timer:HANDLE,due100ns:int64):BOOL =
+    var due=due100ns
+    SetWaitableTimerEx(timer,addr due,0,nil,nil,nil,0)
+  result.cancelFrameTimer = proc(timer:HANDLE):BOOL = CancelWaitableTimer(timer)
+  result.closeFrameTimer = proc(timer:HANDLE):BOOL = CloseHandle(timer)
+  result.waitFrameMessage = proc(timer:HANDLE):DWORD =
+    var handle=timer
+    # Win10 QS_ALLINPUT (including TOUCH/POINTER), MWMO_INPUTAVAILABLE.
+    # Block even without queued GUI input.
+    MsgWaitForMultipleObjectsEx(1,addr handle,0xffffffff'u32,0x1cff'u32,0x0004'u32)
 
   result.immContext = proc(window: HWND): HIMC = ImmGetContext(window)
   result.immRelease = proc(window: HWND, context: HIMC): BOOL = ImmReleaseContext(window, context)

@@ -51,6 +51,9 @@ struct LeafCanvasSurface {
   ID2D1SolidColorBrush *brush;
   LeafCanvasScene *scenes;
   int32_t width, height;
+#ifdef LEAF_CANVAS_CYCLE_PROBE
+  uint64_t recordCycles,endDrawCycles;
+#endif
 };
 static volatile LONG surfaces, scenes, geometries, textLayouts, layers, brushes, targets, factories;
 // C SDK inheritance is nested in some MinGW vtables. Cast to the actual base
@@ -309,6 +312,10 @@ int32_t leaf_canvas_draw(LeafCanvasSurface *surface,LeafCanvasScene *scene,int32
     const float *matrix,const float *background,float designWidth,float designHeight) {
   if(!surface || !scene || scene->owner!=surface || !scene->ready || !surface->target || !surface->brush ||
       width<=0 || height<=0 || width>16384 || height>16384 || (int64_t)width*height>32000000 || dpi<=0 || !matrix || !background) return E_INVALIDARG;
+#ifdef LEAF_CANVAS_CYCLE_PROBE
+  ULONG64 cpuBegin=0,cpuRecorded=0,cpuEnd=0;
+  const BOOL beginOk=QueryThreadCycleTime(GetCurrentThread(),&cpuBegin);
+#endif
   if(width!=surface->width || height!=surface->height) {
     D2D1_SIZE_U size={width,height};
     const HRESULT resized=CALL(surface->target,Resize,&size);
@@ -360,8 +367,24 @@ int32_t leaf_canvas_draw(LeafCanvasSurface *surface,LeafCanvasScene *scene,int32
     }
   }
   if(designClip) CALL(target,PopAxisAlignedClip);
+#ifdef LEAF_CANVAS_CYCLE_PROBE
+  const BOOL recordOk=QueryThreadCycleTime(GetCurrentThread(),&cpuRecorded);
+  const HRESULT status=CALL(target,EndDraw,NULL,NULL);
+  const BOOL endOk=QueryThreadCycleTime(GetCurrentThread(),&cpuEnd);
+  if(beginOk && recordOk && endOk && cpuBegin<=cpuRecorded && cpuRecorded<=cpuEnd) {
+    surface->recordCycles+=cpuRecorded-cpuBegin;surface->endDrawCycles+=cpuEnd-cpuRecorded;
+  } else if(SUCCEEDED(status)) return E_FAIL;
+  return status;
+#else
   return CALL(target,EndDraw,NULL,NULL);
+#endif
 }
+#ifdef LEAF_CANVAS_CYCLE_PROBE
+int32_t leaf_canvas_draw_cycle_counts(LeafCanvasSurface *surface,uint64_t *record,uint64_t *endDraw) {
+  if(!surface || !record || !endDraw) return E_POINTER;
+  *record=surface->recordCycles;*endDraw=surface->endDrawCycles;return S_OK;
+}
+#endif
 int32_t leaf_canvas_rebuild(LeafCanvasSurface *surface) {
   if(!surface || !IsWindow(surface->window)) return E_INVALIDARG;
   for(LeafCanvasScene *scene=surface->scenes;scene;scene=scene->next)

@@ -273,3 +273,204 @@ RGBA 去重；不跨帧缓存、不改变换／裁剪或资源归属。独立测
 统一证据索引下 `quality-1029/brush-paired-summary.json`、`brush-candidate.patch`、
 `brush-verified-{A1,B1,B2,A2,A3,B3}.json` 保存结果、可回放补丁和离线校验；
 前置链接／打包／启动夹具失败亦保留，不计为产品 RED。该诊断结束时仅文档改动，未提交／推送；后续列表修复及代码提交状态见[当前进度](../docs/progress.md)。
+
+## 固定工作量诊断（非正式性能基线）
+
+用于排除“按真实时间采样，使不同速度的进程画到不同 phase／帧数”的工作量差异。
+沿用前文 Windows Release／ORC、manifest、源码及工具链 hash 的编译方式，
+**另加** `-d:leafCanvasFixedDiagnostic` 编译 `benchmarks/canvas_native.nim`：
+
+```powershell
+.\canvas_fixed_native.exe --objects 10000 --load properties --warmup-frames 60 --frames 240 --cycle-frames 120 --environment public.json --output fixed-1
+```
+
+- 每次执行采样 phase 为 `(index mod cycleFrames) / cycleFrames`，不读实际经过时间；
+  预热倒排到 sample phase 0 之前，挂载初值再提前一格，避免首帧同值更新被正确去重而没有 EndDraw。
+- 仍经过同一 Scene／State／BackendSession／software EndDraw，不改变产品提交或呈现策略。
+  每个普通消息回合至多一帧，不设 60Hz cadence；这不是动画播放节奏或显示帧率测试。
+- 参数上限：预热 0–600 帧、采样 1–1200 帧、周期 2–1200 帧；调用方仍须设置进程 watchdog。
+  不接受 `--warmup-ms`／`--sample-ms`，不自动改成正式 5s／30s 协议。
+- 只输出 JSON：kind=`leaf-canvas-fixed-diagnostic`，duration／cadence 元数据为 null，
+  另存逐帧 phase_index 和有序序列 SHA256。既有正式验证器按 kind 拒绝此报告，禁止混进历史基线。
+- `total_ms` 和各 stage 仍是 wall elapsed；新增 `ui_thread_cpu_ms`／`process_cpu_ms`
+  来自 GetThreadTimes／GetProcessTimes。100ns 是计量单位，不是实际分辨率；OS 记账量化会令单帧为零
+  或超过该帧 wall，应看累计值。进程 CPU 包含其它线程，可超过 wall。
+  本轮逐帧线程 CPU 仅出现 15.625ms 的整数倍，不解释其逐帧 p50／p95 或单帧 CPU 大于 wall。
+  累计量也不是单一连续区间的 CPU 差值：逐操作 bracket 间有间隙，不能保证总误差仅 ±1 tick。
+  旧 `resources.*.cpu_ms` 使用 Nim cpuTime()，本次 MinGW 生成 C 调用的是 clock()，实际跟随 wall；
+  **此遗留字段不作 CPU 数据**。只有新增的逐帧字段使用 GetThreadTimes／GetProcessTimes。
+  CPU 查询包围 wall timer，额外查询开销未扣除；**wall−CPU 不是呈现等待**，也不定位 GPU／宿主原因。
+  诊断有额外观测成本，不能直接与未插此 CPU 计时的旧 producer 比快慢。
+
+本轮同一个未优化基线 EXE、96DPI／software／VM，60 预热＋240 采样、周期 120，三独立进程：
+
+| 进程 | 操作 total 均值／最近秩 p95 ms | total 累计 ms | UI 线程 CPU 累计 ms | 进程 CPU 累计 ms |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 42.8699／54.0113 | 10288.7774 | 9562.500 | 14562.500 |
+| 2 | 45.1634／57.9952 | 10839.2115 | 9203.125 | 13968.750 |
+| 3 | 44.4956／57.6798 | 10678.9499 | 9203.125 | 14453.125 |
+
+720 个逐帧 phase、源／EXE／序列 hash、每次实际 EndDraw 和 tracked native 计数恢复均已核对；
+零预热静态 2 帧另验。普通编译 producer 短跑通过既有验证器 `validated-smoke`。
+受影响测试组合为 final schedule 5＋first config 3／report 19／verifier 5＝32项；
+后27项测试及其依赖未变，沿用修正前快照的结果，不是最终全仓或正式矩阵重跑。
+独立源码／原始证据复核限定通过；其表中的44.70／47.11／46.49ms是整段采样 wall 除帧数，
+包含操作间隙，不是上表的操作 total 均值，且其 p95 默认用线性插值。原报告保留，以上表的
+最近秩口径为准。序列 hash 是计划指纹，不是运行时场景摘要；运行顺序由逐帧 phase_index、
+同源同EXE及实际 draw 计数共同核验。完整结论见唯一证据索引；此前首诊断 phase0 与挂载值相同的
+夹具失败原样保留，不称产品 RED。源码 aggregate `e3bf61b9…`、诊断 EXE `97de35ba…`；
+原始 tag `canvas-fixed-final-run-1030`，统计和来源保存在索引下 `canvas-fixed-diagnostic/`。
+这些数据建立了可复现的固定工作量诊断入口，**没有建立任何产品优化收益**，也不支持恢复已撤回候选。
+
+### CPU 阶段定位与被撤回的变换候选（2026-10-30）
+
+同一 `leafCanvasFixedDiagnostic` 开关另启用 `QueryThreadCycleTime`，只记录**当前 UI 线程原始
+CPU 周期计数**：timeline、scene sampling、frame build、inclusive commit，以及其内的
+framework residual／native resources／draw submit。运行期验证 commit 包含 resource／draw，
+以安全残差计算 framework，并检查 draw 子阶段不重叠；离线分析再逐帧核验三项精确重建 commit、
+外层六项不超过 total。不是逐阶段 wall p95 占比，也不包含其它线程的全部 CPU。
+原始周期不能换算毫秒／GPU时间／CPU利用率；频率与虚拟化会影响计数，查询开销不扣除。
+固定模式的 timeline 区段只解析预定 phase，不代表正式模式创建／推进 Timeline 的成本。
+默认编译不启用周期查询，不改变正式报告或呈现策略；原生桥接普通构建 `.o` 与增加子阶段
+之前逐字节同 hash（`ebe2797e…`），这是桥接对象的证明，不冒称整个 EXE 字节相同。
+
+首批三独立进程仍为 properties-10000、60 帧预热／240 帧采样、周期120；
+各进程按**阶段周期总和／操作周期总和**计算：
+
+| UI 周期计数占比 | 进程1 | 进程2 | 进程3 |
+| --- | ---: | ---: | ---: |
+| draw submit | 53.42% | 52.43% | 51.95% |
+| frame build | 18.45% | 18.91% | 19.47% |
+| native resources | 16.46% | 16.82% | 16.67% |
+| framework residual | 8.28% | 8.11% | 8.26% |
+| scene sampling | 3.36% | 3.72% | 3.62% |
+
+在此依据上仅试一个候选：延后没有绘制观察者的组变换恢复，保持裁剪边界与绘制顺序。
+真实 SDK `SetTransform` 计数行为 RED→GREEN；三个场景、首画／重画／target rebuild 的
+整块实际窗口 RGB 与冻结原 renderer 精确相同，候选及既有受影响36项通过。
+但固定序列 A1,B1,B2,A2,A3,B3 各240帧：三个 process 的操作 p95 中位
+**43.4861→45.6015ms（观察 +4.86%）**；均值中位 +5.49%，draw 周期累计中位 +0.42%。
+配对使用增加 record／EndDraw 子阶段之前的快照 A `dc6cd155…`／B `1aac8898…`，
+不是最终诊断 EXE；两侧使用相同阶段探针。这没有证明端到端收益，也不单凭三次观察确立统计回归；
+不扩跑正式矩阵寻找通过。
+**候选及其专用夹具已撤回**，补丁与所有失败／成功原始样本保留；不恢复旧 binding／brush 候选。
+
+最终只保留诊断，再将 native draw 划为 record 与 EndDraw 两个内嵌区段；record 起点在
+Resize 判断之前，稳态尺寸不变时跳过 Resize；采样包含 setup／clear／clip、SDK 绘制调用循环，
+**不是纯命令构建时间，也没有测得稳态 Resize 成本**。同序单进程240帧中，
+record／EndDraw 分别为 draw 周期累计的 **92.23%／7.70%**，剩余为边界／查询开销；
+分别约占 total 周期的48.41%／4.04%。不能把 EndDraw 之外都当 CPU 绘制、把 EndDraw 当
+GPU时间或呈现等待，也不定位 SDK 内部／worker／宿主原因。这支持下一步围绕实际绘制调用数量
+与渲染结构设计，而不是继续根据“少一次状态调用”推断会更快；原生合批／retained rendering
+尚未获设计批准，未实现或承诺收益。
+
+最终622源码 aggregate `9e3d9e27…`、诊断 EXE `8f12f3dd…`；受影响33项
+（CPU contract3／schedule5／Native23／普通计时1／周期计时1）均在最终快照通过。
+普通实际 producer 再次 `validated-smoke`，固定报告被既有 verifier 按 kind 拒绝。
+负控原临时目录已清理，原 index 和 fixed 报告字节仍保留；证据目录内
+`replay-fixed-kind-negative.py` 按 hash 从两者重建临时布局，并实际重放拒绝，不依赖 Nim 编译器。
+诊断查询失败会诚实终止：C 侧可能以通用 EndDraw/resize 的 E_FAIL 文本报出，Nim 查询则抛
+ValueError；不能仅据该错误文本断定是渲染故障。
+最终测量脚本在子进程正常结束后因写错缓存检查路径退出；原 failed 结果保留，后续仅只读核对
+正确路径并验证 `.o` 相同，**没有重跑采样**。未全仓测试／提交／推送／新CI／正式基线。
+证据统一由主索引链接 `canvas-cpu-stages/summary.json`、`analyze-stages.py`、原始 Windows tags。
+整体10k／60FPS性能目标仍未完成，以上全部是限定诊断，不是新产品提速。
+
+
+### 保守 whole-scene 原生合批原型：无端到端收益，已撤回（2026-10-30）
+
+用户续接批准后只做一个默认关闭的 `leafCanvasBatchPrototype` 原型：scene-local
+GeometryGroup 按原图元顺序持有变换后的几何；仅32–10000图元、单一RGBA填充、无描边／文字／
+子组裁剪／evenOdd，SDK bounds 证明不相交（每侧1px AA及额外0.25px数值间隔，比较预算128×N）。
+最多16种基础几何，数组纳入既有owned-data配额；仅software／96DPI／根单位矩阵实际走批次。
+不适用、超过预算或可选资源创建失败均完整回退，不改公开API、透明叠加或画质。
+64MiB只覆盖bridge显式owned data，不保证SDK私有几何分配字节数；原型最多另持有10000个
+instance／16个base／1个group，未做配额边界压力测试。
+
+真实SDK观察器先在冻结原renderer上产生行为RED（60次填充，期望1），实现后合资格场景为1；
+半透明／全透明／不透明的60个混合圆／圆角矩形／路径，经小数位置、旋转、嵌套组后，
+初画／重画／target rebuild三次整窗RGB均精确相等。重叠透明、近邻AA、不同色、裁剪、
+evenOdd、描边、非单位根、可选GeometryGroup创建失败均保留60次；2图元小场景保留2次。
+这只是自动化像素与调用契约，不等于完整产品语义视觉／真实硬件／高DPI验收。
+
+最终同一个628源码快照 `bf4bee10…`，同一基础工具链，分别以固定诊断开关构建A、再加原型开关构建B；
+具体defines与两份EXE hash保存于构建结果，基础toolchain hash本身不包含这些逐EXE开关。
+两侧相同周期探针，B另记录实际batch/fallback计数，观测开销未扣，不外推去探针后的效应。
+固定A1,B1,B2,A2,A3,B3各60预热＋240采样、周期120，实际1440次采样EndDraw；
+B的720帧全部batch=1／fallback=0。逐帧phase、进程身份、build／EXE／序列hash、
+阶段包含关系及tracked native清理计数均核对。
+
+| 三个独立进程指标的中位数 | A | B | 观察变化 |
+| --- | ---: | ---: | ---: |
+| 操作total均值 ms | 29.6088 | 38.9224 | +31.46% |
+| 操作total最近秩p95 ms | 36.1232 | 48.4068 | +34.00% |
+| native resources阶段wall均值 ms | 4.7690 | 12.5100 | +162.32% |
+| draw submit阶段wall均值 ms | 15.9514 | 17.6772 | +10.82% |
+
+尽管draw阶段原始UI周期累计中位下降64.22%，准备阶段周期中位升162.79%，且EndDraw内的
+周期明显增加；total UI周期中位反而下降5.36%，**不能把这些计数按固定频率换成wall、GPU时间或等待**。
+不依据阶段分布推断SDK内部／worker／driver因果。新增准备wall与未下降的draw wall已说明：
+减少SDK入口调用数没有转化为这个原型的整帧收益。本有界观察足以拒绝“已证明提速”，
+不推广为全硬件统计回归，也不扩矩阵找绿。它不与此前不同会话的35.63ms等诊断作A/B。
+表格是A／B各组三个process指标分别取中位，不是同对process差值或统计效应估计。
+
+候选开启／关闭共81项受影响检查通过（各12项批次契约、各23项Native、CPU3／schedule5／
+普通计时1／周期计时各1）；原型普通producer实际短跑仍为 `validated-smoke`，fixed kind负控实际拒绝。
+负控输入由普通index替换报告hash并映射fixed报告构造；kind在其它身份匹配之前被拒绝，
+不声称fixed报告满足其余正式条件。
+81项属于被撤回候选快照，不冒称当前树新增81项或全量通过。首轮小场景物理geometry计数与原契约
+冲突，新增2图元RED后用最小32图元适用门解决，未放松旧oracle。最初辅助proc的unittest宏存在
+exit1却局部标签OK的夹具问题，已改template并用冻结旧renderer重放正确FAILED；原日志保留。
+
+**四个运行时文件按hash精确恢复，六个专用候选资产已移除**；冻结候选ZIP、可重新应用的
+`rejected-native-batch-candidate.patch`、所有RED／失败／GREEN及1440样本保存在唯一索引下
+`canvas-native-batch/`。撤回后622源码逐文件与先前已验收 `9e3d9e27…` 全等，沿用其33项结果；
+没有新运行时／测试变化，不重跑旧全套。另一次非必要普通bridge对象查询未找到唯一对象，
+保留错误，不声称本轮新增了对象字节相同证明；前节旧证明不变。
+
+当前停止此“每帧重建批几何”的方向。下一步如继续，需先设计避免逐帧native instance重建的
+retained表示及生命周期／配额，再确认新架构边界；尚未实施。独立源码／原始证据复核对本负结果
+及精确撤回限定通过，不是产品功能转正；原报告与父裁决保存在证据目录summary.json。
+未提交／推送／新CI／全仓测试，未建立正式5s／30s新baseline或10k稳定60FPS／显示FPS证明。
+
+### 2026-10-30：解除16ms动画驱动上限（仅轻量入口）
+
+用户将目标提高到至少120Hz并尽量低CPU。本次保留的是Win32内部帧驱动改动，不是新renderer：
+活动可见动画使用120Hz monotonic deadline与高分辨率one-shot waitable timer，UI线程通过
+`MsgWaitForMultipleObjectsEx`阻塞等待；活动路径只用非阻塞`PeekMessage(PM_REMOVE)`取消息，
+避免system/sent-message唤醒后误入阻塞`GetMessage`。慢帧舍弃已错过deadline，不忙等追赶；
+暂停／窗口隐藏／完成时停钟，owned handle随Host可重试释放。task16ms与close30ms路径保留。
+Win10旧build不支持高分辨率flag时，仅ERROR_INVALID_PARAMETER走普通waitable timer，
+`HostDiagnostics.frameClockQuality`明确报告compatibility，不能保证120Hz。不调用timeBeginPeriod。
+
+测量及初轮回归源626 `b8b222db…`，12个受影响程序115项通过（Host/task/animation/Canvas），非全仓／CI。
+真实轻量入口是**1个移动圆＋native text**、软件渲染、3秒动画及至少1.5秒idle；
+预定A1/B1/B2/A2四个独立进程全部exit0，相同fixture与工具链。accepted frame与实际成功绘制
+计数一致：A103／108、B362／362；组均值34.978→120.618次/秒。这是帧更新／绘制吞吐，
+不是屏幕呈现FPS；B的view观察间隔p95仍8.65–8.66ms，不证明稳定满足8.33ms截止时间。
+
+每accepted帧UI／进程原始周期的组均值分别约降18.36%／18.13%，只是本入口观测归一化；
+两侧cadence及工作帧数不同，频率／虚拟化、watchdog摊销与探针成本未消除，不等于CPU时间、
+利用率或同工作量因果提速。**总CPU下降没有成立**：约3秒内进程accounted CPU，
+A0–15.625ms、B343.75–421.875ms；原始周期总量也增加。idle无额外绘制、帧钟disarmed，
+但100ms观察watchdog仍在且idle原始周期非零；累计CPU刻度增量0不能称0%CPU。
+
+证据在唯一索引的`canvas-120hz-frame-clock/summary.json`、`analysis.json`及冻结源码ZIP；
+保留旧16ms、清理遗漏、spurious wake和活动阻塞读取的真实RED与最终GREEN。
+独立验收状态以summary.json为准。**10k／120Hz、降低总CPU、真实120Hz显示、GPU／高DPI／
+完整视觉以及全量测试仍未完成**，不把该轻量入口当作原目标完成；正式性能协议与旧固定诊断不变。
+
+首次独立报告保留原文（0 Critical／1 Important／7 Minor）；父会话不采纳“有Important也PASS”，
+补上任务与动画共存的真实Host测试。真实16ms任务消息须在`IsDialogMessage`边界观察
+（该API可能自行dispatch并绕过DispatchMessage钩子）。新测试同时覆盖两种clock确实arm、
+任务tick不推进动画、动画完成后任务timer仍实际tick、task回调仅一次且不在dispatch内、
+全部idle停钟和Canvas资源恢复。单一负控仅把`needsTaskTick`误加到animationDue，
+编译0／运行1，精确失败`taskAdvanced was true`；相同测试＋未改产品运行时3项全绿。
+保留最初effects编译失败和错误observer钩子导致计数0的fixture失败，不当语义RED。
+
+补证源626 `195c551b…`相对测量源`b8b222db…`只改变`tests/windows/test_animation.nim`；
+同fixture与所有运行时字节相同，故复用11个未变程序113项及配对观测，新3项替换旧2项，
+合计116个不同检查的组合证据，**不是在新aggregate重跑116项，更非全仓**。
+626包含D注入的观察fixture，不能仅靠repo checkout复现；A624含新portable RED测试及修改的
+animation测试但未编译进benchmark，生产运行时与接受622树相同。区间口径（剔除首个启动区间、
+nearest-rank p95）已补入analysis.json。独立I1聚焦复验已关闭：0 Critical／0 Important，保留旧build节奏、脚本aggregate信任及理论持续无消息wake三项限制。证据保存后VM正常ACPI停机、临时22文件删除、验收代理closed且历史保留；无提交／推送。

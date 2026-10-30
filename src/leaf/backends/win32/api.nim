@@ -309,3 +309,15 @@ proc ImmNotifyIME*(context: HIMC, action, index, value: DWORD): BOOL
 {.pop.}
 
 proc initControls*(init: ptr INITCOMMONCONTROLSEX): BOOL {.stdcall, dynlib: "comctl32.dll", importc: "InitCommonControlsEx", raises: [].}
+
+# One-shot frame waits: auto-reset handles, no APC or worker callback.
+proc CreateWaitableTimerExW*(attributes:pointer,name:WidePtr,flags,access:DWORD):HANDLE
+  {.stdcall,dynlib:"kernel32.dll",importc,raises:[].}
+proc SetWaitableTimerEx*(timer:HANDLE,due:ptr int64,period:int32,completion,argument,wakeContext:pointer,tolerance:DWORD):BOOL
+  {.stdcall,dynlib:"kernel32.dll",importc,raises:[].}
+proc CancelWaitableTimer*(timer:HANDLE):BOOL
+  {.stdcall,dynlib:"kernel32.dll",importc,raises:[].}
+proc CloseHandle*(handle:HANDLE):BOOL
+  {.stdcall,dynlib:"kernel32.dll",importc,raises:[].}
+proc MsgWaitForMultipleObjectsEx*(count:DWORD,handles:ptr HANDLE,timeout,wakeMask,flags:DWORD):DWORD
+  {.stdcall,dynlib:"user32.dll",importc,raises:[].}

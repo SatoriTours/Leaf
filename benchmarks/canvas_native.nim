@@ -9,6 +9,26 @@ import leaf/animation as animation
 import leaf/backends/win32/[api,calls,host,backend,canvas]
 import ../examples/graphics_lab/scene
 import ./[canvas_config,canvas_report]
+when defined(leafCanvasFixedDiagnostic):
+  import ./canvas_fixed_schedule
+  import leaf/backends/win32/canvas_cpu_probe
+  type
+    CpuFileTime {.importc:"FILETIME",header:"<windows.h>",bycopy.} = object
+      dwLowDateTime,dwHighDateTime:uint32
+    CpuTimes = object
+      thread100ns,process100ns:uint64
+  proc currentThread():pointer {.importc:"GetCurrentThread",header:"<windows.h>".}
+  proc threadTimes(handle:pointer,created,exited,kernel,user:ptr CpuFileTime):int32 {.stdcall,importc:"GetThreadTimes",dynlib:"kernel32.dll".}
+  proc processTimes(handle:pointer,created,exited,kernel,user:ptr CpuFileTime):int32 {.stdcall,importc:"GetProcessTimes",dynlib:"kernel32.dll".}
+  proc ticks(value:CpuFileTime):uint64 = (uint64(value.dwHighDateTime) shl 32) or uint64(value.dwLowDateTime)
+  proc cpuTimes():CpuTimes =
+    var created,exited,kernel,user:CpuFileTime
+    if threadTimes(currentThread(),addr created,addr exited,addr kernel,addr user)==0:
+      raise newException(CanvasPerfError,"GetThreadTimes unavailable")
+    result.thread100ns=ticks(kernel)+ticks(user)
+    if processTimes(cast[pointer](-1),addr created,addr exited,addr kernel,addr user)==0:
+      raise newException(CanvasPerfError,"GetProcessTimes unavailable")
+    result.process100ns=ticks(kernel)+ticks(user)
 
 const LeafCanvasSourceHash {.strdefine.} = "unverified"
 const LeafCanvasToolchainHash {.strdefine.} = "unverified"
@@ -23,6 +43,12 @@ type
   CpuSample = object
     at_ms,interval_ms,timeline_ms,scene_sample_ms,frame_build_validate_ms:float64
     framework_commit_ms,native_resource_ms,cpu_draw_submit_ms,total_ms,record_ms:float64
+    when defined(leafCanvasFixedDiagnostic):
+      phase_index:int
+      ui_thread_cpu_ms,process_cpu_ms:float64
+      total_cpu_cycles,timeline_cpu_cycles,scene_sample_cpu_cycles,frame_build_cpu_cycles:uint64
+      commit_inclusive_cpu_cycles,framework_cpu_cycles,native_resource_cpu_cycles,draw_submit_cpu_cycles:uint64
+      draw_record_cpu_cycles,end_draw_cpu_cycles:uint64
 proc systemMetric(index:int32):int32 {.stdcall,importc:"GetSystemMetrics",dynlib:"user32.dll".}
 proc processHandle():pointer {.importc:"GetCurrentProcess",header:"<windows.h>".}
 proc processMemory(handle:pointer,counters:ptr NativeMemory,size:uint32):int32 {.stdcall,importc:"GetProcessMemoryInfo",dynlib:"psapi.dll".}
@@ -55,7 +81,11 @@ proc refreshRate(window:HWND):JsonNode =
   finally:discard ReleaseDC(window,dc)
 
 proc main() =
-  let config=parseCanvasArgs(commandLineParams())
+  when defined(leafCanvasFixedDiagnostic):
+    let fixed=parseFixedCanvasArgs(commandLineParams())
+    let config=fixed.producer
+  else:
+    let config=parseCanvasArgs(commandLineParams())
   require(LeafCanvasSourceHash.len==64 and LeafCanvasToolchainHash.len==64,"verified compile-time source and toolchain hashes are required")
   for suffix in [".json",".csv"]:require(not fileExists(config.output & suffix),"refusing to overwrite report")
   require(getFileSize(config.environment)<=65536,"public environment metadata too large")
@@ -70,7 +100,9 @@ proc main() =
   let scene=newLabScene(count=config.objects,load=load)
   var items=newSeq[LabItem](config.objects)
   var samples=newSeq[CpuSample](config.capacity)
-  let initial=scene.frameAt(0)
+  let initial=scene.frameAt(
+    when defined(leafCanvasFixedDiagnostic):fixed.schedule.initialPhase
+    else:0.0)
   var current:State[CanvasFrame]
   let root=defineComponent[CanvasFrame,State[CanvasFrame]]("CanvasDurationProducer",
     proc(ctx:MountContext,frame:CanvasFrame):State[CanvasFrame] =
@@ -115,23 +147,42 @@ proc main() =
 
   proc operation(record:bool) =
     environmentValid()
+    when defined(leafCanvasFixedDiagnostic):
+      let beforeCpu=cpuTimes()
+      let beforeCycles=queryUiCycles()
+      var timelineCycles,samplingCycles,buildCycles,commitCycles:uint64
     let started=getMonoTime()
     let beforeDraw=native.canvasDiagnostics(canvasHandle)
     var timelineNs,samplingNs,buildNs,resourceNs,drawNs,commitNs:int64
     var frame:CanvasFrame
     if load!=LabLoad.staticFrame:
       var mark=getMonoTime()
-      var timeline=animation.newTimeline(animation.tween(0.0,1.0,duration=4000.ms,repeat=forever,autoplay=true))
-      timeline.advance(ms((started-sceneStarted).inNanoseconds).ms)
-      let phase=timeline.sample()
+      when defined(leafCanvasFixedDiagnostic):
+        var cycleMark=queryUiCycles()
+      when defined(leafCanvasFixedDiagnostic):
+        let phase=if record:fixed.schedule.phase(used) else:fixed.schedule.warmupPhase(warmFrames)
+      else:
+        var timeline=animation.newTimeline(animation.tween(0.0,1.0,duration=4000.ms,repeat=forever,autoplay=true))
+        timeline.advance(ms((started-sceneStarted).inNanoseconds).ms)
+        let phase=timeline.sample()
       timelineNs=since(mark)
+      when defined(leafCanvasFixedDiagnostic):
+        timelineCycles=cycleDelta(queryUiCycles(),cycleMark)
+        cycleMark=queryUiCycles()
       mark=getMonoTime()
       scene.sampleIntoInternal(phase,items)
       samplingNs=since(mark)
+      when defined(leafCanvasFixedDiagnostic):
+        samplingCycles=cycleDelta(queryUiCycles(),cycleMark)
+        cycleMark=queryUiCycles()
       mark=getMonoTime()
       frame=scene.frameFromItemsInternal(items)
       buildNs=since(mark)
+      when defined(leafCanvasFixedDiagnostic):
+        buildCycles=cycleDelta(queryUiCycles(),cycleMark)
       require(frame.commandCount==3*config.objects and frame.pathSegmentCount==4*(config.objects div 3),"sampled scene identity changed")
+    when defined(leafCanvasFixedDiagnostic):
+      let commitCycleStart=queryUiCycles()
     let commitStarted=getMonoTime()
     if load==LabLoad.staticFrame:
       require(native.repaintCanvasForMeasurementInternal(canvasHandle),"accepted repaint did not draw")
@@ -140,6 +191,8 @@ proc main() =
       current.update(proc(old:CanvasFrame):CanvasFrame=candidate)
       require(rt.flush(),"State/BackendSession frame was not accepted")
     let commitTotal=since(commitStarted)
+    when defined(leafCanvasFixedDiagnostic):
+      commitCycles=cycleDelta(queryUiCycles(),commitCycleStart)
     let afterDraw=native.canvasDiagnostics(canvasHandle)
     require(afterDraw.successfulDraws==beforeDraw.successfulDraws+1,"producer operation did not complete exactly one EndDraw")
     resourceNs=afterDraw.resourcePreparationNs-beforeDraw.resourcePreparationNs
@@ -147,6 +200,12 @@ proc main() =
     require(resourceNs>=0 and drawNs>=0 and resourceNs+drawNs<=commitTotal,"overlapping native CPU instrumentation")
     commitNs=commitTotal-resourceNs-drawNs
     let total=since(started)
+    when defined(leafCanvasFixedDiagnostic):
+      let afterCycles=queryUiCycles()
+      let afterCpu=cpuTimes()
+      let resourceCycles=cycleDelta(afterDraw.resourcePreparationCycles,beforeDraw.resourcePreparationCycles)
+      let drawCycles=cycleDelta(afterDraw.drawSubmitCycles,beforeDraw.drawSubmitCycles)
+      require(afterCpu.thread100ns>=beforeCpu.thread100ns and afterCpu.process100ns>=beforeCpu.process100ns,"CPU counters moved backwards")
     if record:
       require(used<samples.len and previousValid,"sample capacity or frame interval anchor missing")
       let recording=getMonoTime()
@@ -154,6 +213,21 @@ proc main() =
         interval_ms:ms((started-previousFrameStarted).inNanoseconds),timeline_ms:ms(timelineNs),
         scene_sample_ms:ms(samplingNs),frame_build_validate_ms:ms(buildNs),
         framework_commit_ms:ms(commitNs),native_resource_ms:ms(resourceNs),cpu_draw_submit_ms:ms(drawNs),total_ms:ms(total))
+      when defined(leafCanvasFixedDiagnostic):
+        samples[used].phase_index=used mod fixed.schedule.cycleFrames
+        samples[used].total_cpu_cycles=cycleDelta(afterCycles,beforeCycles)
+        samples[used].timeline_cpu_cycles=timelineCycles
+        samples[used].scene_sample_cpu_cycles=samplingCycles
+        samples[used].frame_build_cpu_cycles=buildCycles
+        samples[used].commit_inclusive_cpu_cycles=commitCycles
+        samples[used].native_resource_cpu_cycles=resourceCycles
+        samples[used].draw_submit_cpu_cycles=drawCycles
+        samples[used].draw_record_cpu_cycles=cycleDelta(afterDraw.drawRecordCycles,beforeDraw.drawRecordCycles)
+        samples[used].end_draw_cpu_cycles=cycleDelta(afterDraw.endDrawCycles,beforeDraw.endDrawCycles)
+        require(samples[used].draw_record_cpu_cycles<=drawCycles and samples[used].end_draw_cpu_cycles<=drawCycles-samples[used].draw_record_cpu_cycles,"native draw cycle stages overlap")
+        samples[used].framework_cpu_cycles=frameworkCycles(commitCycles,resourceCycles,drawCycles)
+        samples[used].ui_thread_cpu_ms=float64(afterCpu.thread100ns-beforeCpu.thread100ns)/10000.0
+        samples[used].process_cpu_ms=float64(afterCpu.process100ns-beforeCpu.process100ns)/10000.0
       samples[used].record_ms=ms(since(recording))
       inc used
     else:inc warmFrames
@@ -167,27 +241,38 @@ proc main() =
       if not done:
         environmentValid()
         let elapsed=since(phaseStarted)
-        if not measured and previousValid and elapsed>=int64(config.warmupMs)*1_000_000:
+        let warmupDone =
+          when defined(leafCanvasFixedDiagnostic):not fixed.schedule.warmingUp(warmFrames) and previousValid
+          else:previousValid and elapsed>=int64(config.warmupMs)*1_000_000
+        if not measured and warmupDone:
           warmElapsed=ms(elapsed)
           afterWarmup=observation() # GC/stat collection is outside the measurement window.
           measuredStart=native.canvasDiagnostics(canvasHandle)
           phaseStarted=getMonoTime()
+          when defined(leafCanvasFixedDiagnostic):
+            previousFrameStarted=phaseStarted
           nextDue=0
           measured=true
         let active=since(phaseStarted)
-        if measured and active>=int64(config.sampleMs)*1_000_000:
+        let samplingDone =
+          when defined(leafCanvasFixedDiagnostic):fixed.schedule.complete(used)
+          else:active>=int64(config.sampleMs)*1_000_000
+        if measured and samplingDone:
           sampleElapsed=ms(active)
-          let nominal=int((int64(config.sampleMs)*1_000_000-1) div CadenceNs)+1
-          cutoffDropped=max(0,nominal-requests)
-          requests+=cutoffDropped
+          when not defined(leafCanvasFixedDiagnostic):
+            let nominal=int((int64(config.sampleMs)*1_000_000-1) div CadenceNs)+1
+            cutoffDropped=max(0,nominal-requests)
+            requests+=cutoffDropped
           lastRefresh=refreshRate(canvasWindow)
           require(lastRefresh==environment["refresh_hz"],"display refresh rate changed")
           atMeasureEnd=observation(false)
           finalDraw=native.canvasDiagnostics(canvasHandle)
           done=true
           window.requestClose()
-        elif active>=nextDue:
-          let due=int((active-nextDue) div CadenceNs)+1
+        elif defined(leafCanvasFixedDiagnostic) or active>=nextDue:
+          let due =
+            when defined(leafCanvasFixedDiagnostic):1
+            else:int((active-nextDue) div CadenceNs)+1
           nextDue+=int64(due)*CadenceNs
           if measured:
             requests+=due
@@ -218,6 +303,9 @@ proc main() =
     environmentValid()
     require(SetTimer(rootWindow,WakeTimer,1,nil)!=0,"producer wake timer failed")
     phaseStarted=getMonoTime();sceneStarted=phaseStarted
+    when defined(leafCanvasFixedDiagnostic):
+      previousFrameStarted=phaseStarted
+      previousValid=true
     pumpExit=window.pump()
     # Surface is already retired by close. The last read must be taken before close.
   finally:
@@ -249,11 +337,30 @@ proc main() =
       "native_before":counts(baseline),"native_after":counts(after)},
     "resources":{"before":before,"after_warmup":afterWarmup,"at_measure_end":atMeasureEnd,"after_cleanup":afterCleanup},
     "observer":{"clock_pair_ms":clockPairMs},"gpu_ms":newJNull(),"display_fps":newJNull(),"samples":raw}
-  report["summary"]=summarizeCanvas(report)
-  let csv=canvasCsv(report)
+  when defined(leafCanvasFixedDiagnostic):
+    require(used==fixed.schedule.sampleFrames,"fixed diagnostic did not complete its frame budget")
+    report["kind"]= %"leaf-canvas-fixed-diagnostic"
+    report["metadata"]["protocol"]= %"fixed-sequence-v1"
+    report["metadata"]["warmup_frames"]= %warmFrames
+    report["metadata"]["sample_frames"]= %used
+    report["metadata"]["cycle_frames"]= %fixed.schedule.cycleFrames
+    report["metadata"]["sequence_sha256"]= %fixed.schedule.fingerprint
+    report["metadata"]["initial_phase"]= %fixed.schedule.initialPhase
+    report["metadata"]["warmup_ms"]=newJNull()
+    report["metadata"]["sample_ms"]=newJNull()
+    report["metadata"]["cadence_ms"]=newJNull()
+    report["metadata"]["cpu_clock"]= %"GetThreadTimes/GetProcessTimes; 100ns units, OS-quantized accounting; process may exceed wall"
+    report["metadata"]["cpu_bracket"]= %"CPU reads enclose wall timer; query overhead not subtracted; wall-minus-CPU is not presentation wait"
+    report["metadata"]["cycle_clock"]= %"QueryThreadCycleTime on UI thread only; raw counts, never time or GPU cycles; frequency/virtualization dependent"
+    report["metadata"]["cycle_stages"]= %"commit_inclusive encloses resource+draw+framework; draw encloses draw_record+end_draw; total encloses timeline+sampling+build+commit; query overhead retained"
+  else:
+    report["summary"]=summarizeCanvas(report)
+  when not defined(leafCanvasFixedDiagnostic):
+    let csv=canvasCsv(report)
   let body= $report
   require(body.len<=16*1024*1024,"bounded report exceeded 16 MiB")
-  writeFile(config.output & ".csv",csv)
+  when not defined(leafCanvasFixedDiagnostic):
+    writeFile(config.output & ".csv",csv)
   writeFile(config.output & ".json",body & "\n")
   echo "Canvas CPU-side report complete; frames=",used," formal=",config.formal
 
