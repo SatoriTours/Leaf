@@ -32,7 +32,8 @@ component NativeTransition:
 
 type Probe = object
   intermediate, hiddenStable, resumedWithoutJump, complete, idle, resourcesReturned: bool
-  evaluations, arms, kills: int
+  clockIdle: bool
+  evaluations, taskArms, frameCreates, frameArms, frameCloses: int
 
 proc runProbe(minimize: bool, delayFirstSample = false): Probe =
   evaluations = 0
@@ -43,14 +44,23 @@ proc runProbe(minimize: bool, delayFirstSample = false): Probe =
   var nativeCalls = systemWin32Calls()
   let getMessage = nativeCalls.getMessage
   let arm = nativeCalls.setTimer
-  let kill = nativeCalls.killTimer
-  var arms, kills = 0
+  let createFrame = nativeCalls.createFrameTimer
+  let armFrame = nativeCalls.armFrameTimer
+  let closeFrame = nativeCalls.closeFrameTimer
+  let waitFrame = nativeCalls.waitFrameMessage
+  var taskArms, frameCreates, frameArms, frameCloses = 0
   nativeCalls.setTimer = proc(hwnd: HWND, id: UINT_PTR, interval: UINT, callback: TIMERPROC): UINT_PTR =
-    if interval == 16: inc arms
+    if interval == 16: inc taskArms
     arm(hwnd, id, interval, callback)
-  nativeCalls.killTimer = proc(hwnd: HWND, id: UINT_PTR): BOOL =
-    inc kills
-    kill(hwnd, id)
+  nativeCalls.createFrameTimer = proc(highResolution: bool): HANDLE =
+    result = createFrame(highResolution)
+    if result != nil: inc frameCreates # Count owned handles, including legitimate compatibility fallback.
+  nativeCalls.armFrameTimer = proc(timer: HANDLE, due100ns: int64): BOOL =
+    inc frameArms
+    armFrame(timer, due100ns)
+  nativeCalls.closeFrameTimer = proc(timer: HANDLE): BOOL =
+    result = closeFrame(timer)
+    if result != 0: inc frameCloses
   let constructionStarted = getMonoTime()
   var started: MonoTime
   var window: Win32Host
@@ -59,8 +69,8 @@ proc runProbe(minimize: bool, delayFirstSample = false): Probe =
   var hiddenBoundarySeen = false
   var beforeHiddenAccountingMs: int64
   var frozen = 0.0
-  var intermediate, hiddenStable, resumedWithoutJump: bool
-  nativeCalls.getMessage = proc(message: ptr MSG, hwnd: HWND, first, last: UINT): BOOL =
+  var intermediate, hiddenStable, resumedWithoutJump, clockIdle: bool
+  proc beforeRead() =
     try:
       let elapsed = (getMonoTime() - started).inMilliseconds
       let radius = rt.find("canvas").node.canvasFrame.get.commandAt(0).radius
@@ -109,12 +119,22 @@ proc runProbe(minimize: bool, delayFirstSample = false): Probe =
         resumedWithoutJump = resumedWithoutJump and radius >= frozen and radius <= upperBound
         if visibleMs >= 40: phase = 4
       let finished = radius == 24 and not rt.animationPumpPending
+      if finished: clockIdle = not window.diagnostics.frameClockArmed
       if elapsed >= 2000 or (finished and (not minimize or phase == 4)):
         window.requestClose()
-      result = getMessage(message, hwnd, first, last)
-      messageReturnedAt = getMonoTime() # Lower bound for the ensuing frame sample.
     except Exception as error:
       raise newException(UiError, error.msg)
+  # Each ordinary outer turn starts with either a frame wait or idle GetMessage.
+  # Do not inspect again at Peek: it follows the same wait before safeTurn and
+  # could falsely count a synchronous minimize as an observed hidden boundary.
+  nativeCalls.waitFrameMessage = proc(timer: HANDLE): DWORD =
+    beforeRead()
+    result = waitFrame(timer)
+    messageReturnedAt = getMonoTime() # Lower bound for the ensuing frame sample.
+  nativeCalls.getMessage = proc(message: ptr MSG, hwnd: HWND, first, last: UINT): BOOL =
+    beforeRead()
+    result = getMessage(message, hwnd, first, last)
+    messageReturnedAt = getMonoTime()
   window = createHost("Leaf transition timer", DipSize(width: 400, height: 240), nativeCalls)
   window.setStartupScope(proc(): bool = activity.busy or rt.installingUpdate or rt.installingHook)
   let native = newWin32Backend(window, renderer=CanvasRenderer.software)
@@ -129,7 +149,8 @@ proc runProbe(minimize: bool, delayFirstSample = false): Probe =
   result = Probe(intermediate: intermediate, hiddenStable: hiddenStable,
     resumedWithoutJump: resumedWithoutJump,
     complete: rt.find("canvas").node.canvasFrame.get.commandAt(0).radius == 24,
-    idle: not rt.animationPumpPending, evaluations: evaluations, arms: arms, kills: kills)
+    idle: not rt.animationPumpPending, clockIdle: clockIdle, evaluations: evaluations,
+    taskArms: taskArms, frameCreates: frameCreates, frameArms: frameArms, frameCloses: frameCloses)
   rt.closeRuntime()
   result.resourcesReturned = canvasResourceCounts() == baseline
 
@@ -140,8 +161,11 @@ suite "real Canvas presentation transition timer":
     check probe.complete
     check probe.idle
     check probe.evaluations == 2
-    check probe.arms == 1
-    check probe.kills >= 1
+    check probe.taskArms == 0
+    check probe.frameCreates == 1
+    check probe.frameArms > 0
+    check probe.frameCloses == 1
+    check probe.clockIdle
     check probe.resourcesReturned
   test "minimize freezes presentation tracks and restore does not replay hidden time":
     let probe = runProbe(true)
@@ -151,6 +175,7 @@ suite "real Canvas presentation transition timer":
     check probe.complete
     check probe.idle
     check probe.evaluations == 2
+    check probe.clockIdle
     check probe.resourcesReturned
 
   test "late first sampling still observes interpolation before real minimize":
@@ -161,4 +186,5 @@ suite "real Canvas presentation transition timer":
     check probe.complete
     check probe.idle
     check probe.evaluations == 2
+    check probe.clockIdle
     check probe.resourcesReturned
