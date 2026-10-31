@@ -1,7 +1,7 @@
 ## Bounded platform-neutral intrinsic measurement cache.
 import std/[tables, deques, options]
 import ./[core, native_layout]
-const MaxMeasureEntries* = 128
+const MaxMeasureEntries* = 2048 # Holds a thousand-control working set across both layout constraints.
 type
   MeasureKey* = tuple[kind: NodeKind, label, placeholder: string, state: uint8, width, height: float64]
   MeasureCache* = object

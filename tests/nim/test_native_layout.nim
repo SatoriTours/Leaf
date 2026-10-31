@@ -529,28 +529,28 @@ suite "MeasureProc local constraint and finite geometry":
     check boxes[4].rect.y == 30
     check 20.0 in widths[]
 
-  test "fixed leaf constraint is normalized before measuring and caching":
+  test "fixed width constraint is normalized before measuring and caching auto height":
     var constraints: seq[(uint64, float64, float64)]
     var entities: Table[NodeHandle, MountedEntity]
     entities[NodeHandle(1)] = ent(1, 0, row, 0)
     entities[NodeHandle(2)] = entityOf(2, 1, 0,
-      ui(NodeKind.text, text = "x", styles = style({"width": "20", "height": "50"})))
+      ui(NodeKind.text, text = "x", styles = style({"width": "20"})))
     let measure = proc(entity: MountedEntity, available: DipSize): DipSize =
       constraints.add((uint64(entity.handle), available.width, available.height))
       DipSize(width: 5, height: 3)
     let boxes = layoutTree(entities, DipSize(width: 100, height: 100), measure)
     check boxes[1].rect.width == 20
-    check boxes[1].rect.height == 50
-    # The leaf is measured once, under its effective local constraint.
+    check boxes[1].rect.height == 3
+    # Auto height still needs measurement under the effective local width.
     check constraints.len == 1
-    check constraints[0] == (2'u64, 20.0, 50.0)
+    check constraints[0] == (2'u64, 20.0, 100.0)
 
   test "a new layout call does not reuse the previous cache":
     var calls = 0
     var entities: Table[NodeHandle, MountedEntity]
     entities[NodeHandle(1)] = ent(1, 0, row, 0)
     entities[NodeHandle(2)] = entityOf(2, 1, 0,
-      ui(NodeKind.text, text = "x", styles = style({"width": "20", "height": "50"})))
+      ui(NodeKind.text, text = "x", styles = style({"width": "20"})))
     let measure = proc(entity: MountedEntity, available: DipSize): DipSize =
       inc calls
       DipSize(width: 5, height: 3)
@@ -651,7 +651,7 @@ suite "Preferred bases and allocated width measurement phases":
     check second[1].rect.height == 10
     check keys == @[(2'u64, 10.0, 100.0), (2'u64, 100.0, 100.0)]
 
-  test "unchanged fixed constraints share a cache key across measurement phases":
+  test "fixed-size leaves never enter native intrinsic measurement":
     var entities: Table[NodeHandle, MountedEntity]
     entities[NodeHandle(1)] = ent(1, 0, row, 0)
     entities[NodeHandle(2)] = ent(2, 1, text, 0,
@@ -663,7 +663,7 @@ suite "Preferred bases and allocated width measurement phases":
     let boxes = layoutTree(entities, DipSize(width: 100, height: 100), measure)
     check boxes[1].rect.width == 20
     check boxes[1].rect.height == 50
-    check keys == @[(2'u64, 20.0, 50.0)]
+    check keys.len == 0
 
   test "grown fixed container propagates its allocated width to UTF preferred height":
     var entities: Table[NodeHandle, MountedEntity]

@@ -174,9 +174,13 @@ suite "real Direct2D Canvas":
     let handle = session.handleFor(runtime.find("drawing").id)
     check win.canvasDiagnostics(handle).successfulDraws > 0
     let created = win.diagnostics.creates
+    let drawn = win.canvasDiagnostics(handle)
     check runtime.dispatch("grow", Event(kind: click))
     check win.diagnostics.creates == created
-    check win.canvasDiagnostics(handle).frameId >= 2
+    # Canvas-only business updates must draw before accepting the new scene,
+    # even though the viewport has not changed its dimensions.
+    check win.canvasDiagnostics(handle).successfulDraws > drawn.successfulDraws
+    check win.canvasDiagnostics(handle).frameId > drawn.frameId
     window.destroyHost()
     runtime.closeRuntime()
     check win.diagnostics.liveWindows == 0

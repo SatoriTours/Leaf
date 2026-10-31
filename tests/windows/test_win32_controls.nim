@@ -132,6 +132,70 @@ proc mounted(render:proc():Node,c:Win32Calls=systemWin32Calls()):Fixture=
   h.bindSession(session,proc():bool=activity.busy)
   (h,win,session,runtime,activity)
 
+suite "incremental native layout work":
+  test "ten changed fixed leaves do not lay out or touch a thousand native windows":
+    var changed = false
+    var positions, regions, shows: int
+    var c = systemWin32Calls()
+    let realPos = c.windowPos
+    let realRegion = c.setRegion
+    let realShow = c.showWindow
+    c.windowPos = proc(w, after: HWND, x,y,width,height: int32, flags: UINT): BOOL =
+      inc positions
+      realPos(w, after, x,y,width,height,flags)
+    c.setRegion = proc(w: HWND, r: HRGN, redraw: BOOL): int32 =
+      inc regions
+      realRegion(w,r,redraw)
+    c.showWindow = proc(w: HWND, command: int32): BOOL =
+      inc shows
+      realShow(w,command)
+    let f = mounted(proc(): Node =
+      var children: seq[Node]
+      for i in 0..<1000:
+        children.add(text((if changed and i < 10: "new " else: "old ") & $i,
+          key = "leaf" & $i, styles=style({"width":"80", "height":"1"})))
+      column(children, key="root"), c)
+    defer: f.h.destroyHost()
+    let before = f.win.diagnostics
+    positions = 0; regions = 0; shows = 0
+    changed = true
+    check f.runtime.refresh()
+    check f.win.diagnostics.layouts == before.layouts
+    check f.win.diagnostics.measures == before.measures
+    check f.win.diagnostics.setTexts == before.setTexts + 10
+    check positions == 0 and regions == 0 and shows == 0
+    for i in 0..<10:
+      check findText(f.h.windowHandle, "new " & $i) != nil
+
+  test "identical geometry submits no position region visibility or order calls":
+    var positions, regions, shows: int
+    var c = systemWin32Calls()
+    let realPos = c.windowPos
+    let realRegion = c.setRegion
+    let realShow = c.showWindow
+    c.windowPos = proc(w, after: HWND, x,y,width,height: int32, flags: UINT): BOOL =
+      inc positions
+      realPos(w,after,x,y,width,height,flags)
+    c.setRegion = proc(w: HWND, r: HRGN, redraw: BOOL): int32 =
+      inc regions
+      realRegion(w,r,redraw)
+    c.showWindow = proc(w: HWND, command: int32): BOOL =
+      inc shows
+      realShow(w,command)
+    let f = mounted(proc(): Node =
+      column(@[text("stable", key="label"), button("button", key="button")], key="root"), c)
+    defer: f.h.destroyHost()
+    let ctx = f.h.context
+    positions = 0; regions = 0; shows = 0
+    f.win.relayout(DipSize(width:ctx.contentWidth, height:ctx.contentHeight), int(ctx.scale * 96))
+    check positions == 0 and regions == 0 and shows == 0
+    # A real clip change must still be applied, then become quiet again.
+    f.win.relayout(DipSize(width:20, height:10), int(ctx.scale * 96))
+    check regions > 0
+    positions = 0; regions = 0; shows = 0
+    f.win.relayout(DipSize(width:20, height:10), int(ctx.scale * 96))
+    check positions == 0 and regions == 0 and shows == 0
+
 suite "W-MAP11 DEFAULT STABLE PREPARE RECOVER SOURCE":
   test "all eleven stock kinds are real Unicode native children with actual state":
     let f=mounted(proc():Node=column(@[row(@[

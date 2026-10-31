@@ -3,7 +3,7 @@ import std/[tables, options, algorithm, widestrs, sets]
 import ../../[core, styles, backend, backend_session, native_layout, native_edit, native_measure_cache,
   height_index, native_list_layout, native_theme, graphics, canvas_input]
 import ./[api, calls, host, capabilities, measure, control_ids, list_host, row_pool,
-  resource_owner, navigation_input, skin, canvas]
+  resource_owner, navigation_input, skin, canvas, layout_state]
 
 type
   Win32Diagnostics* = object
@@ -36,6 +36,9 @@ type
     trackingMouse: bool
     acceptedNavigation: Option[HostNavigationProps]
     backEnabled: bool
+    appliedPosition: Option[tuple[x, y, width, height: int]]
+    appliedClip: Option[tuple[left, top, right, bottom: int]]
+    appliedVisible: Option[bool]
     capture: proc(control: NativeControl, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.closure.}
   Win32Backend* = ref object
     host: Win32Host
@@ -60,6 +63,7 @@ type
     # removed: accepted metadata lives in the native consumer's prepared map.
     current, candidate: Table[NodeHandle, MountedEntity]
     cache: MeasureCache
+    appliedOrders: Table[NodeHandle, seq[HWND]]
     controlIds: ControlIdPool
     pendingRegions: seq[HRGN]
     pendingContexts: seq[tuple[window: HWND, context: HIMC]]
@@ -1495,6 +1499,42 @@ proc noteRowsetReadiness(win: Win32Backend, list: Win32ListHost,
   frame.rowsPending = inside < needed
   frame.trimPending = outside > 0
 
+proc showControl(win: Win32Backend, control: NativeControl, visible: bool) =
+  if control.appliedVisible == some(visible): return
+  discard win.calls.showWindow(control.window, if visible: SW_SHOW else: SW_HIDE)
+  control.appliedVisible = some(visible)
+
+proc placeControl(win: Win32Backend, control: NativeControl,
+                  position: tuple[x, y, width, height: int],
+                  clip: tuple[left, top, right, bottom: int],
+                  rowSubtree = false) =
+  # Cache receipts only after the corresponding API succeeds. Partial failure
+  # leaves unapplied work due; rollback can compare against what actually ran.
+  let positionOperation = if rowSubtree: "SetWindowPos row subtree" else: "SetWindowPos control"
+  let regionSuffix = if rowSubtree: " row subtree" else: ""
+  if control.appliedPosition != some(position):
+    if win.calls.windowPos(control.window, nil, int32(position.x), int32(position.y),
+        int32(position.width), int32(position.height),
+        SWP_NOZORDER or SWP_NOACTIVATE) == 0: nativeError(positionOperation)
+    control.appliedPosition = some(position)
+  if control.appliedClip != some(clip):
+    let region = win.calls.rectRegion(int32(clip.left), int32(clip.top),
+      int32(clip.right), int32(clip.bottom))
+    if region == nil: nativeError("CreateRectRgn" & regionSuffix)
+    win.pendingRegions.add(region)
+    var primary: ref CatchableError
+    try:
+      if win.calls.setRegion(control.window, region, 1) == 0: nativeError("SetWindowRgn" & regionSuffix)
+      win.pendingRegions[^1] = nil # Ownership transfers only on success.
+      control.appliedClip = some(clip)
+    except CatchableError as error: primary = error
+    try: win.releaseRegions()
+    except CatchableError as secondary:
+      if primary != nil: primary.msg.add("; region cleanup secondary: " & secondary.msg)
+      else: raise secondary
+    if primary != nil: raise primary
+  win.showControl(control, true)
+
 proc applyRowBoxes(win: Win32Backend, boxes: seq[ListRowBox], dpi: int32) =
   ## The only Position/Region/Show path for list row subtrees: commit apply,
   ## geometry apply and rollback replay all come through here. Rect, clip and DPI
@@ -1512,10 +1552,6 @@ proc applyRowBoxes(win: Win32Backend, boxes: seq[ListRowBox], dpi: int32) =
       y: item.rect.y - item.local.y), int(dpi))
     let width = max(0, bp.right - bp.left)
     let height = max(0, bp.bottom - bp.top)
-    if win.calls.windowPos(control.window, nil, int32(bp.left - parent.left), int32(bp.top - parent.top),
-        int32(width), int32(height),
-        SWP_NOZORDER or SWP_NOACTIVATE) == 0:
-      nativeError("SetWindowPos row subtree")
     # Region coordinates are window-local. Subtract the window's viewport
     # rect from the viewport clip, NOT its parent-local placement: descendants
     # of nonzero/partially scrolled rows otherwise receive displaced regions.
@@ -1526,21 +1562,8 @@ proc applyRowBoxes(win: Win32Backend, boxes: seq[ListRowBox], dpi: int32) =
     let bottom = max(top, clamp(cp.bottom - bp.top, 0, height))
     # CreateRectRgn normalizes inverted edges: clamp BOTH ends so completely
     # clipped overscan stays empty instead of becoming a positive rectangle.
-    let region = win.calls.rectRegion(int32(left), int32(top), int32(right), int32(bottom))
-    if region == nil: nativeError("CreateRectRgn row subtree")
-    win.pendingRegions.add(region)
-    var primary: ref CatchableError
-    try:
-      if win.calls.setRegion(control.window, region, 1) == 0:
-        nativeError("SetWindowRgn row subtree")
-      win.pendingRegions[^1] = nil # Ownership transfers only on success.
-    except CatchableError as error: primary = error
-    try: win.releaseRegions()
-    except CatchableError as secondary:
-      if primary != nil: primary.msg.add("; region cleanup secondary: " & secondary.msg)
-      else: raise secondary
-    if primary != nil: raise primary
-    discard win.calls.showWindow(control.window, SW_SHOW)
+    win.placeControl(control, (bp.left - parent.left, bp.top - parent.top, width, height),
+      (left, top, right, bottom), rowSubtree = true)
 
 proc applyListPlan(win: Win32Backend, list: Win32ListHost, frame: ListFrame) =
   ## One plan, one native apply: the frame's own scrollbar projection and the exact
@@ -1611,44 +1634,37 @@ proc relayout*(win: Win32Backend, content: DipSize, dpi: int) =
         box.rect.y >= box.clip.y + box.clip.height or
         box.rect.x + box.rect.width <= box.clip.x or
         box.rect.y + box.rect.height <= box.clip.y:
-      discard win.calls.showWindow(control.window, SW_HIDE)
+      win.showControl(control, false)
       continue
     let pixels = pixelEdges(box.rect, dpi)
     var left = pixels.left; var top = pixels.top
     if control.entity.parent != NoHandle:
       let parent = pixelEdges(byHandle[control.entity.parent].rect, dpi)
       left -= parent.left; top -= parent.top
-    if win.calls.windowPos(control.window, nil, int32(left), int32(top),
-        int32(pixels.right - pixels.left), int32(pixels.bottom - pixels.top),
-        SWP_NOZORDER or SWP_NOACTIVATE) == 0: nativeError("SetWindowPos control")
     let clip = pixelEdges(box.clip, dpi)
-    let region = win.calls.rectRegion(int32(max(0, clip.left - pixels.left)),
-      int32(max(0, clip.top - pixels.top)), int32(max(0, min(pixels.right, clip.right) - pixels.left)),
-      int32(max(0, min(pixels.bottom, clip.bottom) - pixels.top)))
-    if region == nil: nativeError("CreateRectRgn")
-    win.pendingRegions.add(region)
-    var primary: ref CatchableError
-    try:
-      if win.calls.setRegion(control.window, region, 1) == 0: nativeError("SetWindowRgn")
-      win.pendingRegions[^1] = nil # Ownership transfers only on successful API return.
-    except CatchableError as error: primary = error
-    try: win.releaseRegions()
-    except CatchableError as secondary:
-      if primary != nil: primary.msg.add("; region cleanup secondary: " & secondary.msg)
-      else: raise secondary
-    if primary != nil: raise primary
-    discard win.calls.showWindow(control.window, SW_SHOW)
+    win.placeControl(control,
+      (left, top, pixels.right - pixels.left, pixels.bottom - pixels.top),
+      (max(0, clip.left - pixels.left), max(0, clip.top - pixels.top),
+       max(0, min(pixels.right, clip.right) - pixels.left),
+       max(0, min(pixels.bottom, clip.bottom) - pixels.top)))
   var siblings: Table[NodeHandle, seq[MountedEntity]]
   for entity in win.current.values: siblings.mgetOrPut(entity.parent, @[]).add(entity)
-  for children in siblings.mvalues:
+  var appliedOrders: Table[NodeHandle, seq[HWND]]
+  for parent, children in siblings.mpairs:
     children.sort(proc(a,b: MountedEntity): int = cmp(a.index,b.index))
-    var previous: HWND
-    for entity in children:
-      let window = win.controls[entity.handle].window
-      if win.calls.windowPos(window, previous, 0, 0, 0, 0,
-          0x0001'u32 or 0x0002'u32 or SWP_NOACTIVATE) == 0:
-        nativeError("SetWindowPos tab order")
-      previous = window
+    var order: seq[HWND]
+    for entity in children: order.add(win.controls[entity.handle].window)
+    if win.appliedOrders.getOrDefault(parent) != order:
+      # An unchanged predecessor alone is insufficient after a rotation: a
+      # preceding move may have displaced it. Apply each changed group in full.
+      var previous: HWND
+      for window in order:
+        if win.calls.windowPos(window, previous, 0, 0, 0, 0,
+            0x0001'u32 or 0x0002'u32 or SWP_NOACTIVATE) == 0:
+          nativeError("SetWindowPos tab order")
+        previous = window
+    appliedOrders[parent] = order
+  win.appliedOrders = appliedOrders
   # List viewports: actual client size (scrollbar excluded) and one bounded row
   # geometry pass per list. Rows are children of the viewport, so their
   # coordinates are viewport-local DIP.
@@ -1951,6 +1967,13 @@ proc prepare(win: Win32Backend, batch: UpdateBatch) =
   win.prepareModels()
 proc apply(win: Win32Backend, batch: UpdateBatch) =
   win.checkLive()
+  var needsLayout = win.dirty or win.fontDirty
+  for op in batch.ops:
+    if op.kind != opUpdate:
+      needsLayout = true
+    elif win.current.hasKey(op.handle) and
+        layoutAffected(win.current[op.handle], win.candidate[op.handle]):
+      needsLayout = true
   inc win.depth
   defer: dec win.depth
   for op in batch.ops:
@@ -1992,7 +2015,7 @@ proc apply(win: Win32Backend, batch: UpdateBatch) =
     for handle,entity in win.candidate:win.current[handle]=entity
     win.candidate.clear()
   else:win.current=win.candidate
-  if batch.ops.len > 0:
+  if needsLayout and batch.ops.len > 0:
     let ctx = win.host.context
     # Commit-apply entry: candidate frames stay prepared until the real accept.
     win.applying = true
@@ -2078,6 +2101,7 @@ proc restore(win: Win32Backend, entities: Table[NodeHandle, MountedEntity]) =
   if teardown != nil: raise teardown
   win.lists.clear()
   win.current.clear()
+  win.appliedOrders.clear()
   var ordered: seq[MountedEntity]
   for entity in entities.values: ordered.add(entity)
   ordered.sort(proc(a,b: MountedEntity): int = cmp(uint64(a.handle),uint64(b.handle)))

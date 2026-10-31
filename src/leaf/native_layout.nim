@@ -249,6 +249,14 @@ proc contentIntrinsic(ctx: var LayoutContext, entity: MountedEntity,
       result = DipSize(width: nonNegative(mainExtent), height: nonNegative(crossExtent))
     else:
       result = DipSize(width: nonNegative(crossExtent), height: nonNegative(mainExtent))
+  elif entity.props.layout.width.isSome and
+      entity.props.layout.width.get.kind == dkFixed and
+      entity.props.layout.height.isSome and
+      entity.props.layout.height.get.kind == dkFixed:
+    # Neither intrinsic axis participates in allocation. Do not acquire native
+    # measurement resources for content that cannot change the preferred size.
+    result = DipSize(width: nonNegative(effective.width),
+      height: nonNegative(effective.height))
   else:
     let measured = ctx.measure(entity, effective)
     result = DipSize(width: nonNegative(measured.width),
