@@ -401,11 +401,13 @@ suite "real Win32 controlled input and composition messages":
     var retiredId: UINT_PTR
     var retiredCookie: DWORD_PTR
     var latestCookie: DWORD_PTR
+    var refusedPositions = 0
     var probeRetired = false
     var retiredCalls = 0
     c.windowPos = proc(window, after:HWND, x,y,width,height:int32, flags:UINT): BOOL =
       if fail:
         fail = false
+        inc refusedPositions
         setLastError(5)
         return 0
       realPosition(window, after, x,y,width,height,flags)
@@ -426,8 +428,9 @@ suite "real Win32 controlled input and composition messages":
         return retiredCallback(window, message, wp, lp, retiredId, retiredCookie)
       realDefault(window, message, wp, lp)
     var model = "old"
+    var width = "400"
     var actions = 0
-    let f = mounted(proc():Node = input(model, key="i",
+    let f = mounted(proc():Node = input(model, key="i", styles=style({"width": width}),
       onChange=proc(e:Event) =
         inc actions
         model = e.value), c)
@@ -438,8 +441,12 @@ suite "real Win32 controlled input and composition messages":
     typeText(oldWindow, "queued before restore") # real captured old-binding envelope
     check f.s.queuedEvents == 1
     model = "candidate"
+    # Root input text alone does not change its host-sized geometry. Force a
+    # real placement change rather than relying on a redundant SetWindowPos.
+    width = "360"
     fail = true
     expect UiError: discard f.runtime.refresh()
+    check refusedPositions == 1
     require not f.s.faulted
     let current = f.editor()
     let currentId = GetDlgCtrlID(current)
