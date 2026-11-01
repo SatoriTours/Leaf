@@ -5,6 +5,9 @@ type
   NativeInvalidation* = enum
     geometryChanged, fontChanged, themeChanged
   HostBackendBridge* = object
+    syncFocusTraversal*: proc(target: HWND) {.closure.}
+      ## Optional native-only preparation before USER32 routes a mouse click;
+      ## called again with actual focus after dispatch, including ignored clicks.
     capture*: proc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): bool {.closure, raises: [].}
     invalidate*: proc(context: HostContext, reasons: set[NativeInvalidation]) {.closure, raises: [].}
     nativeTick*: proc() {.closure.}

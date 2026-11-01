@@ -1,7 +1,7 @@
 ## Environment inspection never initializes a display or requires a project.
 import std/[os, json, monotimes, times, options]
 import ./android_tools
-import ./[build, process_io, sdk, targets]
+import ./[build, process_io, sdk, targets, windows_manifest]
 
 proc version(exe: string, args: seq[string]): JsonNode =
   if exe.len == 0 or not fileExists(exe): return newJNull()
@@ -32,7 +32,7 @@ proc doctorReport*(selection: Option[BuildSelection] = none(BuildSelection)): Js
     return
   let bundled = sdkGcc()
   let gcc = if bundled.len > 0: bundled else: findExe("gcc")
-  let windres = if gcc.len > 0: gcc.parentDir / "windres".addFileExt(ExeExt) else: ""
+  let windres = findWindres(gcc)
   result = %*{"implementation": "nim", "nim": nim, "cc": gcc,
     "platform": hostTarget(), "target": selected.target, "architecture": hostCPU,
     "desktop_backend": (if selected.headlessOnly: "headless" else: "native"),

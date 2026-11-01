@@ -4,11 +4,13 @@
 
 **本轮先支持 Windows x64。** 原生 SDK 包含 CLI、Leaf 源码、Nim 2.2.6 编译器和标准库；Windows 安装器下载并校验 MinGW。不包含渲染桥接库，也不需要 Rust。
 
-> **Windows 原生 beta 已可安装：** 本轮修复前的已核实基线为 `beta.c72ca99dfad6`，对应提交 `c72ca99dfad610ae06e95fad214b384c95046920`。[发布与安装验证工作流](https://github.com/SatoriTours/Leaf/actions/runs/40156213210)已成功，可使用下方安装命令。这是预发布版本，不代表完整平台、资源或现场验收通过。安装器要求 `schema: 2`、`backend: native`，拒绝旧 SDK。
+> **已核实的 Windows 原生 beta：** `beta.8b683ca188f7`，对应提交 `8b683ca188f74f512b1bc8a0857342adef8a316d`。[SDK 发布与安装验证工作流](https://github.com/SatoriTours/Leaf/actions/runs/41184027560)已成功，安装器要求 `schema: 2`、`backend: native`，拒绝旧 SDK。该版本仍有下述列表点击缺陷；完整平台、资源与现场矩阵未完成。
 >
 > [滚动 beta 页面](https://github.com/SatoriTours/Leaf/releases/tag/beta)仍留有之前的 Linux/macOS 包；它们不是本轮原生 SDK，不适用于当前 GUI。当前请只选择 `leaf-sdk-windows-x86_64.zip` 及其同名 `.sha256`。beta 会滚动更新，安装时同时核对包内 `sdk.json` 的版本、提交与目标，不能只看 Release 标题。
 
-> **已知验收缺口：** `c72ca99` 基线的 `native_list` 存在数据库参数／自检入口冲突；本轮修复已通过 GPT 独立功能复验（保存、同库重开、默认打包及搬迁读回）。修复随本轮 main 提交交付，新 beta 必须以对应工作流及 `sdk.json` 核实，不以旧包代替。a2 曾暴露列表单行／末行不可见缺陷；本地裁剪修复已在 a3 独立确认首尾五行及末行完整可见，非首行保存与打包搬迁也通过。但部分滚动裁剪未有效触发，整体验收仍阻塞／未完成，不要将 beta 安装成功等同于完整应用可交付。详见[当前验收状态](windows-acceptance.md)。
+> **当前使用限制：** `8b683ca` 生成应用在外部输入框持焦、搜索结果恢复后点击列表按钮时可能卡死。工作区的三处 Win32 修复已通过实际操作、持久化、打包搬迁及默认用户数据目录的限定独立复核，但尚未提交／发布；直接安装上列旧 beta 不包含这次修复。最终回归与交付身份见[开发进度](progress.md)，列表裁剪等历史验收见[Windows 验收](windows-acceptance.md)。
+
+> **最新候选尚未通过交付门：** 后续生成应用的搜索布局修复已取得三主题交互观察，但本地系统主题测试 EXE 被 Defender 检测拦截。经用户授权，已通过官方工具恢复单个隔离样本并补齐 hash；检测原因仍未澄清，用户已提供官方提交编号，等待微软判定，尚未独立读取门户结果。该候选未发布，不能将其描述为可直接交付的新 SDK，也不能据此认定所有旧 SDK 产物有同样检测；详情见开发进度。
 
 ## Windows 源码运行
 
@@ -22,7 +24,9 @@ cd my-app
 ..\target\nim\leaf.exe run
 ```
 
-检查 `doctor` 的 `host_available`、Nim、C 编译器及 windres。可通过 `NIM` 指定编译器、`LEAF_LIBRARY` 指向当前 `src`；通常无需覆盖。
+检查 `doctor` 的 `host_available`、Nim、C 编译器及 windres。可通过 `NIM` 指定编译器、`LEAF_LIBRARY` 指向当前 `src`；通常无需覆盖。当前工作区修复支持相对路径：两者均相对于执行 `leaf` 时所在目录解析，再固定为绝对路径，避免从项目子目录运行时因编译进程切换目录而失效；此修复尚未发布。
+
+当前工作区的 `doctor` 与 Windows 构建共用资源编译器查找规则：优先使用 GCC 同目录的 `windres`，不存在时再查 `PATH`。因此将资源编译器单独加入 `PATH` 后，诊断也能显示其版本；确实找不到时 `tools.windres` 为 `null`。版本探测不代表应用构建已经通过，此修复尚未发布。
 
 ## 安装 Windows beta
 
@@ -32,7 +36,7 @@ cd my-app
 & ([scriptblock]::Create((Invoke-RestMethod 'https://raw.githubusercontent.com/SatoriTours/Leaf/main/install.ps1'))) -Channel beta
 ```
 
-只有对应正式版本已存在时才使用 `-Channel release` 或 `-Version vX.Y.Z`；当前推荐上面的 Windows beta。默认 SDK 位于 `%LOCALAPPDATA%\Leaf\versions`，入口为 `%LOCALAPPDATA%\Leaf\bin\leaf.cmd`。支持 `-Prefix`、`-BinDir`、`-NoPath`、`-DownloadBase`。
+只有对应正式版本已存在时才使用 `-Channel release` 或 `-Version vX.Y.Z`；上述命令安装 Windows beta，使用前请核对本页已知限制和包内提交。默认 SDK 位于 `%LOCALAPPDATA%\Leaf\versions`，入口为 `%LOCALAPPDATA%\Leaf\bin\leaf.cmd`。支持 `-Prefix`、`-BinDir`、`-NoPath`、`-DownloadBase`。
 
 安装器经 HTTPS 下载并核对同一 Release 的 SHA256，再核对原生 SDK 元数据；失败不切换已有入口。校验和检测损坏，来源信任仍依赖 GitHub 仓库与 HTTPS。
 

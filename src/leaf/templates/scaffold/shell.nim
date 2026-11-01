@@ -23,6 +23,7 @@ proc renderShell*(ctx: ComponentContext, router: ComponentRouter,
           navButton(ctx, router, router.routes[i])
       column:
         key: "page"
-        styles: (when defined(android) or defined(windows): style({"gap": "12", "flex_grow": "1", "height": "full"})
+        styles: (when defined(windows): style({"gap": "12", "flex_grow": "1", "width": "full", "height": "full"})
+                 elif defined(android): style({"gap": "12", "flex_grow": "1", "height": "full"})
                  else: style({"gap": "12", "flex_grow": "1", "min_width": "0"}))
         renderPage(ctx, router, outletKey)

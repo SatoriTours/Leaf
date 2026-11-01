@@ -1,7 +1,8 @@
 proc renderSearch(state: HomeState): Node =
   view:
     column:
-      styles: (when defined(android) or defined(windows): style({"gap": "16", "flex_grow": "1"})
+      styles: (when defined(windows): style({"gap": "16", "flex_grow": "1", "width": "full"})
+               elif defined(android): style({"gap": "16", "flex_grow": "1"})
                else: style({"gap": "16", "flex_grow": "1", "min_height": "0"}))
       text "Search":
         variant: "primary"

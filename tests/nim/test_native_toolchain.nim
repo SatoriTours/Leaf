@@ -27,6 +27,45 @@ suite "explicit backend and headless toolchain selection":
     expect UiError: discard resolveBuild(backendNative, target="android", backend="gpui")
     expect UiError: discard resolveBuild(backendNative, target="android", headlessOnly=true)
     expect UiError: discard resolveBuild(backendNative, target="unknown")
+
+  test "subdirectory CLI and maintenance builds accept relative toolchain overrides":
+    let nim = compiler().absolutePath
+    let sources = libraryPath().absolutePath
+    let root = createTempDir("leaf-relative 中文 $ tools-", "")
+    let previous = getCurrentDir()
+    let hadNim = existsEnv("NIM")
+    let hadLibrary = existsEnv("LEAF_LIBRARY")
+    let oldNim = getEnv("NIM")
+    let oldLibrary = getEnv("LEAF_LIBRARY")
+    defer:
+      setCurrentDir(previous)
+      if hadNim: putEnv("NIM", oldNim)
+      else: delEnv("NIM")
+      if hadLibrary: putEnv("LEAF_LIBRARY", oldLibrary)
+      else: delEnv("LEAF_LIBRARY")
+      removeDir(root)
+    createDir(root / "nested")
+    # Keep sources below the fixture root: paths that traverse all the way to
+    # the filesystem root can accidentally work from either cwd.
+    copyDir(sources, root / "sdk/src")
+    writeFile(root / "main.nim", "import leaf\nlet Root = defineComponent[int, int](\"RelativeTools\",\n  proc(ctx: MountContext, p: int): int = p,\n  proc(ctx: ComponentContext, p, m: int): UiDescription = host(text(\"relative paths\")))\nquit run(componentApplication(component(Root, 0), \"relative\", 320, 200))\n")
+    writeFile(root / "leaf.json", $(%*{"name":"RelativeTools", "identifier":"org.leaf.relative",
+      "version":"0.1.0", "entry":"main.nim", "include":["main.nim"], "backend":"native"}))
+    setCurrentDir(root / "nested")
+    putEnv("NIM", relativePath(nim, getCurrentDir()))
+    putEnv("LEAF_LIBRARY", "../sdk/src")
+    check cli.main(@["--check"]) == 0
+    # Database commands use this separate build entry, with the same cwd change.
+    writeFile(root / "maintenance.nim", "import leaf/core\necho \"maintenance ok\"\n")
+    let job = startHeadlessBuild(readProject(root), root / "maintenance.nim",
+      root / "maintenance".addFileExt(ExeExt), root / "target/maintenance-cache")
+    defer: job.close()
+    while not job.pollBuild(): sleep(10)
+    checkpoint job.output
+    require job.code == 0
+    let run = execCmdEx(quoteShell(job.binary))
+    check run.exitCode == 0
+    check run.output.strip == "maintenance ok"
   test "native configuration is strict and unsupported packaging rejects before staging":
     let root = createTempDir("leaf-native-config-", "")
     defer: removeDir(root)

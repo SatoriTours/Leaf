@@ -2366,6 +2366,7 @@ proc newWin32Backend*(host: Win32Host, calls: Win32Calls = systemWin32Calls(),
     control.canvas.projectInput(source)
   win.protocol.settle = proc(value: EventSettlement) = win.settle(value)
   win.lease = host.claimBackendOwner(HostBackendBridge(
+    syncFocusTraversal: proc(target: HWND) = win.syncFocusedListTraversal(target),
     capture: proc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): bool {.raises: [].} =
       try:
         {.cast(raises: [CatchableError]).}:

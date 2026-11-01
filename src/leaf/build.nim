@@ -16,12 +16,15 @@ proc libraryPath*(): string =
   result = getEnv("LEAF_LIBRARY", if installed.len > 0: installed / "src" else: SourceRoot)
   if not fileExists(result / "leaf.nim"):
     fail("Leaf sources not found; set LEAF_LIBRARY to the installed src directory")
+  # Builds run from the project root, which may differ from the caller's cwd.
+  result = absolutePath(result)
 
 proc compiler*(): string =
   let bundled = sdkCompiler()
   result = getEnv("NIM", if bundled.len > 0: bundled else: findExe("nim"))
   if result.len == 0 or not fileExists(result):
     fail("Nim compiler not found; install Nim 2.2.6+ or set NIM")
+  result = absolutePath(result)
 
 proc compilerBase(sources, cache, binary: string, isolatedConfig: bool): seq[string] =
   ## Compiler/library/ORM switches shared by application and headless builds.

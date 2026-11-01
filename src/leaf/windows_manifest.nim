@@ -26,12 +26,17 @@ proc gccFromBuildScript*(path:string):string =
     if executable(compilation[1].getStr) != result:
       raise newException(IOError,"DPI manifest requires the same GCC for compilation and linking")
 
+proc findWindres*(gccPath: string): string =
+  ## Keep environment diagnostics and actual manifest builds on the same lookup.
+  if gccPath.len == 0: return ""
+  result = gccPath.parentDir / "windres".addFileExt(ExeExt)
+  if not fileExists(result): result = findExe("windres".addFileExt(ExeExt))
+
 proc compileWindowsManifest*(sources, cacheDirectory, gccPath: string): string =
   if gccPath.len == 0 or not fileExists(gccPath):
     raise newException(IOError, "DPI manifest requires an existing MinGW GCC: " & gccPath)
   let gcc = absolutePath(gccPath)
-  var windres = gcc.parentDir / "windres".addFileExt(ExeExt)
-  if not fileExists(windres): windres = findExe("windres".addFileExt(ExeExt))
+  let windres = findWindres(gcc)
   if windres.len == 0 or not fileExists(windres):
     raise newException(IOError, "DPI manifest resource compiler windres not found for " & gcc)
   let directory = absolutePath(cacheDirectory)

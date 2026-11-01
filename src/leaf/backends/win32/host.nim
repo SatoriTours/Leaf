@@ -602,12 +602,24 @@ proc cleanupFailureInternal*(host: Win32Host): ref CatchableError =
   host.cleanupFailure
 
 proc dispatch(host: Win32Host, message: var MSG) =
+  # IsDialogMessage searches for a clicked button before dispatching the mouse
+  # message or sending focus notifications. Waiting for WM_SETFOCUS can leave
+  # USER32 looping when that button is below a non-traversable list viewport.
+  let pointerFocus = message.message in [0x0201'u32, 0x0203'u32] and
+    host.lease != nil and host.bridge.syncFocusTraversal != nil
   inc host.dispatchDepth
   try:
+    if pointerFocus: host.bridge.syncFocusTraversal(message.hwnd)
     if host.window == nil or host.calls.dialogMessage(host.window, addr message) == 0:
       discard host.calls.translateMessage(addr message)
       discard host.calls.dispatchMessage(addr message)
-  finally: dec host.dispatchDepth
+  finally:
+    try:
+      # A disabled/ignored click need not move focus. Restore from the actual
+      # result only after both dialog routing and normal dispatch have finished.
+      if pointerFocus and host.lease != nil and host.bridge.syncFocusTraversal != nil:
+        host.bridge.syncFocusTraversal(GetFocus())
+    finally: dec host.dispatchDepth
   host.checkCallback()
 
 proc pump*(host: Win32Host): int =
