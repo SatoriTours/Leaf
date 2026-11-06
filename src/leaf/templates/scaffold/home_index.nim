@@ -1,18 +1,21 @@
 proc renderHome(state: HomeState): Node =
   view:
     column:
-      styles: (when defined(android) or defined(windows): style({"gap": "16", "flex_grow": "1"})
-               else: style({"gap": "16", "flex_grow": "1", "min_height": "0"}))
+      styles: (when defined(android): style({"gap": "16", "flex_grow": "1"})
+               elif defined(windows): style({"gap": "16", "flex_grow": "1", "width": "full"})
+               else: style({"gap": "16", "flex_grow": "1", "min_height": "0", "width": "full"}))
       text "Home":
         variant: "primary"
         styles: (when defined(windows): style([])
                  else: style({"font_size": "28", "weight": "bold"}))
       row:
-        styles: {"gap": "8", "align": "center"}
+        styles: (when defined(android): style({"gap": "8", "align": "center"})
+                 else: style({"gap": "8", "align": "center", "width": "full"}))
         input state.draft:
           key: "task_draft"
           placeholder: "Add a task"
-          styles: {"height": "40", "flex_grow": "1"}
+          styles: (when defined(android): style({"height": "40", "flex_grow": "1"})
+                   else: style({"height": "40", "flex_grow": "1", "width": "full"}))
           onChange(e): state.setDraft(e.value)
           onSubmit(e): state.addTask()
         button "Add":

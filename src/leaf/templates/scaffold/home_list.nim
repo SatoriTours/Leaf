@@ -3,7 +3,9 @@ proc renderTask(state: HomeState, item: Task): Node =
   let children = @[
     checkbox("Done", item.done, key = "task_done_" & $id,
       onChange = proc(e: Event) = state.toggleTask(id, e.checked)),
-    text(item.title, key = "task_title_" & $id),
+    text(item.title, key = "task_title_" & $id,
+      styles = (when defined(android): style([])
+                else: style({"width": "full"}))),
     button("Delete", key = "task_delete_" & $id, variant = "secondary",
       onClick = proc(e: Event) = state.removeTask(id))]
   when defined(android):
@@ -11,7 +13,7 @@ proc renderTask(state: HomeState, item: Task): Node =
       styles = style({"gap": "8", "padding": "8"}))
   else:
     row(children, key = "task_row_" & $id,
-      styles = style({"gap": "12", "padding": "8", "align": "center"}))
+      styles = style({"gap": "12", "padding": "8", "align": "center", "width": "full"}))
 
 proc renderTasks(state: HomeState, query = ""): Node =
   let items = state.visibleTasks(query)

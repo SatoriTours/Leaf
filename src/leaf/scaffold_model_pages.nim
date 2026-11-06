@@ -64,7 +64,7 @@ proc listCode(resource: ResourceSpec): string =
 
 proc editorCode(resource: ResourceSpec): string =
   let p = resource.plural
-  result = "proc renderEditor(state: State): Node =\n  view:\n    column:\n      styles: {\"gap\": \"12\"}\n      text (if state.editingId == 0: \"Create " & resource.model & "\" else: \"Edit " & resource.model & "\"):\n        variant: \"primary\"\n"
+  result = "proc renderEditor(state: State): Node =\n  view:\n    column:\n      styles: (when defined(android): style({\"gap\": \"12\"}) else: style({\"gap\": \"12\", \"width\": \"full\"}))\n      text (if state.editingId == 0: \"Create " & resource.model & "\" else: \"Edit " & resource.model & "\"):\n        variant: \"primary\"\n"
   for field in resource.fields:
     result.add("      text " & field.name.escape & ":\n        variant: \"secondary\"\n")
     if field.kind == "bool":
