@@ -77,6 +77,7 @@ const
   WM_HOST_TICK* = WM_APP + 17
   WM_HOST_TASK_TICK* = WM_APP + 18
   WM_VSCROLL* = 0x0115'u32
+  WM_HSCROLL* = 0x0114'u32
   WM_MOUSEWHEEL* = 0x020A'u32
   WHEEL_DELTA* = 120'i32
   SB_LINEUP* = 0
@@ -90,6 +91,8 @@ const
   SB_ENDSCROLL* = 8
   SB_HORZ* = 0
   SB_VERT* = 1
+  SBS_VERT* = 0x00000001
+  SBS_HORZ* = 0x00000000
   SB_CTL* = 2
   GWLP_USERDATA* = -21'i32
   PM_REMOVE* = 1'u32
@@ -144,6 +147,7 @@ type
   HGDIOBJ* {.importc: "HGDIOBJ", header: "<windows.h>".} = ptr object
   HRGN* {.importc: "HRGN", header: "<windows.h>".} = ptr object
   HTHEME* {.importc: "HTHEME", header: "<uxtheme.h>".} = ptr object
+  HMonitor* {.importc: "HMONITOR", header: "<windows.h>".} = pointer
   SIZE* = object
     cx*, cy*: LONG
   LOGFONTW* = object
@@ -220,6 +224,7 @@ const
   ICC_PROGRESS_CLASS* = 0x20'u32
   SM_CXBORDER* = 5'i32
   SM_CYBORDER* = 6'i32
+  SM_CXVSCROLL* = 2'i32
   SM_CYHSCROLL* = 3'i32
 type MouseTracking* {.importc: "TRACKMOUSEEVENT", header: "<windows.h>", bycopy.} = object
   cbSize*, dwFlags*: DWORD
@@ -233,6 +238,8 @@ proc IsWindowEnabled*(window: HWND): BOOL
 proc IsWindowVisible*(window: HWND): BOOL
 proc IsIconic*(window: HWND): BOOL
 proc GetParent*(window: HWND): HWND
+proc GetAncestor*(window: HWND, flags: UINT): HWND
+proc GetNextDlgTabItem*(dialog: HWND, current: HWND, previous: BOOL): HWND
 proc GetScrollInfo*(window: HWND, bar: int32, info: ptr SCROLLINFO): BOOL
 proc SetScrollInfo*(window: HWND, bar: int32, info: ptr SCROLLINFO, redraw: BOOL): int32
 proc ClientToScreen*(window: HWND, point: ptr POINT): BOOL
@@ -265,6 +272,9 @@ proc GetGuiResources*(process: HANDLE, flags: DWORD): DWORD
 {.push stdcall, dynlib: "gdi32.dll", importc, raises: [].}
 proc CreateFontIndirectW*(font: ptr LOGFONTW): HFONT
 proc DeleteObject*(obj: HGDIOBJ): BOOL
+proc SetTextColor*(dc: HDC, color: DWORD): DWORD
+proc SetDCPenColor*(dc: HDC, color: DWORD): DWORD
+proc SetBkMode*(dc: HDC, mode: int32): int32
 proc SelectObject*(dc: HDC, obj: HGDIOBJ): HGDIOBJ
 proc GetTextMetricsW*(dc: HDC, metric: ptr TEXTMETRICW): BOOL
 proc GetTextExtentPoint32W*(dc: HDC, text: WidePtr, count: int32, size: ptr SIZE): BOOL
@@ -311,6 +321,29 @@ proc ImmNotifyIME*(context: HIMC, action, index, value: DWORD): BOOL
 proc initControls*(init: ptr INITCOMMONCONTROLSEX): BOOL {.stdcall, dynlib: "comctl32.dll", importc: "InitCommonControlsEx", raises: [].}
 
 # One-shot frame waits: auto-reset handles, no APC or worker callback.
+proc SetLayeredWindowAttributes*(window: HWND, color: DWORD, alpha: uint8,
+  flags: DWORD): BOOL {.stdcall, dynlib: "user32.dll", importc, raises: [].}
+proc MonitorFromWindow*(window: HWND, flags: DWORD): HMonitor
+  {.stdcall, dynlib: "user32.dll", importc, raises: [].}
+proc GetMonitorInfoW*(monitor: HMonitor, info: pointer): BOOL
+  {.stdcall, dynlib: "user32.dll", importc, raises: [].}
+proc GetWindowTheme*(window: HWND): HTHEME
+  {.stdcall, dynlib: "uxtheme.dll", importc, raises: [].}
+proc SetWindowTheme*(window: HWND, subApp, subId: WidePtr): int32
+  {.stdcall, dynlib: "uxtheme.dll", importc, raises: [].}
+proc RedrawWindow*(window: HWND, update: ptr RECT, region: HRGN, flags: UINT): BOOL
+  {.stdcall, dynlib: "user32.dll", importc, raises: [].}
+proc GetStockObject*(index: int32): HGDIOBJ
+  {.stdcall, dynlib: "gdi32.dll", importc, raises: [].}
+proc FillRect*(dc: HDC, rect: ptr RECT, brush: HBRUSH): int32
+  {.stdcall, dynlib: "user32.dll", importc, raises: [].}
+proc SetDCBrushColor*(dc: HDC, color: DWORD): DWORD
+  {.stdcall, dynlib: "gdi32.dll", importc, raises: [].}
+proc BeginPaint*(window: HWND, paint: pointer): HDC
+  {.stdcall, dynlib: "user32.dll", importc, raises: [].}
+proc EndPaint*(window: HWND, paint: pointer): BOOL
+  {.stdcall, dynlib: "user32.dll", importc, raises: [].}
+
 proc CreateWaitableTimerExW*(attributes:pointer,name:WidePtr,flags,access:DWORD):HANDLE
   {.stdcall,dynlib:"kernel32.dll",importc,raises:[].}
 proc SetWaitableTimerEx*(timer:HANDLE,due:ptr int64,period:int32,completion,argument,wakeContext:pointer,tolerance:DWORD):BOOL

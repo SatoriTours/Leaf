@@ -227,6 +227,17 @@ suite "T2 batch 1: native list viewport and scroll":
 ## as interchangeable. Assertions fix the chosen semantics:
 ## `take(signature, slot) -> bool` moves ownership out of the pool in one step.
 suite "row pool claim semantics":
+  test "single-line and multiline editors cannot claim each other parked windows":
+    let single = rowSignature([row, input], [-1, 0], [false, false])
+    let multi = rowSignature([row, input], [-1, 0], [false, true])
+    check single != multi
+    var pool: RowPool
+    check pool.park(RowSlot(owner: 1, signature: single, root: cast[HWND](0x51),
+      windows: @[cast[HWND](0x51), cast[HWND](0x52)], parents: @[-1, 0]))
+    var taken: RowSlot
+    check not pool.take(1, multi, taken)
+    check pool.len == 1
+
   test "a single parked slot is claimed exactly once and keeps its windows":
     var pool: RowPool
     var parked = RowSlot(owner: 1'u64, signature: rowSignature([row, text], [-1, 0]),

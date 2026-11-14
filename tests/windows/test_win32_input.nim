@@ -58,6 +58,44 @@ proc turns(f: Fixture, action, checkAfter: proc() {.closure.}) =
   check f.h.pump() == 0
 
 suite "real Win32 controlled input and composition messages":
+  test "changing single-line mode at the same key is rejected without remounting":
+    var multiline = false
+    let f = mounted(proc(): Node = input("body", key="i", multiline=multiline))
+    defer: f.h.destroyHost()
+    let original = f.editor()
+    multiline = true
+    expect UiError: discard f.runtime.refresh()
+    check f.editor() == original
+    check (GetWindowLongW(original, GWL_STYLE) and 4) == 0
+    multiline = false
+    check f.runtime.refresh()
+
+  test "multiline renders portable LF model values as separate native lines":
+    let f = mounted(proc(): Node = input("first\n\nsecond", key="lines", multiline=true,
+      styles=style({"width":"full", "height":"180"})))
+    defer: f.h.destroyHost()
+    let edit = f.editor()
+    check nativeText(edit) == "first\r\n\r\nsecond"
+    check SendMessageW(edit, 0x00ba, 0, 0) == 3 # EM_GETLINECOUNT
+
+  test "multiline keeps native Enter as newline and does not fire submit":
+    var submits = 0
+    let f = mounted(proc(): Node = input("first", key="body", multiline=true,
+      styles=style({"width":"full", "height":"180"}),
+      onSubmit=proc(e: Event) = inc submits))
+    defer: f.h.destroyHost()
+    let edit = f.editor()
+    check (GetWindowLongW(edit, GWL_STYLE) and 4) != 0
+    var bounds: RECT
+    discard GetClientRect(edit, addr bounds)
+    check bounds.bottom >= 140
+    discard SendMessageW(edit, EM_SETSEL, 5, 5)
+    discard SendMessageW(edit, WM_KEYDOWN, 13, 0)
+    discard SendMessageW(edit, WM_CHAR, 13, 0)
+    check nativeText(edit) == "first\r\n"
+    f.s.drainEvents()
+    check submits == 0
+
   test "zero diff model rejection writes the accepted text exactly once":
     var calls = 0
     let f = mounted(proc(): Node = input("7", key="i", onChange=proc(e: Event) = inc calls))

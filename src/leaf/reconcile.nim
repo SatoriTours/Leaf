@@ -2,7 +2,7 @@
 ## allocation. No callbacks, Node references or platform state leave this
 ## module, and `accept` performs no external code.
 import std/[tables, sets, algorithm]
-import ./[core, styles, backend]
+import ./[core, styles, backend, overlay_protocol]
 
 type
   PropsAdapter* = proc(node: Node): NormalizedProps {.closure.}
@@ -74,7 +74,9 @@ proc plan*(r: Reconciler, snapshot: Snapshot, revision: uint64,
     let entity = MountedEntity(handle: handle, parent: parent,
       nodeId: mounted.id, kind: node.kind,
       props: (if adapter != nil: adapter(node) else: normalizeProps(node)),
-      index: index, navigation: node.navigationProps, canvas: node.canvasFrame)
+      index: index, navigation: node.navigationProps, canvas: node.canvasFrame,
+      overlay: node.overlayProps, select: node.selectProps,
+      popover: node.popoverProps)
     entities[handle] = entity
     byNodeId[mounted.id] = handle
     children.mgetOrPut(parent, @[]).add(handle)
@@ -84,7 +86,9 @@ proc plan*(r: Reconciler, snapshot: Snapshot, revision: uint64,
       created.incl(handle)
       createOps.add(UpdateOp(kind: opCreate, handle: handle, parent: parent,
         index: index, nodeId: mounted.id, nodeKind: node.kind,
-        props: entity.props, navigation: entity.navigation, canvas: entity.canvas))
+        props: entity.props, navigation: entity.navigation,
+        canvas: entity.canvas, overlay: entity.overlay, select: entity.select,
+        popover: entity.popover))
     for childIndex, child in mounted.children:
       discard visit(child, handle, childIndex, nodeReused)
     handle
@@ -148,10 +152,11 @@ proc plan*(r: Reconciler, snapshot: Snapshot, revision: uint64,
   var updateOps: seq[UpdateOp]
   for handle in reused:
     let next = entities[handle]
-    if next.props != r.entities[handle].props or next.navigation != r.entities[handle].navigation or next.canvas != r.entities[handle].canvas:
+    if next.props != r.entities[handle].props or next.navigation != r.entities[handle].navigation or next.canvas != r.entities[handle].canvas or next.overlay != r.entities[handle].overlay:
       updateOps.add(UpdateOp(kind: opUpdate, handle: handle, parent: next.parent,
         index: next.index, nodeId: next.nodeId, nodeKind: next.kind,
-        props: next.props, navigation: next.navigation, canvas: next.canvas))
+        props: next.props, navigation: next.navigation, canvas: next.canvas,
+        overlay: next.overlay))
 
   result.baseRevision = r.revision
   result.baseGeneration = r.generation

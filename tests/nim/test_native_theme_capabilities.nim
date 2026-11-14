@@ -44,7 +44,7 @@ suite "Win32 theme capabilities are opt-in and kind-scoped":
     check effectiveProps(caps, invalid, some(NodeKind.input)).control.variant == some(variantDanger)
     expect UiError:
       discard checkTypedCapabilities("name", NodeKind.input,
-        normalizeProps(ui(NodeKind.input, text="", attributes=style({"variant":"primary"}))), caps, strict)
+        normalizeProps(ui(NodeKind.input, text="", attributes=style({"variant":"secondary"}))), caps, strict)
 
   test "global variant support remains backwards compatible":
     var caps = win32Capabilities()

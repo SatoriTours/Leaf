@@ -6,7 +6,8 @@
 ## native backend needs, and declares which of those properties that backend
 ## can honour. Callbacks, Node references and native pointers never appear here.
 import std/[tables, hashes, options, sets, unicode]
-import ./[core, styles, list_protocol, navigation_protocol, graphics, canvas_input]
+import ./[core, styles, list_protocol, navigation_protocol, graphics, canvas_input,
+  overlay_protocol, select_protocol, popover_protocol]
 # `HostListProps` is a pure owned value; the backend stores the same type the
 # host wire uses, without importing `host_protocol` (which would be a cycle).
 export list_protocol, navigation_protocol
@@ -49,7 +50,17 @@ type
   ControlFeature* = enum
     ## Explicit control behaviours a backend must declare. These are required
     ## capabilities: an undeclared one is rejected, never degraded.
-    cfInputReset
+    cfInputReset, cfInputMultiline
+
+  PopoverFeature* = enum
+    ## Explicit non-modal popover behaviours a backend must declare. Required:
+    ## an undeclared feature is rejected, never degraded into an inline panel.
+    pfNonModal
+
+  SelectFeature* = enum
+    ## Explicit select behaviours a backend must declare. Required: an
+    ## undeclared feature is rejected, never degraded into an inline list.
+    sfSingle
 
   BackendCapabilities* = object
     ## Everything a backend explicitly supports. Extended enum values are
@@ -64,6 +75,14 @@ type
     kindVariants*: array[NodeKind, set[ControlVariant]]
       ## Additional variants supported only by a specific control kind.
     controls*: set[ControlFeature]
+    standardUi*: set[UiRole]
+    overlays*: set[OverlayKind]
+    selects*: set[SelectFeature]
+    popovers*: set[PopoverFeature]
+      ## Owned non-modal anchored panel features.
+      ## Anchored non-modal select features hosted as a real owned popup.
+      ## Modal overlay kinds this backend hosts in a real owned window. An
+      ## undeclared kind is rejected, never rendered as an ordinary container.
 
   MountedEntity* = object
     ## Backend-visible accepted entity. `props` are the complete normalized
@@ -79,6 +98,12 @@ type
       ## Complete typed list description; `none` for ordinary controls.
     row*: Option[NativeRowBinding]
       ## Set only on a list's direct row root.
+    overlay*: Option[OverlayProps]
+      ## Complete typed modal overlay description; none for ordinary nodes.
+    select*: Option[SelectProps]
+      ## Complete typed select description; none for ordinary nodes.
+    popover*: Option[PopoverProps]
+      ## Complete typed popover description; none for ordinary nodes.
     index*: int
 
   UpdateKind* = enum
@@ -104,6 +129,18 @@ type
     row*: Option[NativeRowBinding]
       ## create/update/move carry the row binding of a list row root (`none`
       ## otherwise). The native host consumes this owned sidecar directly.
+
+    overlay*: Option[OverlayProps]
+      ## create/update carry the accepted overlay description (none for
+      ## ordinary nodes); move/remove never use it.
+
+    select*: Option[SelectProps]
+      ## create/update carry the accepted single-select description; a stale
+      ## request refers to it by option key, never by display index.
+
+    popover*: Option[PopoverProps]
+      ## create/update carry the accepted popover description and its accepted
+      ## open state; every dismissal is a request recorded by the host.
 
   RowSlotTable* = Table[NodeHandle, tuple[indexes: HashSet[int],
     keys: HashSet[string]]]
@@ -240,20 +277,46 @@ proc fullCapabilities*(): BackendCapabilities =
       dfOpacity, dfFontSize, dfWeight},
     variants: {variantDefault, variantPrimary, variantDanger, variantSuccess,
       variantWarning, variantInfo, variantOutline, variantGhost, variantSecondary},
-    controls: {cfInputReset})
+    controls: {cfInputReset, cfInputMultiline},
+    standardUi: {low(UiRole)..high(UiRole)},
+    overlays: {low(OverlayKind)..high(OverlayKind)})
 
 proc supportsVariant(capabilities: BackendCapabilities, variant: ControlVariant,
                      kind: Option[NodeKind]): bool =
   variant in capabilities.variants or
     (kind.isSome and variant in capabilities.kindVariants[kind.get])
 
-proc checkTypedCapabilities*(nodeId:string,kind:NodeKind,props:NormalizedProps,capabilities:BackendCapabilities,mode=compatible):seq[CapabilityIssue]=
+proc checkTypedCapabilities*(nodeId:string,kind:NodeKind,props:NormalizedProps,capabilities:BackendCapabilities,mode=compatible,
+    overlay= none(OverlayProps),select= none(SelectProps),
+    popover= none(PopoverProps)):seq[CapabilityIssue]=
   var issues: seq[CapabilityIssue]
+  if select.isSome:
+    let reason = invalidSelectReason(select.get)
+    if reason.len != 0: fail(reason & ": " & nodeId)
+    if sfSingle notin capabilities.selects:
+      fail("backend does not support single select: " & nodeId)
+    if kind notin {column, row}:
+      fail("backend cannot host a select popup on this control: " & nodeId)
+  if popover.isSome:
+    let reason = invalidPopoverReason(popover.get)
+    if reason.len != 0: fail(reason & ": " & nodeId)
+    if pfNonModal notin capabilities.popovers:
+      fail("backend does not support non-modal popover: " & nodeId)
+    if kind notin {column, row}:
+      fail("backend cannot host a popover panel on this control: " & nodeId)
+  if overlay.isSome:
+    let reason = invalidOverlayReason(overlay.get)
+    if reason.len != 0: fail(reason & ": " & nodeId)
+    if overlay.get.kind notin capabilities.overlays:
+      fail("backend does not support modal overlay " & $overlay.get.kind & ": " & nodeId)
 
   proc report(nodeId, property, reason: string) =
     if mode == strict:
       fail("backend capability rejected " & property & " on " & nodeId & ": " & reason)
     issues.add(CapabilityIssue(nodeId: nodeId, property: property, reason: reason))
+
+  if props.standardUi.isSome and props.standardUi.get.role notin capabilities.standardUi:
+    fail("backend does not support required standard UI role: " & nodeId)
 
   if kind notin capabilities.kinds:
     fail("backend does not support control " & kind.kindName & ": " & nodeId)
@@ -309,6 +372,9 @@ proc checkTypedCapabilities*(nodeId:string,kind:NodeKind,props:NormalizedProps,c
       cfInputReset notin capabilities.controls:
     fail("backend does not support input reset token: " & nodeId)
 
+  if props.control.multiline.get(false) and cfInputMultiline notin capabilities.controls:
+    fail("backend does not support multiline input: " & nodeId)
+
   issues
 
 proc checkCapabilities*(root: MountedNode, capabilities: BackendCapabilities,
@@ -320,7 +386,9 @@ proc checkCapabilities*(root: MountedNode, capabilities: BackendCapabilities,
   var issues: seq[CapabilityIssue]
 
   proc visit(mounted:MountedNode)=
-    issues.add(checkTypedCapabilities(mounted.id,mounted.node.kind,normalizeProps(mounted.node),capabilities,mode))
+    issues.add(checkTypedCapabilities(mounted.id,mounted.node.kind,normalizeProps(mounted.node),capabilities,mode,
+      mounted.node.overlayProps, mounted.node.selectProps,
+      mounted.node.popoverProps))
     for child in mounted.children: visit(child)
 
   visit(root)
@@ -335,6 +403,8 @@ proc effectiveProps*(capabilities: BackendCapabilities,
   ## have passed `checkCapabilities`. Omitted kind retains the legacy global-only
   ## filtering contract; native adapters pass the real kind for scoped variants.
   result = props
+  if props.standardUi.isSome and props.standardUi.get.role notin capabilities.standardUi:
+    fail("cannot discard required standard UI semantics")
   if dfColor notin capabilities.decorations: result.decoration.color = none(Rgba)
   if dfBackground notin capabilities.decorations: result.decoration.background = none(Rgba)
   if dfBorderColor notin capabilities.decorations: result.decoration.borderColor = none(Rgba)

@@ -7,10 +7,12 @@ export core
 proc canvasNodeInternal*(frame: CanvasFrame, key = "", styles: Styles = default(Styles)): Node =
   ui(NodeKind.canvasHost, key = key, styles = styles, canvas = some(frame))
 
-proc column*(children: seq[Node], key = "", styles: Styles = default(Styles)): Node =
-  ui(NodeKind.column, key = key, children = children, styles = styles)
-proc row*(children: seq[Node], key = "", styles: Styles = default(Styles)): Node =
-  ui(NodeKind.row, key = key, children = children, styles = styles)
+proc column*(children: seq[Node], key = "", styles: Styles = default(Styles), variant = "default"): Node =
+  ui(NodeKind.column, key = key, children = children, styles = styles,
+    attributes = (if variant == "default": default(Styles) else: style({"variant": variant})))
+proc row*(children: seq[Node], key = "", styles: Styles = default(Styles), variant = "default"): Node =
+  ui(NodeKind.row, key = key, children = children, styles = styles,
+    attributes = (if variant == "default": default(Styles) else: style({"variant": variant})))
 proc text*(value: string, key = "", styles: Styles = default(Styles), variant = "default"): Node =
   ui(NodeKind.text, key = key, text = value, styles = styles,
     attributes = (if variant == "default": default(Styles) else: style({"variant":variant})))
@@ -20,8 +22,12 @@ proc button*(label: string, onClick: Callback = nil, key = "", disabled = false,
      disabled = disabled, styles = styles, attributes = style({"variant": variant}))
 proc input*(value: string, onChange: Callback = nil, key = "", placeholder = "",
             onSubmit: Callback = nil, disabled = false,
-            styles: Styles = default(Styles), resetToken: uint64 = 0, variant = "default"): Node =
+            styles: Styles = default(Styles), resetToken: uint64 = 0, variant = "default",
+            multiline = false): Node =
+  ## Multiline uses native wrapping/scrolling and Enter inserts a newline.
+  ## Keep this mode stable for a given key; use a new key to change it.
   var attributes = default(Styles)
+  if multiline: attributes["multiline"] = "true"
   if variant != "default": attributes["variant"] = variant
   if resetToken != 0:
     attributes["input_reset_token"] = $resetToken

@@ -61,6 +61,22 @@ type Win32Calls* = object
   focusWindow*: proc(): HWND {.closure, raises: [CatchableError].}
   setFocus*: proc(window: HWND): HWND {.closure, raises: [CatchableError].}
   setCtrlId*: proc(window: HWND, value: int): int {.closure, raises: [CatchableError].}
+  windowRect*: proc(window: HWND, rect: ptr RECT): BOOL {.closure, raises: [CatchableError].}
+  isWindowEnabled*: proc(window: HWND): BOOL {.closure, raises: [CatchableError].}
+  isWindowVisible*: proc(window: HWND): BOOL {.closure, raises: [CatchableError].}
+  setLayeredWindowAttributes*: proc(window: HWND, color: DWORD, alpha: uint8,
+    flags: DWORD): BOOL {.closure, raises: [CatchableError].}
+  monitorFromWindow*: proc(window: HWND, flags: DWORD): HMonitor {.closure, raises: [CatchableError].}
+  getMonitorInfo*: proc(monitor: HMonitor, info: pointer): BOOL {.closure, raises: [CatchableError].}
+  setWindowTheme*: proc(window: HWND, subApp, subId: WidePtr): int32 {.closure, raises: [CatchableError].}
+  getStockObject*: proc(index: int32): HGDIOBJ {.closure, raises: [CatchableError].}
+  fillRect*: proc(dc: HDC, rect: ptr RECT, brush: HBRUSH): int32 {.closure, raises: [CatchableError].}
+  setDCBrushColor*: proc(dc: HDC, color: DWORD): DWORD {.closure, raises: [CatchableError].}
+  setTextColor*: proc(dc: HDC, color: DWORD): DWORD {.closure, raises: [CatchableError].}
+  setDCPenColor*: proc(dc: HDC, color: DWORD): DWORD {.closure, raises: [CatchableError].}
+  setBkMode*: proc(dc: HDC, mode: int32): int32 {.closure, raises: [CatchableError].}
+  redrawWindow*: proc(window: HWND, update: ptr RECT, region: HRGN,
+    flags: UINT): BOOL {.closure, raises: [CatchableError].}
 
 proc systemWin32Calls*(): Win32Calls =
   result.registerClass = proc(windowClass: ptr WNDCLASSEXW): ATOM = RegisterClassExW(windowClass)
@@ -139,3 +155,20 @@ proc systemWin32Calls*(): Win32Calls =
   result.focusWindow = proc(): HWND = GetFocus()
   result.setFocus = proc(window: HWND): HWND = SetFocus(window)
   result.setCtrlId = proc(window: HWND, value: int): int = SetWindowLongPtrW(window,GWL_ID,value)
+  result.windowRect = proc(window: HWND, rect: ptr RECT): BOOL = GetWindowRect(window,rect)
+  result.isWindowEnabled = proc(window: HWND): BOOL = IsWindowEnabled(window)
+  result.isWindowVisible = proc(window: HWND): BOOL = IsWindowVisible(window)
+  result.setLayeredWindowAttributes = proc(window: HWND, color: DWORD, alpha: uint8,
+      flags: DWORD): BOOL = SetLayeredWindowAttributes(window,color,alpha,flags)
+  result.monitorFromWindow = proc(window: HWND, flags: DWORD): HMonitor = MonitorFromWindow(window,flags)
+  result.getMonitorInfo = proc(monitor: HMonitor, info: pointer): BOOL = GetMonitorInfoW(monitor,info)
+  result.setWindowTheme = proc(window: HWND, subApp, subId: WidePtr): int32 =
+    SetWindowTheme(window,subApp,subId)
+  result.getStockObject = proc(index: int32): HGDIOBJ = GetStockObject(index)
+  result.fillRect = proc(dc: HDC, rect: ptr RECT, brush: HBRUSH): int32 = FillRect(dc,rect,brush)
+  result.setDCBrushColor = proc(dc: HDC, color: DWORD): DWORD = SetDCBrushColor(dc,color)
+  result.setTextColor = proc(dc: HDC, color: DWORD): DWORD = SetTextColor(dc,color)
+  result.setDCPenColor = proc(dc: HDC, color: DWORD): DWORD = SetDCPenColor(dc,color)
+  result.setBkMode = proc(dc: HDC, mode: int32): int32 = SetBkMode(dc,mode)
+  result.redrawWindow = proc(window: HWND, update: ptr RECT, region: HRGN,
+      flags: UINT): BOOL = RedrawWindow(window,update,region,flags)

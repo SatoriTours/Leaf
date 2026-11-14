@@ -77,6 +77,10 @@ componentView:
 
 给交互控件设置**稳定 key**；同一父级内唯一。受控输入必须在 `onChange` 中更新状态，否则模型可能把显示值恢复。
 
+Win32 可通过 Nim 构造器 `input(value, multiline=true, ...)` 创建原生多行 EDIT：Enter 插入换行，不触发 `onSubmit`，支持折行与滚动。模型中的 LF／CRLF 在原生边界统一为 CRLF；Windows 的 `e.value` 使用原生 CRLF，跨平台存储可自行规范化。相同 key 的单／多行模式必须保持不变；切换模式请使用新 key。不支持的平台必须拒绝该能力，不能悄悄降成单行。
+
+选择松石主题后，`column`／`row` 的 `variant="primary"` 使用内容表面、`"secondary"` 使用面板底色，默认继承父容器；`button(..., variant="ghost")` 是安静的文字操作。`input(..., variant="primary")` 用于标题，`"ghost"` 用于无常驻边框的正文，聚焦仍有提示。完整应用见 [Leaf Notes](../examples/native_notes/README.md)，不代表支持任意 decoration 或 Android 多行输入。
+
 <details>
 <summary>DSL、样式与容器组合规则</summary>
 

@@ -4,6 +4,9 @@ import std/[tables, sets, json, math, unicode, algorithm, options]
 import ./diagnostics
 import ./task_contracts
 import ./navigation_protocol
+import ./overlay_protocol
+import ./select_protocol
+import ./popover_protocol
 import ./native_theme
 import ./graphics
 import ./canvas_input
@@ -23,7 +26,10 @@ type
     column, row, text, button, input, checkbox, toggle, progress, tag,
     separator, spinner, virtualList, navigation, canvasHost
   EventKind* = enum
-    click, change, submit, back, canvasInput
+    click, change, submit, back, canvasInput, dismiss, openChange
+      ## `dismiss` is a modal overlay's typed close request and `openChange` a
+      ## controlled select's open/close request. Both are appended so existing
+      ## ordinals stay stable, and neither reuses `checked` or parses a string.
   CompositionPhase* = enum
     ## Additive native IME/editing phase metadata. `compositionNone` is the
     ## default so existing events and JSON are unchanged.
@@ -33,6 +39,9 @@ type
     kind*: EventKind
     value*: string
     checked*: bool
+    open*: bool
+      ## Only a select `openChange` request uses this typed flag; it is never
+      ## encoded through `checked` or through a string value.
     composition*: CompositionPhase
     navigationRequestId*: uint64
     canvas*: CanvasDelivery
@@ -47,6 +56,9 @@ type
     handlers: array[EventKind, Callback]
     navigation: Option[HostNavigationProps]
     canvas: Option[CanvasFrame]
+    overlay: Option[OverlayProps]
+    select: Option[SelectProps]
+    popover: Option[PopoverProps]
     source: ListSource
   RowBuilder* = proc(index: int): Node {.closure.}
   ListSource* = ref object
@@ -202,6 +214,10 @@ proc children*(node: Node): seq[Node] = node.descendants
 proc listSource*(node: Node): ListSource = node.source
 proc navigationProps*(node: Node): Option[HostNavigationProps] = node.navigation
 proc canvasFrame*(node: Node): Option[CanvasFrame] = node.canvas
+proc overlayProps*(node: Node): Option[OverlayProps] = node.overlay
+proc selectProps*(node: Node): Option[SelectProps] = node.select
+
+proc popoverProps*(node: Node): Option[PopoverProps] = node.popover
 proc withCanvasPresentationInternal*(node:Node,frame:CanvasFrame):Node=
   result=Node()
   result[]=node[]
@@ -231,8 +247,12 @@ proc ui*(kind: NodeKind, key = "", text = "", placeholder = "",
          attributes: Styles = default(Styles), disabled = false,
          onClick: Callback = nil, onChange: Callback = nil,
          onSubmit: Callback = nil, onBack: Callback = nil, onCanvasInput: Callback = nil,
+         onDismiss: Callback = nil, onOpenChange: Callback = nil,
          navigation: Option[HostNavigationProps] = none(HostNavigationProps),
-         canvas: Option[CanvasFrame] = none(CanvasFrame)): Node =
+         canvas: Option[CanvasFrame] = none(CanvasFrame),
+         overlay: Option[OverlayProps] = none(OverlayProps),
+         select: Option[SelectProps] = none(SelectProps),
+         popover: Option[PopoverProps] = none(PopoverProps)): Node =
   for value in [key, text, placeholder]: validString(value)
   for pairs in [styles, attributes]:
     for name, value in pairs:
@@ -241,11 +261,27 @@ proc ui*(kind: NodeKind, key = "", text = "", placeholder = "",
   if kind notin {column, row, virtualList, NodeKind.navigation} and children.len != 0:
     fail("leaf controls cannot have children")
   if onClick != nil and kind != button: fail("click requires a button")
-  if onChange != nil and kind notin {input, checkbox, toggle}:
-    fail("change requires an input, checkbox or switch")
+  if onChange != nil and kind notin {input, checkbox, toggle} and select.isNone:
+    fail("change requires an input, checkbox, switch or select")
+  if onOpenChange != nil and select.isNone and popover.isNone:
+    fail("openChange requires a select or popover description")
   if onSubmit != nil and kind != input: fail("submit requires an input")
   if onBack != nil and kind != NodeKind.navigation: fail("back requires a navigation host")
   if onCanvasInput != nil and kind != NodeKind.canvasHost: fail("Canvas input requires a Canvas host")
+  if onDismiss != nil and overlay.isNone: fail("dismiss requires a modal overlay description")
+  if overlay.isSome:
+    if kind notin {column, row}: fail("modal overlay must host a container")
+    let reason = invalidOverlayReason(overlay.get)
+    if reason.len != 0: fail(reason)
+  if select.isSome:
+    if kind notin {column, row}: fail("select sidecar must host a container")
+    let reason = invalidSelectReason(select.get)
+    if reason.len != 0: fail(reason)
+  if popover.isSome:
+    if kind notin {column, row}: fail("popover sidecar must host a container")
+    if select.isSome: fail("popover cannot also be a select")
+    let reason = invalidPopoverReason(popover.get)
+    if reason.len != 0: fail(reason)
   if (kind == NodeKind.navigation) != navigation.isSome:
     fail("navigation metadata must belong to a navigation host")
   if navigation.isSome:
@@ -256,8 +292,11 @@ proc ui*(kind: NodeKind, key = "", text = "", placeholder = "",
   if canvas.isSome and canvas.get.isNil: fail("Canvas frame is missing")
   Node(nodeKind: kind, nodeKey: key, label: text, hint: placeholder,
     descendants: children, nodeStyles: styles, nodeAttributes: attributes,
-    inactive: disabled, handlers: [onClick, onChange, onSubmit, onBack, onCanvasInput],
-    navigation: navigation, canvas: canvas)
+    inactive: disabled,
+    handlers: [onClick, onChange, onSubmit, onBack, onCanvasInput, onDismiss,
+      onOpenChange],
+    navigation: navigation, canvas: canvas, overlay: overlay, select: select,
+    popover: popover)
 
 proc virtualList*(key: string, keys: seq[string], builder: RowBuilder,
                   rowHeight = 0.0, estimatedHeight = 100.0, overscan = 2,

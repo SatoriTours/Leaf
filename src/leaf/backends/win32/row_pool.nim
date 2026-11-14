@@ -37,11 +37,13 @@ type
     parked*, reused*, destroyed*: int
 
 proc rowSignature*(kinds: openArray[NodeKind],
-                   parents: openArray[int]): string =
+                   parents: openArray[int], multiline: openArray[bool] = [],
+                   groups: openArray[bool] = []): string =
   ## Structural signature of a row subtree: node kinds in pre-order *and* the
   ## parent index of every node. Two rows with the same kind sequence but a
   ## different parent/child topology are not interchangeable.
-  if kinds.len != parents.len: return ""
+  if kinds.len != parents.len or (multiline.len != 0 and multiline.len != kinds.len): return ""
+  if groups.len != 0 and groups.len != kinds.len: return ""
   result = newStringOfCap(kinds.len * 6)
   for kind in kinds:
     result.add(char(ord(kind) + 1))
@@ -49,6 +51,12 @@ proc rowSignature*(kinds: openArray[NodeKind],
   for index, parent in parents:
     if index > 0: result.add(',')
     result.add($parent)
+  if multiline.len != 0:
+    result.add('|')
+    for mode in multiline: result.add(if mode: 'M' else: 'S')
+  if groups.len != 0:
+    result.add('|')
+    for grouped in groups: result.add(if grouped: 'G' else: 'S')
 
 proc len*(pool: RowPool): int = pool.slots.len
 

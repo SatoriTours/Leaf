@@ -42,6 +42,18 @@ type
     selection*: Selection16
     force*: bool
 
+proc nativeMultilineText*(text: string): string =
+  ## Win32 EDIT requires CRLF, unlike portable Nim/SQLite text. Canonicalize at
+  ## the native boundary so selection offsets and accepted text use one form.
+  var index = 0
+  while index < text.len:
+    if text[index] == '\r':
+      result.add("\r\n")
+      if index + 1 < text.len and text[index + 1] == '\n': inc index
+    elif text[index] == '\n': result.add("\r\n")
+    else: result.add(text[index])
+    inc index
+
 proc toUnits(text: string): seq[uint16] =
   ## UTF-16 code units for a Nim UTF-8 string.
   for rune in text.runes:
@@ -93,10 +105,17 @@ proc observeEditor*(s: var EditorState, value: ControlValue,
                     sequence: uint64) =
   ## Record one observed native edit. Conflicts are never written here: only a
   ## successful `acceptModel` may update the conflict.
+  when defined(leafProtocolProbes):
+    echo "OBS in seq=", sequence, " valLen=", value.text.len,
+      " nativeLen=", s.native.text.len, " acceptedLen=", s.accepted.text.len,
+      " latest=", s.latestObserved, " settled=", s.lastSettled,
+      " phase=", phase, " hwndUnaware=1"
   s.native = value
   s.phase = phase
   s.selection = selection
   if sequence > s.latestObserved: s.latestObserved = sequence
+  when defined(leafProtocolProbes):
+    echo "OBS out nativeLen=", s.native.text.len, " latest=", s.latestObserved
 
 proc prepareModelAccept*(s: EditorState, value: ControlValue): PreparedModelAccept =
   ## Prepare-time ownership: copy the dynamic accepted/conflict values here so
@@ -141,6 +160,11 @@ proc settleEditor*(s: var EditorState, sequence: uint64): seq[EditEffect] =
   ## Handle a normal acknowledgement. Old or future sequences produce no
   ## setter; an unfinished composition produces none either. Same text keeps
   ## the selection and composition untouched.
+  when defined(leafProtocolProbes):
+    echo "SETTLE in seq=", sequence, " latest=", s.latestObserved,
+      " settled=", s.lastSettled, " nativeLen=", s.native.text.len,
+      " acceptedLen=", s.accepted.text.len, " phase=", s.phase,
+      " isCheck=", s.native.isCheck
   if sequence > s.latestObserved: return
   if sequence < s.latestObserved: return
   s.lastSettled = sequence
@@ -163,6 +187,9 @@ proc settleEditor*(s: var EditorState, sequence: uint64): seq[EditEffect] =
       result.add EditEffect(kind: setChecked, value: s.accepted,
         selection: s.selection, force: false)
     return
+  when defined(leafProtocolProbes):
+    echo "SETTLE out emitSetText=", s.native.text != s.accepted.text,
+      " nativeLen=", s.native.text.len, " acceptedLen=", s.accepted.text.len
   if s.native.text != s.accepted.text:
     result.add EditEffect(kind: setText, value: s.accepted,
       selection: clampSelection(s.selection, s.native.text, s.accepted.text),

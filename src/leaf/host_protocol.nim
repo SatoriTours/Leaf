@@ -1,7 +1,8 @@
 ## Backend-neutral, owned host data. No callbacks or platform objects cross
 ## this boundary; platform-specific interpretation remains in the adapter.
 import std/[options, tables, strutils, math]
-import ./[core, styles, backend, list_protocol, navigation_protocol, graphics]
+import ./[core, styles, backend, list_protocol, navigation_protocol, graphics,
+  overlay_protocol, select_protocol, popover_protocol]
 export backend.NodeHandle, backend.NoHandle
 # The pure list types live in `list_protocol`; re-exported here so existing
 # `host_protocol` call sites, field names and enum meanings stay unchanged.
@@ -13,6 +14,8 @@ const
   EventSubmitMask* = 4'u32
   EventBackMask* = 8'u32
   EventCanvasInputMask* = 16'u32
+  EventDismissMask* = 32'u32
+  EventOpenChangeMask* = 64'u32
 
 type
   HostStylePolicy* = enum hostCompatible, nativeStrict
@@ -23,6 +26,11 @@ type
     list*: Option[HostListProps]
     navigation*: Option[HostNavigationProps]
     canvas*: Option[CanvasFrame]
+    overlay*: Option[OverlayProps]
+    select*: Option[SelectProps]
+      ## Complete typed select description; none for ordinary nodes.
+    popover*: Option[PopoverProps]
+      ## Complete typed non-modal popover description; none for ordinary nodes.
   HostBoundary* = object
     id*: uint64
     root*: NodeHandle
@@ -58,8 +66,12 @@ proc compatibleNode(node: Node): Node =
   var attrs: Styles
   for name, value in node.attributes:
     case name
+    of "ui_role", "ui_variant", "ui_size", "ui_invalid", "ui_loading", "ui_color_mode", "ui_opacity", "ui_angle":
+      # Required standard semantics are never sanitized into legacy defaults.
+      attrs[name] = value
     of "variant":
-      if node.kind in {NodeKind.button, NodeKind.tag, NodeKind.text, NodeKind.input}:
+      if node.kind in {NodeKind.button, NodeKind.tag, NodeKind.text, NodeKind.input,
+          NodeKind.column, NodeKind.row}:
         attrs[name] = if value in ["default", "primary", "danger", "success",
           "warning", "info", "outline", "ghost", "secondary"]: value
           else: "default"
@@ -68,19 +80,26 @@ proc compatibleNode(node: Node): Node =
         attrs[name] = if value == "true": "true" else: "false"
     of "value":
       if node.kind == NodeKind.progress:
+        if "ui_role" in node.attributes:
+          attrs[name]=value
+          continue
         var number = 0.0
         try: number = parseFloat(value)
         except ValueError: discard
         if classify(number) in {fcNan, fcInf, fcNegInf}: number = 0
         attrs[name] = $clamp(number, 0.0, 100.0)
-    of "input_reset_token":
+    of "input_reset_token", "multiline":
       if node.kind == NodeKind.input: attrs[name] = value
-    else: discard
+    else:
+      # Unknown names in the reserved namespace must fail validation too.
+      if name.startsWith("ui_"): attrs[name] = value
   ui(node.kind, key=node.key, text=node.text, placeholder=node.placeholder,
     disabled=node.disabled, styles=node.styles, attributes=attrs,
     onClick=node.handler(click), onChange=node.handler(change),
     onSubmit=node.handler(submit), onBack=node.handler(back), onCanvasInput=node.handler(canvasInput),
-    navigation=node.navigationProps, canvas=node.canvasFrame)
+    onDismiss=node.handler(dismiss), onOpenChange=node.handler(openChange),
+    navigation=node.navigationProps, canvas=node.canvasFrame, overlay=node.overlayProps,
+    select=node.selectProps, popover=node.popoverProps)
 
 proc normalizeHostProps*(node: Node, policy: HostStylePolicy): HostProps =
   if node == nil: fail("nil host description")
@@ -92,6 +111,19 @@ proc normalizeHostProps*(node: Node, policy: HostStylePolicy): HostProps =
   if node.handler(submit) != nil: result.eventMask = result.eventMask or EventSubmitMask
   if node.handler(back) != nil: result.eventMask = result.eventMask or EventBackMask
   if node.handler(canvasInput) != nil: result.eventMask = result.eventMask or EventCanvasInputMask
+  if node.handler(dismiss) != nil: result.eventMask = result.eventMask or EventDismissMask
+  if node.handler(openChange) != nil: result.eventMask = result.eventMask or EventOpenChangeMask
+  result.overlay = node.overlayProps
+  result.select = node.selectProps
+  result.popover = node.popoverProps
+  if result.popover.isSome:
+    let reason = invalidPopoverReason(result.popover.get)
+    if reason.len != 0: fail(reason & ": " & node.key)
+  if result.select.isSome:
+    # Re-validate on the wire: a candidate description is never trusted only
+    # because it was built locally.
+    let reason = invalidSelectReason(result.select.get)
+    if reason.len != 0: fail(reason & ": " & node.key)
   result.navigation = node.navigationProps
   result.canvas = node.canvasFrame
   let source = node.listSource

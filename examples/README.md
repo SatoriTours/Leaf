@@ -29,6 +29,7 @@ leaf --headless --click add --click add counter.nim
 
 | 示例 | 重点 | 环境 |
 | --- | --- | --- |
+| [native_notes](native_notes/README.md) | 松石三栏笔记、搜索、原生多行编辑、草稿与 SQLite 保存重开 | Windows x64，native |
 | [native_forms](native_forms/README.md) | Win32 受控输入、reset、键盘与失败候选 | Windows x64，native |
 | [native_list](native_list/README.md) | 10,000 行虚拟列表、行 State、SQLite 保存重开 | Windows x64，native |
 

@@ -4,7 +4,7 @@
 ## pre-sized maps. A full metadata Table is an explicit compatibility cost for
 ## backends without acceptedDelta and is built during prepare, never accept.
 import std/[tables,sets,algorithm,options]
-import ./[core,backend,host_session,commit_map]
+import ./[core,backend,host_session,commit_map,overlay_protocol]
 var nextNativeConsumer:uint64=1000
 when defined(leafProtocolProbes):
   var nativeAcceptAllocations*:int
@@ -78,7 +78,30 @@ proc nativeHostConsumer*(backend:Backend,sessionId=0'u64,
         if op.props.list.isSome:
           let reason=invalidReason(op.props.list.get,MaxListItems)
           if reason.len!=0:fail("host list metadata rejected: " & reason)
-        pendingIssues.add(checkTypedCapabilities(op.nodeId,op.nodeKind,op.props.normalized,backend.capabilities,mode))
+        if op.props.overlay.isSome:
+          if op.nodeKind notin {NodeKind.column, NodeKind.row}:
+            fail("modal overlay must host a container: " & op.nodeId)
+          if op.parent == NoHandle:
+            fail("modal overlay requires an owning window: " & op.nodeId)
+        elif (op.props.eventMask and EventDismissMask) != 0:
+          fail("dismiss handler requires a modal overlay: " & op.nodeId)
+        if op.props.select.isSome:
+          if op.nodeKind notin {NodeKind.column, NodeKind.row}:
+            fail("select must host a container: " & op.nodeId)
+          if op.parent == NoHandle:
+            fail("select requires an owning container: " & op.nodeId)
+        if op.props.popover.isSome:
+          if op.nodeKind notin {NodeKind.column, NodeKind.row}:
+            fail("popover must host a container: " & op.nodeId)
+          if op.parent == NoHandle:
+            fail("popover requires an owning container: " & op.nodeId)
+          if op.props.select.isSome:
+            fail("popover cannot also be a select: " & op.nodeId)
+        elif (op.props.eventMask and EventOpenChangeMask) != 0 and
+            op.props.select.isNone:
+          fail("openChange handler requires a select or popover description: " & op.nodeId)
+        pendingIssues.add(checkTypedCapabilities(op.nodeId,op.nodeKind,op.props.normalized,
+          backend.capabilities,mode,op.props.overlay,op.props.select,op.props.popover))
         var entity=entities.getOrDefault(op.handle)
         entity.handle=op.handle;entity.parent=op.parent;entity.nodeId=op.nodeId;entity.kind=op.nodeKind
         entity.props=effectiveProps(backend.capabilities,op.props.normalized,some(op.nodeKind))
@@ -86,6 +109,9 @@ proc nativeHostConsumer*(backend:Backend,sessionId=0'u64,
         entity.canvas=op.props.canvas
         entity.list=op.props.list
         entity.row=op.row
+        entity.overlay=op.props.overlay
+        entity.select=op.props.select
+        entity.popover=op.props.popover
         edits[op.handle]=entity
         if op.kind==HostOpKind.create:created.incl(op.handle)
       of HostOpKind.setChildren:pendingOrders.add(HostChildOrder(parent:op.handle,children:op.children))
@@ -102,16 +128,16 @@ proc nativeHostConsumer*(backend:Backend,sessionId=0'u64,
       if handle in created:
         batch.ops.add(UpdateOp(kind:opCreate,handle:handle,parent:entity.parent,index:entity.index,
           nodeId:entity.nodeId,nodeKind:entity.kind,props:entity.props,list:entity.list,navigation:entity.navigation,
-          row:entity.row,canvas:entity.canvas))
+          row:entity.row,canvas:entity.canvas,overlay:entity.overlay,select:entity.select,popover:entity.popover))
       else:
-        if old.props!=entity.props or old.list!=entity.list or old.row!=entity.row or old.navigation!=entity.navigation or old.canvas!=entity.canvas:
+        if old.props!=entity.props or old.list!=entity.list or old.row!=entity.row or old.navigation!=entity.navigation or old.canvas!=entity.canvas or old.overlay!=entity.overlay or old.select!=entity.select or old.popover!=entity.popover:
           batch.ops.add(UpdateOp(kind:opUpdate,handle:handle,parent:entity.parent,index:entity.index,
             nodeId:entity.nodeId,nodeKind:entity.kind,props:entity.props,list:entity.list,navigation:entity.navigation,
-            row:entity.row,canvas:entity.canvas))
+            row:entity.row,canvas:entity.canvas,overlay:entity.overlay,select:entity.select,popover:entity.popover))
         if old.parent!=entity.parent or old.index!=entity.index:
           batch.ops.add(UpdateOp(kind:opMove,handle:handle,parent:entity.parent,index:entity.index,
             nodeId:entity.nodeId,nodeKind:entity.kind,props:entity.props,list:entity.list,navigation:entity.navigation,
-            row:entity.row,canvas:entity.canvas))
+            row:entity.row,canvas:entity.canvas,overlay:entity.overlay,select:entity.select,popover:entity.popover))
     proc depth(op:UpdateOp):int=
       var parent=op.parent
       while parent!=NoHandle:

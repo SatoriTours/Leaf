@@ -1,0 +1,1 @@
+{"name":"LeafNotes","identifier":"org.leaf.notes","version":"0.1.0","entry":"main.nim","include":["main.nim","application.nim","store.nim"],"backend":"native"}

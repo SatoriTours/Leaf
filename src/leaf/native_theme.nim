@@ -1,7 +1,9 @@
 ## Opt-in native appearance. Tokens are logical RGB/DIP, never OS resources.
 ## The default deliberately remains the platform's system controls.
+import ./ui/tokens
+
 type
-  NativeTheme* = enum systemTheme, matsuLight, matsuDark
+  NativeTheme* = enum systemTheme, matsuLight, matsuDark, shadcnLight, shadcnDark
   NativePalette* = object
     canvas*, surface*, panel*, ink*, muted*, line*, controlLine*: uint32
     accent*, accentHover*, accentSoft*, onAccent*, danger*: uint32
@@ -19,6 +21,9 @@ const
 proc themeEnabled*(theme: NativeTheme, highContrast: bool): bool =
   theme != systemTheme and not highContrast
 
+proc isShadcn*(theme: NativeTheme): bool = theme in {shadcnLight, shadcnDark}
+proc isDarkTheme*(theme: NativeTheme): bool = theme in {matsuDark, shadcnDark}
+
 proc palette*(theme: NativeTheme): NativePalette =
   case theme
   of systemTheme:
@@ -33,6 +38,20 @@ proc palette*(theme: NativeTheme): NativePalette =
       ink: 0xedf2ee, muted: 0xacb8af, line: 0x37433b, controlLine: 0x74867a,
       accent: 0x9dd5b5, accentHover: 0xb8e5ca, accentSoft: 0x283e30,
       onAccent: 0x142b1e, danger: 0xffaaa4)
+  of shadcnLight, shadcnDark:
+    let p = neutralPalette(if theme == shadcnDark: UiColorMode.dark else: UiColorMode.light)
+    let surface = p[UiColorToken.card]
+    NativePalette(canvas: rgb24(p[UiColorToken.background]), surface: rgb24(surface),
+      panel: rgb24(p[UiColorToken.muted]), ink: rgb24(p[UiColorToken.foreground]),
+      muted: rgb24(p[UiColorToken.mutedForeground]),
+      line: rgb24(composite(p[UiColorToken.border], surface)),
+      controlLine: rgb24(composite(p[UiColorToken.input], surface)),
+      accent: rgb24(p[UiColorToken.primary]),
+      accentHover: rgb24(composite(srgb(p[UiColorToken.primary].r,
+        p[UiColorToken.primary].g, p[UiColorToken.primary].b, 0.9), surface)),
+      accentSoft: rgb24(p[UiColorToken.accent]),
+      onAccent: rgb24(p[UiColorToken.primaryForeground]),
+      danger: rgb24(p[UiColorToken.destructive]))
 
 proc buttonColors*(theme: NativeTheme, primary=false, hot=false,
                    pressed=false, disabled=false): NativeButtonColors =

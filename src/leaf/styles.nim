@@ -7,6 +7,9 @@
 ## honoured is declared separately by each backend.
 import std/[tables, strutils, math, options]
 import ./core
+import ./overlay_protocol
+import ./ui_contract
+export ui_contract
 
 const MaxStyleNumber* = 1_000_000.0
 
@@ -63,6 +66,7 @@ type
     progress*: Option[float64]
     variant*: Option[ControlVariant]
     resetToken*: Option[uint64]
+    multiline*: Option[bool]
     hasClick*, hasChange*, hasSubmit*, hasBack*: bool
 
   AccessibilityProps* = object
@@ -77,6 +81,7 @@ type
     decoration*: DecorationProps
     control*: ControlProps
     accessibility*: AccessibilityProps
+    standardUi*: Option[StandardUiProps]
 
 proc styleNumber(key, value: string): float64 =
   try:
@@ -244,11 +249,12 @@ proc decorationFromStyles(styles: Styles): DecorationProps =
   if "weight" in styles: result.weight = some(styleWeight(styles["weight"]))
 
 proc attributeAllowed(kind: NodeKind, name: string): bool =
+  if name in ["ui_role", "ui_variant", "ui_size", "ui_invalid", "ui_loading", "ui_color_mode", "ui_opacity", "ui_angle"]: return true
   case kind
-  of NodeKind.button, NodeKind.tag, NodeKind.text: name == "variant"
+  of NodeKind.button, NodeKind.tag, NodeKind.text, NodeKind.column, NodeKind.row: name == "variant"
   of NodeKind.checkbox, NodeKind.toggle: name == "checked"
   of NodeKind.progress: name == "value"
-  of NodeKind.input: name in ["input_reset_token", "variant"]
+  of NodeKind.input: name in ["input_reset_token", "variant", "multiline"]
   else: false
 
 proc parseResetToken(value: string): uint64 =
@@ -282,11 +288,13 @@ proc controlFrom(node: Node): ControlProps =
     result.label = some(node.text)
     if "variant" in node.attributes:
       result.variant = some(styleVariant(node.attributes["variant"]))
-  of NodeKind.text:
+  of NodeKind.text, NodeKind.column, NodeKind.row:
     if "variant" in node.attributes:
       result.variant = some(styleVariant(node.attributes["variant"]))
   of NodeKind.input:
     result.value = some(node.text)
+    if "multiline" in node.attributes:
+      result.multiline = some(styleChecked(node.attributes["multiline"]))
     if "variant" in node.attributes:
       result.variant = some(styleVariant(node.attributes["variant"]))
     if node.placeholder.len > 0: result.placeholder = some(node.placeholder)
@@ -322,6 +330,155 @@ proc accessibilityFrom(node: Node, control: ControlProps): AccessibilityProps =
   else:
     discard
 
+proc standardUiFrom(node: Node): Option[StandardUiProps] =
+  var present = false
+  for key in node.attributes.keys:
+    if key.startsWith("ui_"): present = true
+  if not present: return
+  if "ui_role" notin node.attributes: fail("standard UI metadata requires ui_role")
+  if "variant" in node.attributes: fail("standard UI cannot mix legacy variant metadata")
+  var props: StandardUiProps
+  try:
+    props.role = parseEnum[UiRole](node.attributes["ui_role"])
+    props.variant = parseEnum[UiVariant](node.attributes.getOrDefault("ui_variant", "default"))
+    props.size = parseEnum[UiSize](node.attributes.getOrDefault("ui_size", "normal"))
+  except ValueError: fail("invalid standard UI role, variant or size")
+  props.invalid = styleChecked(node.attributes.getOrDefault("ui_invalid", "false"))
+  props.loading = styleChecked(node.attributes.getOrDefault("ui_loading", "false"))
+  if props.role == UiRole.theme:
+    if "ui_color_mode" notin node.attributes: fail("standard theme requires ui_color_mode")
+    try: props.colorMode = some(parseEnum[UiColorMode](node.attributes["ui_color_mode"]))
+    except ValueError: fail("invalid standard color mode")
+  elif "ui_color_mode" in node.attributes:
+    fail("color mode only applies to a window-root theme")
+  if props.role==UiRole.skeleton:
+    if "ui_opacity" notin node.attributes:fail("skeleton requires pulse opacity")
+    let raw=node.attributes["ui_opacity"]
+    var value:int
+    try:value=parseInt(raw)
+    except ValueError:fail("invalid skeleton opacity")
+    if value<500 or value>1000:fail("skeleton opacity must be 500..1000 permille")
+    props.opacityPermille=some(value)
+    if node.text.len!=0 or node.children.len!=0:fail("skeleton cannot contain text or children")
+  elif "ui_opacity" in node.attributes:fail("opacity only applies to skeleton")
+  if props.role==UiRole.spinner:
+    if "ui_angle" notin node.attributes:fail("spinner requires rotation angle")
+    let raw=node.attributes["ui_angle"]
+    var value:int
+    try:value=parseInt(raw)
+    except ValueError:fail("invalid spinner angle")
+    if value<0 or value>360:fail("spinner angle must be 0..360 degrees")
+    props.angleDegrees=some(value)
+    if node.text.len==0:fail("spinner requires non-empty label")
+    if node.children.len!=0:fail("spinner cannot contain children")
+  elif "ui_angle" in node.attributes:fail("angle only applies to spinner")
+  let expected = case props.role
+    of UiRole.button: NodeKind.button
+    of UiRole.badge,UiRole.kbd,UiRole.skeleton,UiRole.spinner: NodeKind.tag
+    of UiRole.progress: NodeKind.progress
+    of UiRole.separator: NodeKind.separator
+    of UiRole.checkbox: NodeKind.checkbox
+    of UiRole.switch: NodeKind.toggle
+    of UiRole.input, UiRole.textarea: NodeKind.input
+    of UiRole.alertTitle, UiRole.alertDescription, UiRole.cardTitle, UiRole.cardDescription, UiRole.label,
+        UiRole.fieldDescription, UiRole.fieldError,
+        UiRole.dialogTitle, UiRole.dialogDescription,
+        UiRole.emptyTitle, UiRole.emptyDescription, UiRole.inputGroupText: NodeKind.text
+    of UiRole.cardFooter,UiRole.kbdGroup,UiRole.buttonGroup,UiRole.inputGroup,UiRole.inputGroupAddon,
+        UiRole.dialogFooter, UiRole.dialogHeader: NodeKind.row
+    of UiRole.dialogClose, UiRole.alertDialogCancel, UiRole.alertDialogAction,
+        UiRole.selectTrigger: NodeKind.button
+    of UiRole.select, UiRole.selectContent: NodeKind.column
+    of UiRole.selectItem: NodeKind.row
+    of UiRole.popover, UiRole.popoverContent: NodeKind.column
+    of UiRole.popoverTrigger, UiRole.popoverClose: NodeKind.button
+    else: NodeKind.column
+  if node.kind != expected: fail("standard UI role does not match native kind")
+  if props.role == UiRole.switch and
+      (props.variant != UiVariant.default or props.size notin {UiSize.normal,UiSize.sm} or props.loading):
+    fail("unsupported standard switch variant, size or loading")
+  if props.role == UiRole.alert:
+    if node.text.len == 0: fail("alert requires non-empty accessible text")
+    if props.variant notin {UiVariant.default,UiVariant.destructive} or
+        props.size != UiSize.normal or props.loading:
+      fail("unsupported alert variant, size or loading")
+  if props.role notin {UiRole.button,UiRole.switch,UiRole.badge,UiRole.alert,
+      UiRole.alertDialogCancel,UiRole.alertDialogAction,
+      UiRole.popoverTrigger,UiRole.popoverClose} and
+      (props.variant != UiVariant.default or props.size != UiSize.normal or props.loading):
+    fail("standard UI variant, size or loading does not apply to this role")
+  if props.role==UiRole.progress:
+    if "value" notin node.attributes:fail("standard progress requires a determinate value")
+    let value=styleProgress(node.attributes["value"])
+    if value!=floor(value):fail("standard progress requires integer percent")
+  if props.role == UiRole.badge and (props.size != UiSize.normal or props.loading):
+    fail("unsupported badge size or loading")
+  if props.role in {UiRole.alert,UiRole.alertTitle,UiRole.alertDescription,UiRole.inputGroup,UiRole.inputGroupAddon,UiRole.inputGroupText,UiRole.buttonGroup,UiRole.skeleton,UiRole.spinner,UiRole.badge,UiRole.separator,UiRole.progress,UiRole.kbd,UiRole.kbdGroup,UiRole.empty,UiRole.emptyHeader,
+      UiRole.emptyTitle,UiRole.emptyDescription,UiRole.emptyContent,UiRole.dialogHeader,UiRole.dialogContent,
+      UiRole.dialogFooter,UiRole.dialogTitle,UiRole.dialogDescription,UiRole.selectContent,
+      UiRole.popoverContent} and
+      (node.disabled or node.handler(click) != nil or node.handler(change) != nil or
+       node.handler(submit) != nil or node.handler(back) != nil):
+    fail("standard display components are noninteractive")
+  if props.invalid and props.role notin {UiRole.input, UiRole.textarea, UiRole.checkbox}:
+    fail("invalid state does not apply to this standard UI role")
+  if props.role in {UiRole.input, UiRole.textarea} and
+      (node.attributes.getOrDefault("multiline", "false") == "true") !=
+        (props.role == UiRole.textarea):
+    fail("standard input/textarea multiline mode does not match its role")
+  if props.loading and (not node.disabled or node.handler(click) != nil):
+    fail("loading standard button must disable activation")
+  if props.role in {UiRole.selectTrigger, UiRole.selectContent, UiRole.selectItem} and
+      (node.handler(click) != nil or node.handler(change) != nil or
+       node.handler(submit) != nil or node.handler(back) != nil or
+       node.handler(openChange) != nil):
+    fail("select parts carry no business handler; requests belong to the select root")
+  if props.role == UiRole.selectContent and node.disabled:
+    fail("select content cannot be disabled; disable the select or one item")
+  if props.role == UiRole.selectItem and node.children.len != 0:
+    fail("select item cannot contain children")
+  if props.role in {UiRole.popoverTrigger, UiRole.popoverContent, UiRole.popoverClose} and
+      (node.handler(click) != nil or node.handler(change) != nil or
+       node.handler(submit) != nil or node.handler(back) != nil or
+       node.handler(openChange) != nil):
+    fail("popover parts carry no business handler; requests belong to the popover root")
+  if props.role == UiRole.popoverContent and node.disabled:
+    fail("popover content cannot be disabled; disable the trigger or one control")
+  let overlay = node.overlayProps
+  let select = node.selectProps
+  let popover = node.popoverProps
+  case props.role
+  of UiRole.dialog:
+    if overlay.isNone or overlay.get.kind != overlayDialog:
+      fail("dialog role requires a dialog overlay description")
+    if node.text.len == 0: fail("dialog requires an accessible title")
+  of UiRole.alertDialog:
+    if overlay.isNone or overlay.get.kind != overlayAlertDialog:
+      fail("alert dialog role requires an alert dialog overlay description")
+    if node.text.len == 0: fail("alert dialog requires an accessible title")
+  of UiRole.select:
+    if select.isNone: fail("select role requires a typed select description")
+    if overlay.isSome: fail("select cannot also be a modal overlay")
+    if node.text.len == 0: fail("select requires an accessible name")
+  of UiRole.selectTrigger:
+    if select.isSome: fail("select description belongs to the select root")
+    if overlay.isSome: fail("select trigger cannot be a modal overlay")
+  of UiRole.selectContent, UiRole.selectItem:
+    if select.isSome: fail("select description belongs to the select root")
+    if overlay.isSome: fail("select content cannot be a modal overlay")
+  of UiRole.popover:
+    if popover.isNone: fail("popover role requires a typed popover description")
+    if overlay.isSome: fail("popover cannot also be a modal overlay")
+    if node.text.len == 0: fail("popover requires an accessible name")
+  of UiRole.popoverTrigger, UiRole.popoverContent, UiRole.popoverClose:
+    if popover.isSome: fail("popover description belongs to the popover root")
+    if overlay.isSome: fail("popover parts cannot be a modal overlay")
+  else:
+    if overlay.isSome: fail("overlay description requires a dialog or alert dialog role")
+    if select.isSome: fail("select description requires the select role")
+    if popover.isSome: fail("popover description requires the popover role")
+  some(props)
+
 proc normalizeProps*(node: Node): NormalizedProps =
   ## Validate and convert one description. Unknown styles/attributes and
   ## illegal values always raise `UiError`; no raw string survives into the
@@ -331,6 +488,12 @@ proc normalizeProps*(node: Node): NormalizedProps =
   result.decoration = decorationFromStyles(node.styles)
   result.control = controlFrom(node)
   result.accessibility = accessibilityFrom(node, result.control)
+  result.standardUi = standardUiFrom(node)
+  if result.standardUi.isSome and (result.standardUi.get.role in UiGroupRoles or
+      result.standardUi.get.role in {UiRole.spinner, UiRole.dialog, UiRole.alertDialog,
+        UiRole.select, UiRole.selectTrigger, UiRole.popover}):
+    result.control.label = some(node.text)
+    result.accessibility.label = some(node.text)
 
 proc validateProps*(root: MountedNode) =
   ## Validate a mounted tree with the same rules, including control-attribute

@@ -295,6 +295,14 @@ proc windowProc(window: HWND, message: UINT, wp: WPARAM, lp: LPARAM): LRESULT {.
         if host.theme != systemTheme and refreshSkin(window) == 0:
           nativeError("RedrawWindow skin setting change")
         host.wake()
+      of 0x0006'u32,0x0046'u32,0x0047'u32: # ACTIVATE / WINDOWPOSCHANGING / CHANGED
+        if host.lease != nil and host.session != nil and not host.close.pending and
+            host.bridge.matchesSession(host.session):
+          # Visual capture may hide an adornment before owner movement. Keep
+          # USER32's default activation/geometry processing and defer all
+          # repositioning to a normal native turn, also on pure moves.
+          discard host.bridge.capture(window,message,wp,lp)
+          host.wake()
       of WM_COMMAND, BackSysKeyDown, BackAppCommand:
         if host.lease != nil and host.session != nil and not host.close.pending and
             host.bridge.matchesSession(host.session) and host.bridge.capture(window, message, wp, lp):
@@ -512,8 +520,13 @@ proc createHost*(title: string, size: DipSize,
     host.ownsClass = true
     roots[host.cookie] = host
     host.rooted = true
+    # Shadcn erases its own background. Without CLIPCHILDREN a root erase
+    # (e.g. resize interleaved with a controlled update) can overwrite already
+    # painted native children without giving them another update region.
+    # Keep legacy system/matsu window styles unchanged.
+    let windowStyle=WS_OVERLAPPEDWINDOW or (if theme.isShadcn:WS_CLIPCHILDREN else:0'u32)
     let window = host.calls.createWindow(0, addr host.className[0], unsafeAddr titleW[0],
-      WS_OVERLAPPEDWINDOW, 0, 0, int32(width), int32(height), nil, nil,
+      windowStyle, 0, 0, int32(width), int32(height), nil, nil,
       host.instance, cast[pointer](host.cookie))
     host.checkCallback()
     if window == nil: nativeError("CreateWindowExW")
@@ -538,6 +551,17 @@ proc createHost*(title: string, size: DipSize,
 proc nativeTheme*(host: Win32Host): NativeTheme =
   host.ownerCheck()
   host.theme
+
+proc setNativeThemeInternal*(host: Win32Host, theme: NativeTheme) =
+  ## Backend transaction only: same-family color change, not an application
+  ## mutation from a WndProc. Fonts/geometry/EDIT state remain untouched.
+  host.liveCheck()
+  if not host.theme.isShadcn or not theme.isShadcn:
+    fail("runtime color mode requires a shadcn window")
+  if theme == host.theme: return
+  host.theme = theme
+  syncCaptionTheme(theme, host.window)
+  if refreshSkin(host.window) == 0: nativeError("RedrawWindow runtime color mode")
 
 proc context*(host: Win32Host): HostContext =
   host.liveCheck()
@@ -610,7 +634,24 @@ proc dispatch(host: Win32Host, message: var MSG) =
   inc host.dispatchDepth
   try:
     if pointerFocus: host.bridge.syncFocusTraversal(message.hwnd)
-    if host.window == nil or host.calls.dialogMessage(host.window, addr message) == 0:
+    if message.message in [0x0201'u32, 0x0203'u32] and host.lease != nil and
+        host.bridge.pointerButton != nil:
+      host.bridge.pointerButton(message.hwnd)
+    var dialogTarget = host.window
+    if host.lease != nil and host.bridge.modalTarget != nil:
+      let modal = host.bridge.modalTarget()
+      if modal != nil: dialogTarget = modal
+    var logicalTab = false
+    if message.message == WM_KEYDOWN and message.wParam == 0x09 and
+        host.lease != nil and host.bridge.modalScrollable != nil:
+      logicalTab = host.bridge.modalScrollable()
+    # A scrollable modal keeps the dialog manager out of the Tab key, but the
+    # key must still reach the control subclass so its logical order can record
+    # the intent. Swallowing it here is what broke production Tab navigation.
+    var dialogHandled = false
+    if host.window != nil and not logicalTab:
+      dialogHandled = host.calls.dialogMessage(dialogTarget, addr message) != 0
+    if host.window == nil or not dialogHandled:
       discard host.calls.translateMessage(addr message)
       discard host.calls.dispatchMessage(addr message)
   finally:
@@ -621,6 +662,20 @@ proc dispatch(host: Win32Host, message: var MSG) =
         host.bridge.syncFocusTraversal(GetFocus())
     finally: dec host.dispatchDepth
   host.checkCallback()
+
+proc pumpQueued*(host: Win32Host): int =
+  ## Bounded drain of messages that are already queued, through the production
+  ## dispatch. The nested pump branch and tests share this one implementation, so
+  ## tests cannot drift into a second, differently-routed pump.
+  host.ownerCheck()
+  var message: MSG
+  for i in 0..<64:
+    if host.calls.peekMessage(addr message, nil, 0, 0, PM_REMOVE) == 0: break
+    if message.message == WM_QUIT:
+      PostQuitMessage(cast[int32](message.wParam))
+      return int(cast[int32](message.wParam))
+    host.dispatch(message)
+  0
 
 proc pump*(host: Win32Host): int =
   host.ownerCheck()
@@ -634,13 +689,7 @@ proc pump*(host: Win32Host): int =
     var message: MSG
     if nested:
       # No blocking nested GetMessage, and no business/close release in this path.
-      for i in 0..<64:
-        if host.calls.peekMessage(addr message, nil, 0, 0, PM_REMOVE) == 0: break
-        if message.message == WM_QUIT:
-          PostQuitMessage(cast[int32](message.wParam))
-          return int(cast[int32](message.wParam))
-        host.dispatch(message)
-      return 0
+      return host.pumpQueued()
     host.safeTurn()
     while not host.close.complete:
       if host.window == nil:

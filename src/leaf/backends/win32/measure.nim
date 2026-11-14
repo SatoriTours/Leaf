@@ -9,12 +9,12 @@ type
     dc: HDC
     old: HGDIOBJ
     selected: bool
-  NativeFontRole* = enum defaultFont, headingFont, captionFont
+  NativeFontRole* = enum defaultFont, headingFont, captionFont, controlFont, smallControlFont, cardTitleFont, labelFont, hintFont, emptyTitleFont
   NativeMeasure* = ref object
     calls: Win32Calls
     parent: HWND
     fonts: array[NativeFontRole, HFONT]
-    themed: bool
+    themed, standardFonts: bool
     dpi: int
     pending: seq[PendingDC]
     themes: seq[HTHEME]
@@ -97,10 +97,11 @@ proc finish(m: NativeMeasure, primary: var ref CatchableError) =
   except CatchableError as e: remember(primary, e)
   if primary != nil: raise primary
 
-proc newNativeMeasure*(parent: HWND, calls: Win32Calls, themed = false): NativeMeasure =
+proc newNativeMeasure*(parent: HWND, calls: Win32Calls, themed = false,
+                       standardFonts = false): NativeMeasure =
   let dpi = calls.dpi(parent)
   if dpi == 0: error("GetDpiForWindow")
-  NativeMeasure(parent: parent, calls: calls, dpi: int(dpi), themed: themed)
+  NativeMeasure(parent: parent, calls: calls, dpi: int(dpi), themed: themed, standardFonts: standardFonts)
 
 proc ensureFont*(m: NativeMeasure, role = defaultFont): HFONT =
   if m.fonts[role] == nil:
@@ -112,9 +113,27 @@ proc ensureFont*(m: NativeMeasure, role = defaultFont): HFONT =
       let size = case role
         of defaultFont: 14
         of headingFont: 24
-        of captionFont: 12
+        of captionFont, smallControlFont: 12
+        of controlFont, labelFont: 14
+        of hintFont: 13
+        of cardTitleFont: 16
+        of emptyTitleFont: 18
       ncm.lfMessageFont.lfHeight = -int32(round(float64(size * m.dpi) / 96))
-      ncm.lfMessageFont.lfWeight = if role == headingFont: 600 else: 400
+      ncm.lfMessageFont.lfWeight =
+        if role in {headingFont, cardTitleFont}: 600
+        elif role in {controlFont, smallControlFont, labelFont, emptyTitleFont}: 500
+        else: 400
+    if m.standardFonts:
+      # The installed CJK family has Regular/Bold faces. Its synthesized 600
+      # looked substantially less like the approved neutral heading than Bold.
+      if role in {headingFont,cardTitleFont}: ncm.lfMessageFont.lfWeight = 700
+      # Explicit CJK-capable sans serif: GDI Segoe UI fallback need not match
+      # browser sans-serif fallback. Do not alter legacy/system font choices.
+      ncm.lfMessageFont.lfFaceName = default(typeof(ncm.lfMessageFont.lfFaceName))
+      for i,c in "Microsoft YaHei UI":
+        ncm.lfMessageFont.lfFaceName[i] = WCHAR(ord(c))
+      ncm.lfMessageFont.lfCharSet = 1 # DEFAULT_CHARSET
+      ncm.lfMessageFont.lfQuality = 4 # ANTIALIASED_QUALITY: grayscale, no system changes
     m.fonts[role] = m.calls.createFont(addr ncm.lfMessageFont)
     if m.fonts[role] == nil: error("CreateFontIndirectW")
   m.fonts[role]

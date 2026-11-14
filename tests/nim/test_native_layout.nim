@@ -688,3 +688,24 @@ suite "Preferred bases and allocated width measurement phases":
     check boxes[2].rect.width == 100
     check boxes[2].rect.height == 10
     check (3'u64, 100.0, 100.0) in keys
+
+  test "a 700 DIP row with justify end gives its trailing button a real size":
+    ## Pure layout reproduction of the dialog fixture row: the row itself is
+    ## uncompressible, the trailing action keeps its own 120x36 box at the right
+    ## end. This is the contract the scroll case depends on.
+    var entities: Table[NodeHandle, MountedEntity]
+    entities[NodeHandle(1)] = ent(1, 0, row, 0,
+      LayoutProps(width: fixedDim(700.0), height: fixedDim(44.0),
+        justify: some(justifyEnd)))
+    entities[NodeHandle(2)] = ent(2, 1, button, 0,
+      LayoutProps(width: fixedDim(120.0), height: fixedDim(36.0)))
+    let boxes = layoutTree(entities, DipSize(width: 351.0, height: 71.0), zeroMeasure)
+    check boxes.len == 2
+    let rowBox = boxes[0]
+    let buttonBox = boxes[1]
+    echo "ROW row=" & $rowBox.rect.width & " button=" & $buttonBox.rect.width &
+      "x" & $buttonBox.rect.height & " at " & $buttonBox.rect.x
+    check rowBox.rect.width == 700.0
+    check buttonBox.rect.width == 120.0
+    check buttonBox.rect.height == 36.0
+    check buttonBox.rect.x == 580.0

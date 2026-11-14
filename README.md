@@ -8,14 +8,23 @@
 
 [![CI](https://github.com/SatoriTours/Leaf/actions/workflows/ci.yml/badge.svg)](https://github.com/SatoriTours/Leaf/actions/workflows/ci.yml)
 
-[第一个应用](docs/getting-started.md) · [原生表单](examples/native_forms/README.md) · [文档](docs/README.md)
+[第一个应用](docs/getting-started.md) · [笔记 Demo](examples/native_notes/README.md) · [文档](docs/README.md)
 
 </div>
 
 <p align="center">
-  <img src="docs/screenshots/native-forms-win32.png" width="480" alt="Windows 11 中真实运行的 Leaf 原生表单：输入框、按钮、复选框和进度控件">
-  <br><sub>真实 Windows 11 / 96 DPI 截图，来自 <a href="examples/native_forms/README.md">native_forms</a>；不是自绘皮肤。</sub>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/leaf-notes-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/leaf-notes-light.png">
+    <img src="docs/screenshots/leaf-notes-light.png" width="960" alt="Leaf Notes 松石主题真实原生应用：左侧笔记导航、中间搜索列表、右侧多行编辑与 SQLite 保存，提供浅色和深色外观">
+  </picture>
+  <br><sub>Leaf Notes · 松石主题 · 真实 Windows 11 / 96 DPI 窗口实拍。</sub>
+  <br><sub><a href="docs/screenshots/leaf-notes-light.png">查看浅色原图</a> · <a href="docs/screenshots/leaf-notes-dark.png">查看深色原图</a> · <a href="examples/native_notes/README.md">运行这个 Demo</a> · <a href="docs/screenshots/README.md">截图来源</a></sub>
 </p>
+
+**原生交互，也有自己的风格。** 松石主题以松绿强调色、圆角输入框和清晰的主次按钮，提供统一的浅色与深色外观；文本输入、选区和 IME 仍由系统 EDIT 控件处理。示例与新生成的应用默认使用浅色松石，框架默认保留系统外观，也可在启动时通过 `app.withNativeTheme(matsuLight)` 或 `app.withNativeTheme(matsuDark)` 显式选择主题。
+
+**从一个真正可用的小应用开始。** [Leaf Notes](examples/native_notes/README.md) 将导航、搜索、虚拟列表与多行编辑组合成一个本地笔记应用：新建、收藏、归档，点击保存后写入 SQLite，关闭重开仍在。不是控件拼图，也不是网页效果图。
 
 ## 状态 → 界面 → 事件
 
@@ -58,7 +67,8 @@ cd my-app
 | 想做什么 | 从这里开始 |
 | --- | --- |
 | 学 State、布局和事件 | [第一个应用](docs/getting-started.md) → [Nim API](docs/nim-api.md) |
-| 看 Windows 原生交互 | [原生表单](examples/native_forms/README.md) · [万行 SQLite 列表](examples/native_list/README.md) |
+| 看完整的原生应用 | [Leaf Notes 笔记 Demo](examples/native_notes/README.md) |
+| 学 Windows 原生交互 | [原生表单](examples/native_forms/README.md) · [万行 SQLite 列表](examples/native_list/README.md) |
 | 生成带数据库的应用 | [脚手架](docs/scaffolding.md) → [Model](docs/models.md) → [迁移](docs/migrations.md) |
 | 理解设计与提交边界 | [架构](docs/architecture.md) |
 | 打包给别人 | [Windows 应用打包](docs/packaging.md) |

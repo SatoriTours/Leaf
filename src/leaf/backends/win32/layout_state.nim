@@ -21,6 +21,16 @@ proc layoutAffected*(old, next: MountedEntity): bool =
   if old.canvas != next.canvas: return true
   # A variant may switch the actual native font role. Decorations stay
   # conservative so future measurement support cannot silently skip layout.
+  if old.props.standardUi != next.props.standardUi:
+    let isPulseOnly = old.props.standardUi.isSome and next.props.standardUi.isSome and
+      old.props.standardUi.get.role == UiRole.skeleton and next.props.standardUi.get.role == UiRole.skeleton and
+      old.props.standardUi.get.variant == next.props.standardUi.get.variant and
+      old.props.standardUi.get.size == next.props.standardUi.get.size
+    let isAngleOnly = old.props.standardUi.isSome and next.props.standardUi.isSome and
+      old.props.standardUi.get.role == UiRole.spinner and next.props.standardUi.get.role == UiRole.spinner and
+      old.props.standardUi.get.variant == next.props.standardUi.get.variant and
+      old.props.standardUi.get.size == next.props.standardUi.get.size
+    if not isPulseOnly and not isAngleOnly: return true
   if old.props.decoration != next.props.decoration or
       old.props.control.variant != next.props.control.variant:
     return true

@@ -24,6 +24,40 @@ proc find(parent: HWND, caption: string): HWND =
     discard GetWindowTextW(child, cast[WidePtr](unsafeAddr buf[0]), 256)
     if $buf == caption: return child
 
+suite "native notebook surface colors":
+  test "nested surface labels inherit their container and multiline has full height":
+    require not highContrastActive()
+    for theme in [matsuLight, matsuDark]:
+      let app = fixtureApplication(proc(): Node = column(@[
+        column(@[text("surface label", key="surfaceLabel"),
+          input("first\\nsecond", key="body", multiline=true,
+            styles=style({"width":"full", "height":"200"}))],
+          key="surface", variant="primary", styles=style({"padding":"20", "width":"full"})),
+        column(@[text("panel label", key="panelLabel")], key="panel", variant="secondary")],
+        key="root", styles=style({"width":"full"})), "Notebook skin", 500, 400).withNativeTheme(theme)
+      let activity = newUiScopeActivity()
+      let runtime = newRuntime(guardUiApplication(app,
+        proc(): uint64 = uint64(GetCurrentThreadId()), activity))
+      let h = createHost(app.title, DipSize(width:500, height:400), theme=theme)
+      h.setStartupScope(proc(): bool = activity.busy or runtime.installingUpdate or runtime.installingHook)
+      let win = newWin32Backend(h)
+      let session = win.attachWin32Backend(runtime, protocol.strict)
+      win.bindSession(session)
+      h.bindSession(session, proc(): bool = activity.busy)
+      try:
+        for (caption, expected) in [("surface label", palette(theme).surface),
+            ("panel label", palette(theme).panel)]:
+          let label = find(h.windowHandle, caption)
+          require label != nil
+          let dc = GetDC(label)
+          require dc != nil
+          discard SendMessageW(GetParent(label), 0x0138, cast[WPARAM](dc), cast[LPARAM](label))
+          check GetBkColor(dc) == colorRef(expected)
+          discard ReleaseDC(label, dc)
+      finally:
+        h.destroyHost()
+        runtime.closeRuntime()
+
 suite "opt-in native Win32 skin":
   test "both themes paint real controls without owning extra GDI resources":
     require not highContrastActive()

@@ -2,7 +2,7 @@
 ## successful publication replaces entries and never retains a candidate chain.
 import ./task_worker
 import std/[tables,sets,options,algorithm]
-import ./[core,component_description,component_state,host_reconcile,backend,task_service,task_contracts,commit_map,graphics,animation,animation_binding,canvas_transition]
+import ./[core,overlay_protocol,component_description,component_state,host_reconcile,backend,task_service,task_contracts,commit_map,graphics,animation,animation_binding,canvas_transition]
 export host_protocol.UpdateStats
 
 type
@@ -1163,7 +1163,7 @@ proc useNativePolicy*(runtime:Runtime,capabilities:BackendCapabilities,mode=comp
     if item.description.kind==DescriptionKind.host:
       let node=item.description.hostNode
       let props=normalizeHostProps(node,nativeStrict)
-      result.add(checkTypedCapabilities(item.path,node.kind,props.normalized,capabilities,mode))
+      result.add(checkTypedCapabilities(item.path,node.kind,props.normalized,capabilities,mode,props.overlay,props.select))
   data.policy=nativeStrict
 
 proc listStats*(runtime:Runtime,key:string):tuple[activeRows,warmRows,instances,activeInstances,eventBindings:int]=

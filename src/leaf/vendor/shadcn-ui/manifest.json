@@ -1,0 +1,34 @@
+{
+  "source": "https://github.com/shadcn-ui/ui",
+  "commit": "42f3bb63b46a69e52a24bd005cdc9ec15ba7a7b9",
+  "style": "new-york-v4",
+  "palette": "Neutral",
+  "license": "MIT",
+  "license_file": "shadcn-ui/LICENSE.txt",
+  "license_sha256": "1564074e13439397221ffd522e2e504d56561994a23d371aa5e3ad43e4f5423f",
+  "reference_paths": [
+    "apps/v4/registry/themes.ts",
+    "apps/v4/registry/new-york-v4/ui/"
+  ],
+  "implementation": "Native Nim controls; no upstream JavaScript runtime is bundled.",
+  "reference_file_sha256": {
+    "apps/v4/registry/new-york-v4/ui/textarea.tsx": "5cafcfeeee29534f449387a16b585f5923d2faab1a0cdc50a874416b175f59ce",
+    "apps/v4/registry/new-york-v4/ui/label.tsx": "344bde38b8531615dbf8e14af3895517c24d8ef6ce56ddeda7e2e6fe4b5d0c00",
+    "apps/v4/registry/new-york-v4/ui/field.tsx": "4a4d17fcb933513f637f9f7e2daf5d8348f7de086b29738337dec7e6dd1819a0",
+    "apps/v4/registry/new-york-v4/ui/card.tsx": "ef8305b12c3112dab42a4708b41b1ebcc042fa5ab4c20f039da8d45b09ed5059",
+    "apps/v4/registry/new-york-v4/ui/checkbox.tsx": "ba0ac64064e2d8fa7299d53e9e84b9a4772fef8dd4cf6170c56d3030a1d69941",
+    "apps/v4/registry/new-york-v4/ui/switch.tsx": "743676f33f823ffa8008bbd5eb94cb68e227599447d60e132a202291a395f8e4",
+    "apps/v4/registry/new-york-v4/ui/badge.tsx": "13a9380dfff853ee730c14a52df49f22aecd31f40f2998d7c1e7ec458b6e1650",
+    "apps/v4/registry/new-york-v4/ui/separator.tsx": "ad7d5403fe337160e41dbf04147896e448ae3a747b8d06660d627d74d60021bc",
+    "apps/v4/registry/new-york-v4/ui/empty.tsx": "54f529ccf72c18c4b5abd5586a7cf1f2a4c8d207aac366029d66ed095cb2965d",
+    "apps/v4/registry/new-york-v4/ui/progress.tsx": "e012e1f7e6e66d11229d1233eccf91954edcd9179b418ff1d114dc651b86fd35",
+    "apps/v4/registry/new-york-v4/ui/kbd.tsx": "c0c0ae6a7d1adb7749b9b34cab8f4d2f5caf333e819b64c2051e77f918d3661f",
+    "apps/v4/registry/new-york-v4/ui/skeleton.tsx": "f51ce0fcd31e5c31437382e80ea0af94b4fc3d64221d27091d36824546780a43",
+    "apps/v4/registry/new-york-v4/ui/button-group.tsx": "a9ac862707ff8d78255f2696baf48f9a87d9e92e21eb476f8f9e9361313c1761",
+    "apps/v4/registry/new-york-v4/ui/input-group.tsx": "e379899ac50d6cabc9d9eb1668f265176951c62b1fe83a6f23ee97fe8074d526",
+    "apps/v4/registry/new-york-v4/ui/spinner.tsx": "5d040fc49cb54c0296070644053b5a8840ddbfca89a430546bf308df3fffad65",
+    "apps/v4/registry/new-york-v4/ui/alert.tsx": "d03dcae5cdb63c381c1144ca9a0c49ba0e46466967d7deb94662034042acb034",
+    "apps/v4/registry/new-york-v4/ui/dialog.tsx": "2ade6074e5fad0a4eb171ead44c43d3301a3c83d186d7236fb1fdbea80ee556b",
+    "apps/v4/registry/new-york-v4/ui/alert-dialog.tsx": "b3dfb83e54ed8c82071df5289e5149628bf573458fc2da2d62f93f8380041b28"
+  }
+}

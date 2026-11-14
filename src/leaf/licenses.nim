@@ -13,6 +13,8 @@ const
   SqliteLicense = staticRead("vendor/sqlite/LICENSE.txt")
   SqliteManifest = staticRead("vendor/sqlite/manifest.json")
   Provenance = staticRead("vendor/provenance.json")
+  ShadcnLicense = staticRead("vendor/shadcn-ui/LICENSE.txt")
+  ShadcnManifest = staticRead("vendor/shadcn-ui/manifest.json")
 
 proc collectLicenses*(destination: string) =
   createDir(destination / "tools")
@@ -28,7 +30,11 @@ proc collectLicenses*(destination: string) =
   createDir(destination / "sqlite")
   writeFile(destination / "sqlite/LICENSE.txt", SqliteLicense)
   writeFile(destination / "sqlite/manifest.json", SqliteManifest)
+  createDir(destination / "shadcn-ui")
+  writeFile(destination / "shadcn-ui/LICENSE.txt", ShadcnLicense)
+  writeFile(destination / "shadcn-ui/manifest.json", ShadcnManifest)
   var inventory = parseJson(Provenance)
+  inventory["shadcn-ui"] = parseJson(ShadcnManifest)
   let sqlite = parseJson(SqliteManifest)
   inventory["sqlite"] = %*{"version": sqlite["version"], "source": sqlite["source"],
     "archive_sha256": sqlite["archiveSha256"], "license": sqlite["license"],
