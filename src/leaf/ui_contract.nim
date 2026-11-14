@@ -12,7 +12,9 @@ type
     dialog, dialogHeader, dialogTitle, dialogDescription, dialogContent, dialogFooter, dialogClose,
     alertDialog, alertDialogCancel, alertDialogAction,
     select, selectTrigger, selectContent, selectItem,
-    popover, popoverTrigger, popoverContent, popoverClose
+    popover, popoverTrigger, popoverContent, popoverClose,
+    scrollArea, scrollAreaContent, radioGroup, radioGroupItem
+      ## Appended roles keep every earlier ordinal stable (wire compatibility).
   UiVariant* {.pure.} = enum default, destructive, outline, secondary, ghost, link
   UiSize* {.pure.} = enum normal, xs, sm, lg, icon, iconXs, iconSm, iconLg
   StandardUiProps* = object
@@ -58,4 +60,8 @@ proc checkMetrics*(role: UiRole, size = UiSize.normal): UiCheckMetrics =
     of UiSize.normal: UiCheckMetrics(width:32,height:18.4,thumb:16,radius:9.2)
     of UiSize.sm: UiCheckMetrics(width:24,height:14,thumb:12,radius:7)
     else: raise newException(ValueError,"unsupported switch size")
+  of UiRole.radioGroupItem:
+    if size != UiSize.normal: raise newException(ValueError,"unsupported radio size")
+    # A real circle: radius is half the glyph, not the checkbox corner radius.
+    UiCheckMetrics(width:16,height:16,radius:8)
   else: raise newException(ValueError,"not a check role")

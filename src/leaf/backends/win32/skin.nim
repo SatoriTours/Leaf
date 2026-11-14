@@ -125,6 +125,19 @@ proc setSurfaceVariant*(window: HWND, variant: ControlVariant): BOOL {.raises: [
   SetPropW(window, unsafeAddr SurfaceName[0], cast[HANDLE](
     if variant == variantPrimary: 1 elif variant == variantSecondary: 2 else: 3))
 
+type SetPropProc* = proc(window: HWND, name: WidePtr, data: HANDLE): BOOL
+  {.closure, raises: [CatchableError].}
+
+proc markPanelSurface*(window: HWND, setProp: SetPropProc): BOOL
+    {.raises: [CatchableError].} =
+  ## Mark an owned panel window as the primary surface through the caller's
+  ## SetProp entry point, so the failure is a real and reportable native error.
+  ## plainSurfaceColor walks up from every child to this mark, so the panel fill
+  ## and the body/text backgrounds resolve through one source instead of
+  ## surface-vs-canvas drift.
+  setProp(window, unsafeAddr SurfaceName[0], cast[HANDLE](1))
+
+
 func propertyName(name: static[string]): auto =
   var value: array[name.len+1, WCHAR]
   for i, c in name: value[i] = WCHAR(ord(c))
@@ -218,7 +231,9 @@ proc plainSurfaceColor(theme: NativeTheme, window: HWND): uint32 =
     current = GetParent(current)
   p.canvas
 
-proc surfaceColor(theme: NativeTheme, window: HWND): uint32 =
+proc surfaceColor*(theme: NativeTheme, window: HWND): uint32 =
+  ## Exported so an owned surface (the popover panel) paints exactly the color
+  ## its children resolve.
   let base=plainSurfaceColor(theme,window)
   if theme==shadcnDark and inputGroupOf(window)!=nil:
     let input=neutralPalette(UiColorMode.dark)[UiColorToken.input]
@@ -320,7 +335,8 @@ proc standardFocusColor*(theme: NativeTheme, window: HWND): uint32 =
       some(UiRole.selectTrigger), some(UiRole.popoverTrigger),
       some(UiRole.popoverClose)]:
     return buttonAppearance(uiMode(theme),standardVariant(window),surface).ring
-  if standardRole(window) in [some(UiRole.checkbox),some(UiRole.switch)]:
+  if standardRole(window) in [some(UiRole.checkbox),some(UiRole.switch),
+      some(UiRole.radioGroupItem)]:
     return checkAppearance(uiMode(theme),standardRole(window).get,surface,
       invalid=standardInvalid(window)).ring
   let p=neutralPalette(uiMode(theme))
@@ -420,7 +436,8 @@ proc drawStandardButton(theme: NativeTheme, draw: ptr CustomDraw): bool =
 proc drawStandardCheck(theme: NativeTheme, draw: ptr CustomDraw): bool =
   let window=draw.hdr.hwndFrom
   let role=standardRole(window)
-  if not theme.isShadcn or role.isNone or role.get notin {UiRole.checkbox,UiRole.switch}:
+  if not theme.isShadcn or role.isNone or
+      role.get notin {UiRole.checkbox,UiRole.switch,UiRole.radioGroupItem}:
     return false
   let dc=draw.hdc
   let saved=SaveDC(dc)
@@ -451,7 +468,16 @@ proc drawStandardCheck(theme: NativeTheme, draw: ptr CustomDraw): bool =
   discard SetDCPenColor(dc,colorRef(border))
   let diameter=int32(round(2*glyph.radius*scale))
   discard RoundRect(dc,left,top,left+width,top+height,diameter,diameter)
-  if role.get==UiRole.switch:
+  if role.get==UiRole.radioGroupItem:
+    # Neutral radio: a real circle ring with an inner mark, never the tick.
+    if checked:
+      let dot=max(2'i32,int32(round(6*scale)))
+      let x=left+(width-dot) div 2
+      let y=top+(height-dot) div 2
+      discard SetDCBrushColor(dc,colorRef(colors.mark))
+      discard SetDCPenColor(dc,colorRef(colors.mark))
+      discard RoundRect(dc,x,y,x+dot,y+dot,dot,dot)
+  elif role.get==UiRole.switch:
     let dot=max(1'i32,int32(round(glyph.thumb*scale)))
     let inset=max(1'i32,int32(round(scale)))
     let x=left+(if checked:width-dot-inset else:inset)

@@ -29,6 +29,7 @@
     "apps/v4/registry/new-york-v4/ui/spinner.tsx": "5d040fc49cb54c0296070644053b5a8840ddbfca89a430546bf308df3fffad65",
     "apps/v4/registry/new-york-v4/ui/alert.tsx": "d03dcae5cdb63c381c1144ca9a0c49ba0e46466967d7deb94662034042acb034",
     "apps/v4/registry/new-york-v4/ui/dialog.tsx": "2ade6074e5fad0a4eb171ead44c43d3301a3c83d186d7236fb1fdbea80ee556b",
-    "apps/v4/registry/new-york-v4/ui/alert-dialog.tsx": "b3dfb83e54ed8c82071df5289e5149628bf573458fc2da2d62f93f8380041b28"
+    "apps/v4/registry/new-york-v4/ui/alert-dialog.tsx": "b3dfb83e54ed8c82071df5289e5149628bf573458fc2da2d62f93f8380041b28",
+    "apps/v4/registry/new-york-v4/ui/popover.tsx": "3f99d3add6c9fa4f03721e81297ee10e1310785ee1d9d9d4c82a114d84ab0757"
   }
 }

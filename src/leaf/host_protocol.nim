@@ -78,6 +78,11 @@ proc compatibleNode(node: Node): Node =
     of "checked":
       if node.kind in {NodeKind.checkbox, NodeKind.toggle}:
         attrs[name] = if value == "true": "true" else: "false"
+    of "radio_value":
+      # A radio option's declared value and a radio group's accepted value are
+      # required semantics, not an optional decoration: the compatible policy
+      # keeps them on the only kinds that can carry them.
+      if node.kind in {NodeKind.column, NodeKind.checkbox}: attrs[name] = value
     of "value":
       if node.kind == NodeKind.progress:
         if "ui_role" in node.attributes:

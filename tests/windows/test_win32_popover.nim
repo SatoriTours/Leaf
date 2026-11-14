@@ -23,10 +23,50 @@ proc SetCursorPos(x, y: int32): BOOL
 proc IsIconic(window: HWND): BOOL
 proc GetForegroundWindow(): HWND
 proc SendInput(count: UINT, inputs: pointer, size: int32): UINT
+proc WindowFromPoint(point: POINT): HWND
+proc GetClassNameW(window: HWND, text: pointer, max: int32): int32
+{.pop.}
+
+{.push stdcall, dynlib: "gdi32.dll", importc, raises: [].}
+proc GetPixel(dc: HDC, x, y: int32): uint32
 {.pop.}
 
 var seamLog: seq[string]
-var injectFail = (create: false, destroy: false, show: false)
+# One-shot native refusals plus the real attempt counts, so a fault case can
+# prove the injected failure was hit and that the receipts it created were
+# released again. Nothing here is a product branch: every refusal is a real nil
+# HWND / FALSE result with a real Win32 error code.
+var injectFail = (create: false, destroy: false, show: false, unregister: false,
+  setProp: false, redraw: false)
+var injectDestroyTarget: HWND
+var injectDestroyPanel = false
+var seamAttempts = (register: 0, unregister: 0, create: 0, destroy: 0, show: 0,
+  setProp: 0, redraw: 0)
+var seamRefused = (create: 0, destroy: 0, show: 0, unregister: 0, setProp: 0,
+  redraw: 0)
+var seamLastPanel: HWND
+
+proc resetSeams() =
+  injectFail = (create: false, destroy: false, show: false, unregister: false,
+    setProp: false, redraw: false)
+  injectDestroyTarget = nil
+  injectDestroyPanel = false
+  seamAttempts = (register: 0, unregister: 0, create: 0, destroy: 0, show: 0,
+    setProp: 0, redraw: 0)
+  seamRefused = (create: 0, destroy: 0, show: 0, unregister: 0, setProp: 0,
+    redraw: 0)
+  seamLastPanel = nil
+
+proc isPanelClass(window: HWND): bool =
+  ## True for this thread's owned popover panel class (ASCII prefix compare).
+  if window == nil: return false
+  var buffer: array[64, uint16]
+  let count = GetClassNameW(window, addr buffer[0], int32(buffer.len))
+  const prefix = "LeafPopoverPanel-"
+  if count < prefix.len: return false
+  for index, c in prefix:
+    if buffer[index] != uint16(c): return false
+  true
 
 type
   PopoverState = ref object
@@ -35,6 +75,7 @@ type
     requests, closes, dialogRequests, selectRequests, selectCloses: int
     clicks: int
     removeTrigger, rebuildTrigger: bool
+    omitPopover: bool
     moved, newKey: bool
     ignoreSelectClose, ignoreClose: bool
     rows: int
@@ -153,7 +194,7 @@ proc page(state: PopoverState): Node =
   ## the body is parented and what is really visible.
   var controls: seq[Node] = @[standard.button("哨兵", key = "sentinel",
       onClick = proc(e: Event) = inc state.clicks)]
-  if not state.removeTrigger:
+  if not state.removeTrigger and not state.omitPopover:
     var body: seq[Node] = @[
       standard.label("提示", key = "pp-label"),
       standard.input(state.text, key = "pp-edit", placeholder = "草稿",
@@ -249,6 +290,123 @@ proc dialogPage(state: PopoverState): Node =
     styles = style({"padding": "16", "gap": "12", "width": "full"})),
     key = "theme")
 
+proc injectedCalls(): Win32Calls =
+  ## One spy layer over the real Win32 calls. It logs the panel show/place
+  ## sequence, counts the panel class register/unregister attempts and refuses
+  ## exactly one panel create/show/destroy on request. A refusal is a real
+  ## native failure (nil HWND, FALSE, SetLastError 5), so the product's own
+  ## failure branch is what the test observes.
+  var calls = systemWin32Calls()
+  let rawShow = calls.showWindow
+  calls.showWindow = proc(window: HWND, command: int32): BOOL
+      {.closure, raises: [CatchableError].} =
+    let before = GetWindowLongW(window, -16'i32)
+    inc seamAttempts.show
+    result = rawShow(window, command)
+    seamLog.add("showWindow hwnd=" & $uint64(cast[uint](window)) &
+      " cmd=" & $command & " beforeWsVis=" & $((before and 0x10000000) != 0) &
+      " afterVisible=" & $(IsWindowVisible(window) != 0))
+  let loggingShow = calls.showWindow
+  calls.showWindow = proc(window: HWND, command: int32): BOOL
+      {.closure, raises: [CatchableError].} =
+    ## A refused show returns TRUE-like success semantics but leaves the window
+    ## hidden: the product, not this seam, must notice that nothing became
+    ## visible. Only SW_SHOW is refused once; every other command passes
+    ## through untouched.
+    if injectFail.show and command == 5:
+      injectFail.show = false
+      inc seamRefused.show
+      setLastError(5)
+      seamLog.add("showWindow REFUSED hwnd=" & $uint64(cast[uint](window)) &
+        " cmd=" & $command)
+      return 1
+    loggingShow(window, command)
+  let rawPos = calls.windowPos
+  calls.windowPos = proc(window, after: HWND, x, y, width, height: int32,
+      flags: UINT): BOOL {.closure, raises: [CatchableError].} =
+    result = rawPos(window, after, x, y, width, height, flags)
+    seamLog.add("windowPos hwnd=" & $uint64(cast[uint](window)) &
+      " flags=" & $uint64(flags) & " visible=" & $(IsWindowVisible(window) != 0))
+  let rawCreate = calls.createWindow
+  calls.createWindow = proc(exStyle: DWORD, className, windowName: WidePtr,
+      style: DWORD, x, y, width, height: int32, parent: HWND, menu: HMENU,
+      instance: HINSTANCE, param: pointer): HWND {.closure,
+      raises: [CatchableError].} =
+    if className != nil:
+      # Match the panel class by ASCII prefix; no wide decoding needed.
+      let units = cast[ptr UncheckedArray[uint16]](className)
+      const prefix = "LeafPopoverPanel-"
+      var match = true
+      for i, c in prefix:
+        if units[i] != uint16(c):
+          match = false
+          break
+      if match:
+        inc seamAttempts.create
+        if injectFail.create:
+          injectFail.create = false
+          inc seamRefused.create
+          setLastError(5)
+          return nil
+    result = rawCreate(exStyle, className, windowName, style, x, y, width, height,
+      parent, menu, instance, param)
+    if result != nil and className != nil:
+      let units = cast[ptr UncheckedArray[uint16]](className)
+      const prefix = "LeafPopoverPanel-"
+      var match = true
+      for i, c in prefix:
+        if units[i] != uint16(c):
+          match = false
+          break
+      if match: seamLastPanel = result
+  let rawSetProp = calls.setProp
+  calls.setProp = proc(window: HWND, name: WidePtr, data: HANDLE): BOOL
+      {.closure, raises: [CatchableError].} =
+    inc seamAttempts.setProp
+    if injectFail.setProp:
+      injectFail.setProp = false
+      inc seamRefused.setProp
+      setLastError(5)
+      return 0
+    rawSetProp(window, name, data)
+  let rawRedraw = calls.redrawWindow
+  calls.redrawWindow = proc(window: HWND, update: ptr RECT, region: HRGN,
+      flags: UINT): BOOL {.closure, raises: [CatchableError].} =
+    inc seamAttempts.redraw
+    if injectFail.redraw:
+      injectFail.redraw = false
+      inc seamRefused.redraw
+      setLastError(5)
+      return 0
+    rawRedraw(window, update, region, flags)
+  let rawRegister = calls.registerClass
+  calls.registerClass = proc(windowClass: ptr WNDCLASSEXW): ATOM
+      {.closure, raises: [CatchableError].} =
+    inc seamAttempts.register
+    rawRegister(windowClass)
+  let rawUnregister = calls.unregisterClass
+  calls.unregisterClass = proc(name: WidePtr, instance: HINSTANCE): BOOL
+      {.closure, raises: [CatchableError].} =
+    inc seamAttempts.unregister
+    if injectFail.unregister:
+      injectFail.unregister = false
+      inc seamRefused.unregister
+      setLastError(5)
+      return 0
+    rawUnregister(name, instance)
+  let rawDestroy = calls.destroyWindow
+  calls.destroyWindow = proc(window: HWND): BOOL {.closure, raises: [CatchableError].} =
+    inc seamAttempts.destroy
+    if injectFail.destroy and ((injectDestroyTarget != nil and
+        window == injectDestroyTarget) or (injectDestroyPanel and
+        isPanelClass(window))):
+      injectFail.destroy = false
+      inc seamRefused.destroy
+      setLastError(5)
+      return 0
+    rawDestroy(window)
+  calls
+
 proc mounted(state: PopoverState, width = 480, height = 360): Fixture =
   let activity = newUiScopeActivity()
   let app = fixtureApplication(
@@ -262,57 +420,7 @@ proc mounted(state: PopoverState, width = 480, height = 360): Fixture =
     height: float64(height)), calls = systemWin32Calls(), theme = shadcnLight)
   h.setStartupScope(proc(): bool = activity.busy or runtime.installingUpdate or
     runtime.installingHook)
-  let baseCalls = systemWin32Calls()
-  var logged = baseCalls
-  let rawShow = baseCalls.showWindow
-  logged.showWindow = proc(window: HWND, command: int32): BOOL
-      {.closure, raises: [CatchableError].} =
-    let before = GetWindowLongW(window, -16'i32)
-    result = rawShow(window, command)
-    seamLog.add("showWindow hwnd=" & $uint64(cast[uint](window)) &
-      " cmd=" & $command & " beforeWsVis=" & $((before and 0x10000000) != 0) &
-      " afterVisible=" & $(IsWindowVisible(window) != 0))
-  let rawPos = baseCalls.windowPos
-  logged.windowPos = proc(window, after: HWND, x, y, width, height: int32,
-      flags: UINT): BOOL {.closure, raises: [CatchableError].} =
-    result = rawPos(window, after, x, y, width, height, flags)
-    seamLog.add("windowPos hwnd=" & $uint64(cast[uint](window)) &
-      " flags=" & $uint64(flags) & " visible=" & $(IsWindowVisible(window) != 0))
-  let rawCreate = logged.createWindow
-  logged.createWindow = proc(exStyle: DWORD, className, windowName: WidePtr,
-      style: DWORD, x, y, width, height: int32, parent: HWND, menu: HMENU,
-      instance: HINSTANCE, param: pointer): HWND {.closure,
-      raises: [CatchableError].} =
-    if injectFail.create and className != nil:
-      # Match the panel class by ASCII prefix; no wide decoding needed.
-      let units = cast[ptr UncheckedArray[uint16]](className)
-      const prefix = "LeafPopoverPanel-"
-      var match = true
-      for i, c in prefix:
-        if units[i] != uint16(c):
-          match = false
-          break
-      if match:
-        injectFail.create = false
-        setLastError(5)
-        return nil
-    rawCreate(exStyle, className, windowName, style, x, y, width, height,
-      parent, menu, instance, param)
-  let rawShowWindow = logged.showWindow
-  logged.showWindow = proc(window: HWND, command: int32): BOOL
-      {.closure, raises: [CatchableError].} =
-    result = rawShowWindow(window, command)
-    if injectFail.show and command == 5: # SW_SHOW
-      injectFail.show = false
-      discard rawShowWindow(window, 0) # hide again: the publish check must fail
-  let rawDestroy = logged.destroyWindow
-  logged.destroyWindow = proc(window: HWND): BOOL {.closure, raises: [CatchableError].} =
-    if injectFail.destroy:
-      injectFail.destroy = false
-      setLastError(5)
-      return 0
-    rawDestroy(window)
-  let win = newWin32Backend(h, calls = logged)
+  let win = newWin32Backend(h, calls = injectedCalls())
   let session = win.attachWin32Backend(runtime, protocol.strict)
   win.bindSession(session)
   h.bindSession(session, proc(): bool = activity.busy)
@@ -362,6 +470,109 @@ proc rectOf(window: HWND): tuple[width, height: int32] =
   var frame: RECT
   if GetWindowRect(window, addr frame) == 0: return (0, 0)
   (frame.right - frame.left, frame.bottom - frame.top)
+
+proc luminance(color: uint32): int =
+  ## Real displayed pixel -> perceived brightness (COLORREF is 0x00BBGGRR).
+  let r = int(color and 0xFF)
+  let g = int((color shr 8) and 0xFF)
+  let b = int((color shr 16) and 0xFF)
+  (r * 299 + g * 587 + b * 114) div 1000
+
+proc isAncestorOf(ancestor, window: HWND): bool =
+  var current = GetParent(window)
+  var depth = 0
+  while current != nil and depth < 64:
+    if current == ancestor: return true
+    current = GetParent(current)
+    inc depth
+
+proc isSelfOrDescendant(window, ancestor: HWND): bool =
+  var current = window
+  var depth = 0
+  while current != nil and depth < 64:
+    if current == ancestor: return true
+    current = GetParent(current)
+    inc depth
+
+proc screenSamples(window: HWND, includeChildren = false,
+                    throughParent = false): seq[uint32] =
+  ## Pixels actually on screen inside one window's client area, sampled only at
+  ## points where that very window is the hit target: a covered or child-covered
+  ## point is skipped instead of being reported as this window's color.
+  var client: RECT
+  if window == nil or GetClientRect(window, addr client) == 0: return
+  let wide = client.right - client.left
+  let high = client.bottom - client.top
+  if wide < 8 or high < 8: return
+  var origin = POINT(x: 0, y: 0)
+  if ClientToScreen(window, addr origin) == 0: return
+  let screen = GetDC(nil)
+  if screen == nil: return
+  try:
+    for fy in [0.02, 0.25, 0.5, 0.75, 0.98]:
+      for fx in [0.02, 0.1, 0.3, 0.5, 0.7, 0.9, 0.98]:
+        let x = origin.x + int32(float64(wide) * fx)
+        let y = origin.y + int32(float64(high) * fy)
+        # A label/static control is hit-transparent, so the point may belong to
+        # its parent while its pixels are still the child's own background. The
+        # parent is only accepted for such a child (throughParent), never for the
+        # panel itself, where child pixels must not be read as panel pixels.
+        let hit = WindowFromPoint(POINT(x: x, y: y))
+        var owned = hit == window
+        if not owned and includeChildren and hit != nil and
+            isSelfOrDescendant(hit, window):
+          owned = true
+        if not owned and throughParent and hit != nil and isAncestorOf(hit, window):
+          owned = true
+        if not owned: continue
+        let color = GetPixel(screen, x, y)
+        if color == 0xFFFFFFFF'u32: continue # CLR_INVALID
+        result.add(color)
+  finally:
+    discard ReleaseDC(nil, screen)
+
+proc classNameOf(window: HWND): string =
+  var buffer: array[128, uint16]
+  let count = GetClassNameW(window, addr buffer[0], int32(buffer.len))
+  for index in 0 ..< max(0, count):
+    result.add(char(buffer[index] and 0x7F))
+
+proc dumpTree(window: HWND, depth: int) =
+  ## Diagnostic only: the real child windows of one surface, their classes and
+  ## client rectangles, so a "the panel is white" report can be attributed to the
+  ## panel itself or to a child that paints over it.
+  if window == nil or depth > 2: return
+  let size = rectOf(window)
+  echo "PANELTREE ", repeat(' ', depth), classNameOf(window),
+    " hwnd=", uint64(cast[uint](window)), " size=", size.width, "x", size.height,
+    " visible=", (if IsWindowVisible(window) != 0: 1 else: 0)
+  var child = GetWindow(window, 5) # GW_CHILD
+  var guard = 0
+  while child != nil and guard < 32:
+    dumpTree(child, depth + 1)
+    child = GetWindow(child, 2) # GW_HWNDNEXT
+    inc guard
+
+proc dominantColor(window: HWND, includeChildren = false,
+                     throughParent = false): uint32 =
+  ## Most frequent sampled color: for a text control this is its background, not
+  ## the glyph pixels.
+  var counts: seq[tuple[color: uint32, count: int]]
+  for color in screenSamples(window, includeChildren, throughParent):
+    var found = false
+    for entry in counts.mitems:
+      if entry.color == color:
+        inc entry.count
+        found = true
+        break
+    if not found: counts.add((color, 1))
+  var best = 0'u32
+  var bestCount = 0
+  for entry in counts:
+    if entry.count > bestCount:
+      best = entry.color
+      bestCount = entry.count
+  best
 
 type
   EditModel = object
@@ -833,6 +1044,77 @@ suite "dialog-hosted popover":
     discard SendMessageW(edit, 0x00c7'u32, 0, 0) # EM_UNDO
     check text(edit) != "abc"
 
+  test "dark theme repaints the panel surface, its label and its editor":
+    let state = PopoverState()
+    let f = mounted(state)
+    defer: close(f)
+    settle(f)
+    state.open = true
+    settle(f)
+    discard f.h.pumpQueued() # real WM_PAINT for the first published frame
+    let panel = f.panelOf()
+    let label = f.windowOf("pp-label")
+    let edit = f.windowOf("pp-edit")
+    check IsWindowVisible(panel) != 0
+    foreground(panel)
+    discard SetFocus(edit)
+    typeText("ab")
+    discard f.h.pumpQueued()
+    settle(f)
+    check text(edit) == "ab"
+    discard SendMessageW(edit, 0x00b1'u32, 0, 1) # EM_SETSEL(0,1)
+    let selection = packedSel(edit)
+    check selection.stop > selection.start
+    # Undo presence is proven by the dedicated theme test; here the claim is that
+    # a theme switch does not change the EDIT's undo state.
+    let undoBefore = SendMessageW(edit, 0x00c6'u32, 0, 0) # EM_CANUNDO
+    # --- light baseline: every surface is really light on screen --------------
+    let lightPanel = dominantColor(panel, includeChildren = true)
+    let lightLabel = dominantColor(label, throughParent = true)
+    let lightEdit = dominantColor(edit)
+    check lightPanel != 0'u32
+    check lightLabel != 0'u32
+    check lightEdit != 0'u32
+    check luminance(lightPanel) > 200
+    check luminance(lightLabel) > 200
+    check luminance(lightEdit) > 200
+    # The label must sit on the same surface the panel paints, not on a second
+    # color source (surface vs canvas).
+    check abs(int((lightPanel and 0xFF)) - int((lightLabel and 0xFF))) < 24
+    # --- dark: the panel AND its children must repaint with the new theme ----
+    state.dark = true
+    settle(f)
+    discard f.h.pumpQueued()
+    check f.windowOf("pp-edit") == edit
+    check text(edit) == "ab"
+    check packedSel(edit) == selection
+    check SendMessageW(edit, 0x00c6'u32, 0, 0) == undoBefore
+    let darkPanel = dominantColor(panel, includeChildren = true)
+    let darkLabel = dominantColor(label, throughParent = true)
+    let darkEdit = dominantColor(edit)
+    echo "THEME panel light=", lightPanel, " dark=", darkPanel,
+      " label light=", lightLabel, " dark=", darkLabel,
+      " edit light=", lightEdit, " dark=", darkEdit
+    # One line of real displayed colors is the evidence for this test; the window
+    # tree/children are only dumped when the panel region itself is suspicious.
+    if luminance(darkPanel) >= 96:
+      dumpTree(panel, 0)
+    check luminance(darkPanel) < 96
+    check luminance(darkLabel) < 96
+    check luminance(darkEdit) < 96
+    check abs(int((darkPanel and 0xFF)) - int((darkLabel and 0xFF))) < 24
+    # --- back to light: the same windows repaint again -----------------------
+    state.dark = false
+    settle(f)
+    discard f.h.pumpQueued()
+    let againPanel = dominantColor(panel, includeChildren = true)
+    let againLabel = dominantColor(label, throughParent = true)
+    check luminance(againPanel) > 200
+    check luminance(againLabel) > 200
+    check f.windowOf("pp-edit") == edit
+    check text(edit) == "ab"
+    check packedSel(edit) == selection
+
   test "owner minimize hides the panel and removing the trigger retires it":
     let state = PopoverState()
     let f = mounted(state)
@@ -1241,49 +1523,214 @@ suite "reactive EDIT acceptance":
     check IsWindowVisible(panel) != 0
     check GetWindow(panel, GwOwner) == host
 
-  test "a construction-time panel failure releases every task resource":
+  test "a rejected revision rolls back a failed panel create completely":
+    # The popover root only exists in the candidate revision, so the failing
+    # host is not covered by the ordinary teardown of an accepted tree: what the
+    # assertions see after the failure is exactly what the aborted construction
+    # left behind.
     let state = PopoverState()
-    discard state
-    # Build the pieces by hand so the failing instance is ours to clean up.
-    let activity = newUiScopeActivity()
-    let app = fixtureApplication(proc(): Node = page(state), "Popover mount",
-      480, 360).withNativeTheme(shadcnLight)
-    let runtime = newRuntime(guardUiApplication(app,
-      proc(): uint64 = uint64(GetCurrentThreadId()), activity))
-    let h = createHost(app.title, DipSize(width: 480, height: 360),
-      calls = systemWin32Calls(), theme = shadcnLight)
-    h.setStartupScope(proc(): bool = activity.busy or runtime.installingUpdate or
-      runtime.installingHook)
-    var failed = false
+    state.omitPopover = true
+    let f = mounted(state)
+    defer: close(f)
+    settle(f)
+    check f.win.popoverCountForTest() == 0
+    resetSeams()
+    injectFail.create = true
+    state.omitPopover = false
+    var message = ""
     try:
-      let win = newWin32Backend(h, calls = systemWin32Calls())
-      let session = win.attachWin32Backend(runtime, protocol.strict)
-      win.bindSession(session)
-      h.bindSession(session, proc(): bool = activity.busy)
-      win.safeListTurn()
-      discard runtime.refresh()
-      win.safeListTurn()
-    except UiError:
-      failed = true
-    # Release whatever the failed construction created and prove it is zero.
-    injectFail.create = false
-    try: h.destroyHost()
-    except CatchableError: discard
-    runtime.closeRuntime()
-    # A fresh instance is the supported path; no same-generation receipt retry
-    # is claimed here.
+      settle(f)
+    except UiError as error:
+      message = error.msg
+    # The refusal really reached the panel class exactly once and surfaced the
+    # product's own native failure, not a test-only shortcut.
+    check message.contains("CreateWindowExW popover panel failed: Win32 error 5")
+    check message.contains("popover panel construction rolled back")
+    check seamRefused.create == 1
+    check seamAttempts.create == 1
+    # Rollback is observable at the resource level: the class registered for
+    # THIS panel was released again and no host receipt survives.
+    check seamAttempts.register == 1
+    check seamAttempts.unregister == 1
+    check f.win.popoverCountForTest() == 0
+    # Both the backend counter AND the callback cookie table are empty; a host
+    # tracked by only one of them would leak silently.
+    check popoverReceiptsForTest() == 0
+    echo "SEAM destroy attempts after rollback=", seamAttempts.destroy
+    # The rejected revision published nothing: the accepted tree has no popover
+    # root, so no stale panel state is reachable through business lookups.
+    expect UiError:
+      discard f.runtime.find("pp")
+    # The same session and mount generation then builds a NEW panel instance on
+    # the next ordinary turn and can publish it (not a same-generation receipt
+    # retry of the failed one).
+    settle(f)
+    check f.win.popoverCountForTest() == 1
+    check f.win.diagnostics.popoverShows == 0
+    state.open = true
+    settle(f)
+    let panel = f.panelOf()
+    check panel != nil
+    check IsWindowVisible(panel) != 0
+    check IsWindow(f.windowOf("pp-edit")) != 0
+    check f.win.diagnostics.popoverShows == 1
+
+  test "a rollback that cannot unregister keeps the receipt and still tears down":
+    # The rollback itself can fail (here: UnregisterClassW refused). The failed
+    # construction must then keep its receipt instead of dropping a half-open
+    # host silently, and teardown must still release everything.
+    let state = PopoverState()
+    state.omitPopover = true
+    let f = mounted(state)
+    settle(f)
+    resetSeams()
+    injectFail.create = true
+    injectFail.unregister = true
+    state.omitPopover = false
+    var message = ""
+    try:
+      settle(f)
+    except UiError as error:
+      message = error.msg
+    check seamRefused.create == 1
+    check seamRefused.unregister == 1
+    check message.contains("CreateWindowExW popover panel failed: Win32 error 5")
+    check message.contains("popover panel rollback failed")
+    check message.contains("UnregisterClassW popover panel")
+    # Receipt kept and reported instead of a silent leak.
+    check f.win.popoverCountForTest() == 1
+    check popoverReceiptsForTest() == 1
+    # Removing the popover while the receipt is still kept retires it through the
+    # ordinary stale-drop path (a second UnregisterClassW attempt), which is the
+    # documented recovery; no teardown shortcut is needed.
+    state.omitPopover = true
+    settle(f)
+    check f.win.popoverCountForTest() == 0
+    check popoverReceiptsForTest() == 0
+    check seamAttempts.unregister >= 2
+    check not f.s.faulted
+    var teardown = ""
+    try:
+      f.h.destroyHost()
+    except CatchableError as error:
+      teardown = error.msg
+    try:
+      f.runtime.closeRuntime()
+    except CatchableError as error:
+      if teardown.len == 0: teardown = error.msg
+    check teardown == ""
+    # The retried teardown released the kept class receipt and every window.
+    check seamAttempts.unregister >= 2
+    check f.win.popoverCountForTest() == 0
+    check f.win.diagnostics.liveWindows == 0
+    check f.win.diagnostics.liveFonts == 0
+    check f.win.diagnostics.liveRoots == 0
+
+  test "a surface-mark failure rolls the panel back and keeps no receipt":
+    # The panel window exists before the surface mark runs; a refused SetProp must
+    # not silently destroy it without a receipt. Here the ordinary rollback must
+    # release the real HWND it created.
+    let state = PopoverState()
+    state.omitPopover = true
+    let f = mounted(state)
+    defer: close(f)
+    settle(f)
+    resetSeams()
+    injectFail.setProp = true
+    state.omitPopover = false
+    var message = ""
+    try:
+      settle(f)
+    except UiError as error:
+      message = error.msg
+    check seamRefused.setProp == 1
+    check seamLastPanel != nil
+    check message.contains("SetPropW popover panel surface failed: Win32 error 5")
+    check message.contains("popover panel construction rolled back")
+    # The window the failing step created is really gone again.
+    check IsWindow(seamLastPanel) == 0
+    check f.win.popoverCountForTest() == 0
+    check popoverReceiptsForTest() == 0
+    check seamAttempts.unregister == seamAttempts.register
+
+  # Scope note: this pair proves the message-level contract (original SetProp
+  # error preserved, cleanup error appended, live HWND still tracked and
+  # releasable). The RED evidence for these cases was message-level only; a
+  # deeper ownership-rollback negative control was not demonstrated.
+  test "a failed surface mark whose cleanup also fails keeps the receipt":
+    # Double fault: SetProp refused AND the panel's DestroyWindow refused. The
+    # primary SetProp error must stay visible, the cleanup error must be reported
+    # too, and the live HWND must stay tracked so it cannot be orphaned.
+    let state = PopoverState()
+    state.omitPopover = true
+    let f = mounted(state)
+    defer: close(f)
+    settle(f)
+    resetSeams()
+    injectFail.setProp = true
+    injectFail.destroy = true
+    injectDestroyPanel = true
+    state.omitPopover = false
+    var message = ""
+    try:
+      settle(f)
+    except UiError as error:
+      message = error.msg
+    check seamRefused.setProp == 1
+    check seamRefused.destroy == 1
+    check seamLastPanel != nil
+    check message.contains("SetPropW popover panel surface failed: Win32 error 5")
+    check message.contains("popover panel rollback failed")
+    check message.contains("DestroyWindow popover panel failed: Win32 error 5")
+    # Receipt kept: the surviving real window is still owned and reported.
+    check IsWindow(seamLastPanel) != 0
+    check f.win.popoverCountForTest() == 1
+    check popoverReceiptsForTest() == 1
+    # Clearing the injections lets the ordinary stale-drop release everything.
+    injectDestroyPanel = false
+    state.omitPopover = true
+    settle(f)
+    check IsWindow(seamLastPanel) == 0
+    check f.win.popoverCountForTest() == 0
+    check popoverReceiptsForTest() == 0
+    check seamAttempts.unregister == seamAttempts.register
+
+  # Scope note: the "retried" part exercises the HOST-LEVEL repaint debt (a
+  # non-faulted ordinary turn finishes the repaint). Through the real message
+  # pump the same RedrawWindow failure goes tick -> faultBackendEffects ->
+  # frozen dispatch -> runNative cleanup and the app exits; in-application
+  # automatic recovery is NOT claimed here or in the docs.
+  test "a theme redraw failure is reported and retried instead of claimed":
+    let state = PopoverState()
     let f = mounted(state)
     defer: close(f)
     settle(f)
     state.open = true
     settle(f)
-    let panel = f.win.popoverStateForTest(
-      f.s.handleFor(f.runtime.find("pp").id)).panelHandle
-    check panel != nil
-    check IsWindowVisible(panel) != 0
-    discard failed
+    discard f.h.pumpQueued()
+    let panel = f.panelOf()
+    check luminance(dominantColor(panel, includeChildren = true)) > 200
+    resetSeams()
+    injectFail.redraw = true
+    state.dark = true
+    var message = ""
+    try:
+      settle(f)
+    except UiError as error:
+      message = error.msg
+    # Same contract as the modal surface: a failed repaint is a native error, not
+    # a silently claimed theme switch.
+    check seamRefused.redraw == 1
+    check message.contains("RedrawWindow popover panel failed: Win32 error 5")
+    check IsWindow(panel) != 0
+    # The theme itself really changed and the repaint is retried on the next
+    # ordinary turn: the panel body becomes dark without a second theme edit.
+    settle(f)
+    discard f.h.pumpQueued()
+    check luminance(dominantColor(panel, includeChildren = true)) < 96
 
   test "a panel destroy failure keeps a receipt until a retry succeeds":
+    resetSeams()
     let state = PopoverState()
     let f = mounted(state)
     settle(f)
@@ -1291,15 +1738,20 @@ suite "reactive EDIT acceptance":
     settle(f)
     let panel = f.panelOf()
     check IsWindow(panel) != 0
+    # Refuse the real DestroyWindow of THIS panel only, so the failure is the
+    # panel teardown, not some child window that happens to be destroyed first.
+    injectDestroyTarget = panel
     injectFail.destroy = true
-    var raised = false
+    var message = ""
     try:
       f.h.destroyHost()
-    except CatchableError:
-      raised = true
-    check raised
-    # The receipt was kept: the panel is still alive and reported.
+    except CatchableError as error:
+      message = error.msg
+    check seamRefused.destroy == 1
+    check message.contains("DestroyWindow popover panel failed: Win32 error 5")
+    # The receipt was kept: the panel is still alive and the host still tracked.
     check IsWindow(panel) != 0
+    check f.win.popoverCountForTest() == 1
     # A retry without injection completes and releases only this task's windows.
     f.h.destroyHost()
     f.runtime.closeRuntime()
@@ -1309,28 +1761,79 @@ suite "reactive EDIT acceptance":
     check f.win.diagnostics.liveRoots == 0
     check f.win.popoverCountForTest() == 0
 
-  test "a show that does not become visible reports failure and keeps resources":
+  test "a failed show faults the session through the real production pump":
+    # Production entry, not the test shortcut: host.pump() -> safeTurn() ->
+    # bridge.nativeTick() -> Win32Backend.tick() -> nativeTurn() -> popoverTurn()
+    # -> Win32Popover.show(). tick() is the frame that owns the fault contract,
+    # so this is the only entry that can prove what a real app observes.
+    resetSeams()
     let state = PopoverState()
     let f = mounted(state)
     defer: close(f)
     settle(f)
     let panel = f.panelOf()
     let edit = f.windowOf("pp-edit")
+    let showsBefore = f.win.diagnostics.popoverShows
+    let requestsBefore = state.requests
+    check not f.runtime.eventsFrozen
+    check not f.s.faulted
     injectFail.show = true
-    state.open = true
-    var failed = false
+    state.open = true # accepted open must stay true: the publish, not the state, fails
+    discard f.runtime.refresh() # install the accepted open; the pump publishes
+    check f.runtime.find("pp").node.popoverProps.get.open
+    # Safety net: if the publish never ran, the pump returns instead of blocking.
+    discard PostMessageW(f.h.windowHandle, 0x0012'u32, 1, 0)
+    # Positive control for the later refusal: the SAME envelope shape is accepted
+    # while the session is live (same handle, same observed revision).
+    let editHandle = f.s.handleFor(f.runtime.find("pp-edit").id)
+    let binding = f.win.controlBindingForTest(editHandle)
+    let generation = f.s.mountGeneration
+    let liveProbe = EventEnvelope(session: f.s.sessionId, mountGeneration: generation,
+      bindingGeneration: binding, handle: editHandle, sequence: 1,
+      observedRevision: 0, event: Event(kind: change, value: ""), source: sourceUser)
+    check binding != 0
+    check f.s.enqueue(liveProbe)
+    f.s.drainEvents()
+    check state.text == ""
+    var message = ""
     try:
-      settle(f)
-    except UiError:
-      failed = true
-    check failed
-    # Accepted state is unchanged, the panel is not visible and no fake shown
-    # receipt is kept; the panel and its EDIT still exist for a retry.
+      discard f.h.pump()
+    except UiError as error:
+      message = error.msg
+    check seamRefused.show == 1
+    check message.contains("popover panel did not become visible")
+    # Existing fault contract (plan invariant 9): a native effect failure inside
+    # the ordinary native turn faults the session and freezes business dispatch
+    # before the error leaves the pump, so a vanished panel can never receive
+    # business events afterwards.
+    check f.s.faulted
+    check f.runtime.eventsFrozen
+    # Frozen dispatch is effective: the same live session refuses a genuine user
+    # envelope for the (now invisible) panel body instead of delivering it.
+    let rootHandle = f.s.handleFor(f.runtime.find("pp").id)
+    check not f.s.enqueue(EventEnvelope(session: f.s.sessionId,
+      mountGeneration: generation, bindingGeneration: binding, handle: rootHandle,
+      sequence: 2, observedRevision: 0,
+      event: Event(kind: openChange, open: false), source: sourceUser))
+    check not f.s.enqueue(EventEnvelope(session: f.s.sessionId,
+      mountGeneration: generation, bindingGeneration: binding, handle: editHandle,
+      sequence: 3, observedRevision: 0,
+      event: Event(kind: change, value: "ghost"), source: sourceUser))
+    f.s.drainEvents() # nothing was queued, so nothing can reach business
+    # No fake receipt and no silent state change: the failed publish is not
+    # counted, accepted open is unchanged, and neither the panel nor its EDIT is
+    # destroyed behind the caller's back.
+    check f.win.diagnostics.popoverShows == showsBefore
+    check state.requests == requestsBefore
     check f.runtime.find("pp").node.popoverProps.get.open
     check IsWindow(panel) != 0
     check IsWindowVisible(panel) == 0
     check IsWindow(edit) != 0
-    # A failed native effect faults the session, so no same-session retry is
-    # claimed here; the accepted state and the live resources are what matter.
-    check IsWindow(panel) != 0
     check f.win.popoverCountForTest() == 1
+    check popoverReceiptsForTest() == 1
+    # Intermediate state is explicit: show() failed AFTER place(), so the panel
+    # has real geometry while nothing was published. No rect/show receipt exists,
+    # so a later reader cannot mistake the placed rectangle for a publication.
+    check rectOf(panel).width > 0
+    check rectOf(panel).height > 0
+    check not f.win.popoverPublishedRectForTest(rootHandle)

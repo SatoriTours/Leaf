@@ -2,12 +2,14 @@
 import std/[tables, options, algorithm, widestrs, sets, sequtils, strutils, math]
 import ../../[core, styles, backend, backend_session, native_layout, native_edit, native_measure_cache,
   height_index, native_list_layout, native_theme, graphics, canvas_input, overlay_protocol,
-  select_protocol, popover_protocol]
+  select_protocol, popover_protocol, scroll_area_protocol, radio_group_protocol]
 import ./[api, calls, host, capabilities, measure, control_ids, list_host, row_pool,
   resource_owner, navigation_input, skin, canvas, layout_state, focus_ring, accessibility,
-  live_provider, overlay_host, select_host, select_provider, popover_host]
+  live_provider, overlay_host, select_host, select_provider, popover_host, scroll_area_host]
 import ../../ui/[fields, theme]
 import ../../overlay_geometry
+
+proc IsChild(parent, child: HWND): BOOL {.stdcall,dynlib:"user32.dll",importc,raises:[].}
 
 proc GetForegroundWindow(): HWND {.stdcall,dynlib:"user32.dll",importc,raises:[].}
 
@@ -74,6 +76,9 @@ type
     trackingMouse: bool
     acceptedNavigation: Option[HostNavigationProps]
     backEnabled: bool
+    radioFocusGuard: bool
+      ## Set only while USER32's own radio focus handling runs: its automatic
+      ## check must never become a selection request.
     appliedPosition: Option[tuple[x, y, width, height: int]]
     appliedClip: Option[tuple[left, top, right, bottom: int]]
     appliedVisible: Option[bool]
@@ -111,6 +116,8 @@ type
     controlIds: ControlIdPool
     pendingRegions: seq[HRGN]
     pendingContexts: seq[tuple[window: HWND, context: HIMC]]
+    scrolls: Table[NodeHandle, Win32ScrollArea]
+    scrollFocus: HWND
     lists: Table[NodeHandle, Win32ListHost]
     resources: ResRegistry
       ## Pure native resource state. Every live window has exactly one
@@ -246,6 +253,34 @@ proc forgetControl(win: Win32Backend, control: NativeControl) {.raises: [].} =
   win.retiring.del(control.handle)
   win.prepared.del(control.handle)
   if control.viewport: win.lists.del(control.handle)
+  if control.handle in win.scrolls:
+    win.scrolls.getOrDefault(control.handle).close()
+    win.scrolls.del(control.handle)
+
+proc isScrollRole(entity: MountedEntity, role: UiRole): bool =
+  entity.props.standardUi.isSome and entity.props.standardUi.get.role == role
+
+proc withoutScrollBodies(entities: Table[NodeHandle, MountedEntity]):
+    Table[NodeHandle, MountedEntity] =
+  ## Only the layout view changes: native/accepted parentage remains intact.
+  result = entities
+  for handle, entity in entities:
+    var node = entity
+    var depth = 0
+    while node.handle != NoHandle and depth <= MaxDepth:
+      if node.isScrollRole(UiRole.scrollAreaContent):
+        result.del(handle)
+        break
+      node = entities.getOrDefault(node.parent)
+      inc depth
+
+proc scrollOwner(win: Win32Backend, control: NativeControl): Win32ScrollArea =
+  var handle = control.handle
+  var depth = 0
+  while handle != NoHandle and depth <= MaxDepth:
+    if handle in win.scrolls: return win.scrolls[handle]
+    handle = win.current.getOrDefault(handle).parent
+    inc depth
 
 proc captureNative(operation: string): ref CatchableError {.raises: [].} =
   try: nativeError(operation)
@@ -339,7 +374,8 @@ proc fontRole(win: Win32Backend, entity: MountedEntity): NativeFontRole =
     of UiRole.emptyTitle: return emptyTitleFont
     of UiRole.badge,UiRole.kbd: return smallControlFont
     of UiRole.cardTitle: return cardTitleFont
-    of UiRole.alertTitle,UiRole.label,UiRole.checkbox,UiRole.switch: return labelFont
+    of UiRole.alertTitle,UiRole.label,UiRole.checkbox,UiRole.switch,
+        UiRole.radioGroupItem: return labelFont
     of UiRole.alertDescription,UiRole.fieldDescription, UiRole.fieldError, UiRole.inputGroupText: return hintFont
     else: return defaultFont
   if win.theme != systemTheme and entity.kind == NodeKind.button: return captionFont
@@ -482,6 +518,84 @@ proc standardRoleOf(control: NativeControl): Option[UiRole] =
     some(control.entity.props.standardUi.get.role)
   else:
     none(UiRole)
+
+proc isRadioGroupRole(entity: MountedEntity): bool =
+  entity.props.standardUi.isSome and
+    entity.props.standardUi.get.role == UiRole.radioGroup
+
+proc isRadioItemRole(entity: MountedEntity): bool =
+  entity.props.standardUi.isSome and
+    entity.props.standardUi.get.role == UiRole.radioGroupItem
+
+proc radioState(entity: MountedEntity): RadioItem =
+  RadioItem(value: entity.props.control.radioValue.get(""),
+    enabled: entity.props.control.enabled.get(true),
+    checked: entity.props.control.checked.get(false))
+
+proc radioItems(win: Win32Backend, group: NodeHandle): seq[NativeControl] =
+  ## Direct radio options of one group in accepted sibling order.
+  for control in win.controls.values:
+    if control.entity.parent == group and isRadioItemRole(control.entity) and
+        control.window != nil:
+      result.add(control)
+  result.sort(proc(a, b: NativeControl): int = cmp(a.entity.index, b.entity.index))
+
+proc radioGroupWindow(win: Win32Backend, item: NativeControl): HWND =
+  ## The one native group window that owns this option, if any.
+  let parent = item.entity.parent
+  if parent == NoHandle: return nil
+  let group = win.controls.getOrDefault(parent)
+  if group == nil or not isRadioGroupRole(group.entity): return nil
+  group.window
+
+proc applyRadioTabStop(win: Win32Backend, window: HWND, tabStop: bool) =
+  ## One Tab entry per group is a native style fact, not a second focus model.
+  let current = GetWindowLongW(window, GWL_STYLE)
+  let desired = if tabStop: current or int32(WS_TABSTOP)
+    else: current and not int32(WS_TABSTOP)
+  if current == desired: return
+  setLastError(0)
+  if win.calls.setWindowData(window, GWL_STYLE, int(desired)) == 0 and lastError() != 0:
+    nativeError("SetWindowLongPtrW radio tab stop")
+
+proc radioGroupOf(win: Win32Backend, window: HWND): seq[NativeControl] =
+  ## Options of the group that really owns this window, in accepted order.
+  for control in win.controls.values:
+    if control.window != window: continue
+    if control.entity.parent == NoHandle: continue
+    return win.radioItems(control.entity.parent)
+  @[]
+
+proc applyRadioGroupStart(win: Win32Backend, window: HWND, start: bool) =
+  ## WS_GROUP marks where the OS's own radio scan begins; it is a group
+  ## boundary, never an accepted selection.
+  let current = GetWindowLongW(window, GWL_STYLE)
+  let desired = if start: current or int32(WS_GROUP)
+    else: current and not int32(WS_GROUP)
+  if current == desired: return
+  setLastError(0)
+  if win.calls.setWindowData(window, GWL_STYLE, int(desired)) == 0 and lastError() != 0:
+    nativeError("SetWindowLongPtrW radio group boundary")
+
+proc maintainRadioGroups(win: Win32Backend) =
+  ## Re-derive the single Tab entry of every accepted radio group. Runs after
+  ## all controls of the revision were set, so it reads the accepted state only.
+  var groups: seq[NodeHandle]
+  for handle, control in win.controls:
+    if control.entity.props.standardUi.isSome and
+        control.entity.props.standardUi.get.role == UiRole.radioGroup:
+      groups.add(handle)
+  for handle in groups:
+    let items = win.radioItems(handle)
+    if items.len == 0: continue
+    var states: seq[RadioItem]
+    for item in items: states.add(radioState(item.entity))
+    let stop = radioTabStop(states)
+    for index, item in items:
+      win.applyRadioTabStop(item.window, index == stop)
+      # WS_GROUP bounds USER32's own radio group scan so a focus change can
+      # never clear an accepted option of a sibling group.
+      win.applyRadioGroupStart(item.window, index == 0)
 
 proc controlWindowOf(win: Win32Backend, handle: NodeHandle): HWND =
   if handle == NoHandle: return nil
@@ -1174,7 +1288,19 @@ proc ensurePopoverHost(win: Win32Backend, root: NodeHandle): Win32Popover =
   try:
     host.openWindows()
   except CatchableError as error:
-    error.msg.add("; popover panel kept for retry")
+    # A panel that never finished construction is rolled back completely: its
+    # class registration and cookie receipt are released and no host stays
+    # tracked, so the next accepted revision builds a new instance instead of
+    # patching a half-open one. A rollback that itself fails keeps the receipt
+    # and reports both failures rather than pretending the state is clean.
+    let rollback = host.closeWindows()
+    if rollback == nil:
+      win.popovers.del(root)
+      win.popoverRects.del(root)
+      dec win.stats.livePopovers
+      error.msg.add("; popover panel construction rolled back")
+    else:
+      error.msg.add("; popover panel rollback failed: " & rollback.msg)
     raise error
   host
 
@@ -1228,7 +1354,7 @@ proc popoverPixels(win: Win32Backend, host: Win32Popover, content: NativeControl
   let widthDip = props.popoverWidth
   let available = DipSize(width: widthDip,
     height: max(1.0, work.height - 2.0 * PopoverMargin))
-  let natural = measureSubtree(win.current, content.entity.handle, available,
+  let natural = measureSubtree(withoutScrollBodies(win.current), content.entity.handle, available,
     proc(entity: MountedEntity, available: DipSize): DipSize =
       win.measureControl(entity, available))
   if natural.height < 1.0: fail("popover panel measured an empty body")
@@ -1243,15 +1369,18 @@ proc popoverPixels(win: Win32Backend, host: Win32Popover, content: NativeControl
    max(1'i32, int32(round(placement.height * scale))),
    placement.width, placement.height)
 
+proc layoutScrollAreas(win: Win32Backend)
+
 proc layoutPopoverContent(win: Win32Backend, content: NativeControl,
                           widthDip, heightDip: float64, dpi: int) =
   ## Lay out only the panel body inside the panel's client area. Parent-relative
   ## placement makes the content root start at the client origin.
   let rect = DipRect(x: 0, y: 0, width: widthDip, height: heightDip)
-  let boxes = layoutSubtree(win.current, content.entity.handle, rect, rect,
+  let boxes = layoutSubtree(withoutScrollBodies(win.current), content.entity.handle, rect, rect,
     proc(entity: MountedEntity, available: DipSize): DipSize =
       win.measureControl(entity, available))
   win.placeOverlayBoxes(content.entity.handle, boxes, dpi, "popoverBody")
+  win.layoutScrollAreas()
 
 proc popoverTabFrom(win: Win32Backend, root: NodeHandle): bool =
   ## Tab pressed on a real control inside the panel body: walk the panel's own
@@ -1579,7 +1708,14 @@ proc command(win: Win32Backend, receiver: HWND, wp: WPARAM, lp: LPARAM): bool =
             return true
         win.sendEvent(control, click)
     of NodeKind.checkbox, NodeKind.toggle:
-      if code == 0: win.sendEvent(control, change)
+      if code == 0:
+        if standardRole(control.window) == some(UiRole.radioGroupItem) and
+            (control.entity.props.control.checked.get(false) or
+              control.radioFocusGuard):
+          # The accepted option is already this one: activating it again is not
+          # a new selection request. A focus self-check never becomes one either.
+          return true
+        win.sendEvent(control, change)
     of NodeKind.input:
       if code == 0x300: win.sendEvent(control, change, control.editor.phase)
     else: discard
@@ -1743,6 +1879,7 @@ proc preparePopoverBodies(win: Win32Backend, removed: HashSet[NodeHandle]) =
   ## tree, geometry, EDIT draft and focus exactly as they were.
   var merged = win.mergedEntities()
   dropPlannedRemovals(merged, removed)
+  merged = withoutScrollBodies(merged)
   if merged.len == 0: return
   let area = workArea(win.calls, win.host.windowHandle)
   if not area.known: return
@@ -1799,6 +1936,7 @@ proc prepareOverlays(win: Win32Backend, removed: HashSet[NodeHandle] = initHashS
   win.overlayPlans.clear()
   var merged = win.mergedEntities()
   dropPlannedRemovals(merged, removed)
+  merged = withoutScrollBodies(merged)
   if win.popovers.len != 0: merged = withoutPopoverBodies(merged)
   var open: seq[NodeHandle]
   for handle in win.overlayOpenOrder(merged):
@@ -1839,7 +1977,7 @@ proc prepareOverlays(win: Win32Backend, removed: HashSet[NodeHandle] = initHashS
       if overlay != nil and overlay.isVisible and previousEntity.overlay.isSome and
           previousEntity.overlay.get.open and
           previousEntity.overlay.get.overlayWidth == props.overlayWidth:
-        var currentScope = initLayoutScope(withoutPopoverBodies(win.current),
+        var currentScope = initLayoutScope(withoutScrollBodies(withoutPopoverBodies(win.current)),
           proc(item: MountedEntity, available: DipSize): DipSize =
             win.measureControl(item, available))
         let previous = currentScope.measureSubtree(handle,
@@ -2108,6 +2246,7 @@ proc applyOverlayGeometry(win: Win32Backend) =
     # never part of a modal level's measured subtree, including this apply path.
     var applyEntities = win.current
     if win.popovers.len != 0: applyEntities = withoutPopoverBodies(win.current)
+    applyEntities = withoutScrollBodies(applyEntities)
     var scope = initLayoutScope(applyEntities,
       proc(entity: MountedEntity, available: DipSize): DipSize =
         win.measureControl(entity, available))
@@ -2289,6 +2428,7 @@ proc disposeOverlays(win: Win32Backend) =
   win.overlayPlans.clear()
   if first != nil: raise first
 
+proc scrollTurn(win: Win32Backend)
 proc relayout*(win: Win32Backend, content: DipSize, dpi: int)
 proc layoutOverlays(win: Win32Backend, dpi: int)
 
@@ -2899,6 +3039,46 @@ proc captureControl(win: Win32Backend, control: NativeControl, message: UINT,
       if selectHost != nil:
         let answer = selectHost.triggerObjectResult(wp, lp)
         if answer != 0: return answer
+    if control.armed:
+      let scroll = win.scrollOwner(control)
+      if scroll != nil:
+        let rootWindow = control.window == scroll.viewport
+        if message == 0x0007: # reveal once on focus change, not after every wheel
+          win.scrollFocus = control.window
+          if win.calls.postMessage(win.host.windowHandle, WM_HOST_TICK, 0, 0) == 0:
+            nativeError("PostMessageW scroll area wake")
+        if rootWindow and message in [0x0084'u32, 0x00A1'u32]:
+          return DefWindowProcW(control.window, message, wp, lp)
+        if rootWindow and message == WM_VSCROLL:
+          scroll.noteCommand(int(wp and 0xffff))
+          if win.calls.postMessage(win.host.windowHandle, WM_HOST_TICK, 0, 0) == 0:
+            nativeError("PostMessageW scroll area wake")
+          return 0
+        if message == WM_MOUSEWHEEL:
+          if control.entity.kind == NodeKind.input and
+              control.entity.props.control.multiline.get(false):
+            return win.calls.defaultSubclass(control.window, message, wp, lp)
+          scroll.noteWheel(float64(cast[int16](uint16(wp shr 16))) / 120.0)
+          if win.calls.postMessage(win.host.windowHandle, WM_HOST_TICK, 0, 0) == 0:
+            nativeError("PostMessageW scroll area wake")
+          return 0
+        if rootWindow and message == WM_GETDLGCODE:
+          return win.calls.defaultSubclass(control.window, message, wp, lp) or DLGC_WANTARROWS
+        if rootWindow and message == WM_KEYDOWN:
+          var code = -1
+          case wp
+          of VK_UP: code = SB_LINEUP
+          of VK_DOWN: code = SB_LINEDOWN
+          of VK_PRIOR: code = SB_PAGEUP
+          of VK_NEXT: code = SB_PAGEDOWN
+          of VK_HOME: code = SB_TOP
+          of VK_END: code = SB_BOTTOM
+          else: discard
+          if code >= 0:
+            scroll.noteCommand(code)
+            if win.calls.postMessage(win.host.windowHandle, WM_HOST_TICK, 0, 0) == 0:
+              nativeError("PostMessageW scroll area wake")
+            return 0
     if control.canvas != nil:
       if message in [0x0007'u32, 0x0008'u32]:
         if InvalidateRect(control.window, nil, 0) == 0: nativeError("Canvas focus invalidation")
@@ -2924,6 +3104,46 @@ proc captureControl(win: Win32Backend, control: NativeControl, message: UINT,
             when defined(leafProtocolProbes): echo "POPSRC toggle key=", control.entity.nodeId
             win.requestPopoverToggle(root)
         return 0
+    if standardRole(control.window) == some(UiRole.radioGroupItem) and
+        message == 0x0007: # WM_SETFOCUS
+      # A stock radio checks itself when it gains focus. The accepted controlled
+      # value stays authoritative: run the native focus handling, then restore
+      # the accepted check state so focus never becomes a selection request.
+      let accepted = control.entity.props.control.checked.get(false)
+      control.radioFocusGuard = true
+      try:
+        let answer = win.calls.defaultSubclass(control.window, message, wp, lp)
+        discard win.calls.send(control.window, BM_SETCHECK, WPARAM(ord(accepted)), 0)
+        for item in win.radioGroupOf(control.window):
+          discard win.calls.invalidate(item.window, nil, 0)
+        return answer
+      finally:
+        control.radioFocusGuard = false
+    if standardRole(control.window) == some(UiRole.radioGroupItem):
+      # Arrow keys belong to the group; Tab still leaves it through USER32.
+      if message == WM_GETDLGCODE:
+        return win.calls.defaultSubclass(control.window, message, wp, lp) or DLGC_WANTARROWS
+      if message == WM_KEYDOWN:
+        var move = none(RadioMove)
+        case wp
+        of VK_UP: move = some(radioUp)
+        of VK_DOWN: move = some(radioDown)
+        of VK_HOME: move = some(radioHome)
+        of VK_END: move = some(radioEnd)
+        else: discard
+        if move.isSome:
+          let items = win.radioItems(control.entity.parent)
+          var states: seq[RadioItem]
+          var current = -1
+          for index, item in items:
+            states.add(radioState(item.entity))
+            if item.window == control.window: current = index
+          if current >= 0:
+            let target = radioMove(states, current, move.get)
+            if target >= 0 and target < items.len and target != current:
+              # Focus only: no selection request and no business callback here.
+              discard SetFocus(items[target].window)
+          return 0
     if message == WM_KEYDOWN and standardRole(control.window) == some(UiRole.selectTrigger):
       # Enter/F4/Up/Down open the popup; Space stays with the real BUTTON, whose
       # BN_CLICKED becomes the same typed open/close request.
@@ -3306,7 +3526,15 @@ proc makeControl(win: Win32Backend, entity: MountedEntity): NativeControl =
     # public bit. Removing it later does not remove its client-area border.
     if win.theme == systemTheme or highContrastActive(): style = style or WS_BORDER
   of NodeKind.checkbox, NodeKind.toggle:
-    className = "BUTTON"; style = style or WS_TABSTOP or BS_AUTOCHECKBOX
+    className = "BUTTON"
+    if entity.props.standardUi.isSome and
+        entity.props.standardUi.get.role == UiRole.radioGroupItem:
+      # A real stock radio button. BS_RADIOBUTTON (not BS_AUTORADIOBUTTON) is
+      # the type whose siblings USER32 never clears behind our back: the
+      # accepted controlled value stays the only selection authority.
+      style = style or WS_TABSTOP or BS_RADIOBUTTON
+    else:
+      style = style or WS_TABSTOP or BS_AUTOCHECKBOX
   of NodeKind.progress: className = "msctls_progress32"
   of NodeKind.spinner: className = "msctls_progress32"; style = style or PBS_MARQUEE
   of NodeKind.separator:
@@ -3316,6 +3544,8 @@ proc makeControl(win: Win32Backend, entity: MountedEntity): NativeControl =
     style = style or 7'u32 # BS_GROUPBOX: stock UIA Group, retaining native child hierarchy.
   if entity.props.standardUi.isSome and entity.props.standardUi.get.role==UiRole.inputGroupText:
     style=style or 0x100'u32 # SS_NOTIFY: actual addon text receives mouse focus intent.
+  if entity.isScrollRole(UiRole.scrollArea):
+    style = style or WS_VSCROLL or WS_TABSTOP
   # Exactly one native parent is selected here. A popover panel body and a modal
   # surface are never page children, so neither may be overwritten by the generic
   # parent branch below (that was the mount bug: the body was parented to the
@@ -3367,6 +3597,8 @@ proc makeControl(win: Win32Backend, entity: MountedEntity): NativeControl =
   if control.window == nil: nativeError("CreateWindowExW control")
   setEntryWindow(entry, cast[pointer](control.window), cast[pointer](parent))
   inc win.stats.creates
+  if entity.isScrollRole(UiRole.scrollArea):
+    win.scrolls[entity.handle] = newScrollArea(win.calls, control.window)
   if entity.kind == NodeKind.virtualList:
     if entity.list.isNone: fail("virtual list has no list metadata")
     var list = newListHost(entity.handle, control.window, entity.list.get, win.calls)
@@ -3444,7 +3676,8 @@ proc properties(win: Win32Backend, control: NativeControl, entity: MountedEntity
   if win.theme != systemTheme and entity.kind in {NodeKind.checkbox, NodeKind.toggle} and
       not checkColorsPrepared(control.window):
     if entity.kind == NodeKind.toggle or
-        (entity.props.standardUi.isSome and entity.props.standardUi.get.role==UiRole.checkbox):
+        (entity.props.standardUi.isSome and entity.props.standardUi.get.role in
+          {UiRole.checkbox, UiRole.radioGroupItem}):
       # Standard checkbox and switch both need v6 NM_CUSTOMDRAW.
       # Keep v6 theming enabled: classic BUTTON does not send NM_CUSTOMDRAW.
       if setToggleSkin(control.window) == 0: nativeError("SetPropW native toggle")
@@ -3570,7 +3803,7 @@ proc measureControl*(win: Win32Backend, entity: MountedEntity, available: DipSiz
       result.width+=2*horizontalInset(props.size)
       result.height=max(controlHeight(props.size),result.height+8)
       if props.size.iconOnly: result.width=controlHeight(props.size)
-    of UiRole.checkbox,UiRole.switch:
+    of UiRole.checkbox,UiRole.switch,UiRole.radioGroupItem:
       let glyph=checkMetrics(props.role,props.size)
       result=win.measurement.measureText(label,role=win.fontRole(entity))
       result.width+=glyph.width+(if label.len>0:8.0 else:0.0)
@@ -3743,6 +3976,91 @@ proc placeControl(win: Win32Backend, control: NativeControl,
     if primary != nil: raise primary
   win.showControl(control, true)
 
+proc layoutScrollAreas(win: Win32Backend) =
+  for handle, scroll in win.scrolls:
+    if handle notin win.current or not win.controls.hasKey(handle): continue
+    var body: NativeControl
+    for child in win.controls.values:
+      if child.entity.parent == handle and child.entity.isScrollRole(UiRole.scrollAreaContent):
+        body = child
+        break
+    if body == nil: continue
+    scroll.attachContent(body.window)
+    var client: RECT
+    if win.calls.clientRect(scroll.viewport, addr client) == 0:
+      nativeError("GetClientRect scroll area")
+    let dpi = max(96, int(win.calls.dpi(scroll.viewport)))
+    let scale = float64(dpi) / 96.0
+    var frame: RECT
+    if win.calls.windowRect(scroll.viewport, addr frame) == 0:
+      nativeError("GetWindowRect scroll area")
+    # The borderless viewport's full width is stable whether its old bar is visible.
+    let width = float64(frame.right - frame.left) / scale
+    let height = float64(client.bottom - client.top) / scale
+    if width <= 0 or height <= 0: continue
+    let bar = overlayBarThickness(dpi)
+    var scope = initLayoutScope(win.current,
+      proc(entity: MountedEntity, available: DipSize): DipSize = win.measureControl(entity, available))
+    let bodyHandle = body.handle
+    let plan = planVerticalScroll(width, height, bar, scroll.offset,
+      proc(w: float64): tuple[width, height: float64] =
+        let size = scope.measureSubtree(bodyHandle, DipSize(width: w, height: 1_000_000))
+        (size.width, size.height))
+    if plan.contentOverflowsWidth: fail("scroll area content exceeds viewport width")
+    let rect = DipRect(width: plan.viewportWidth, height: max(height, plan.contentHeight))
+    let boxes = scope.layoutSubtree(bodyHandle, rect, rect)
+    var positions: Table[NodeHandle, DipRect]
+    for box in boxes: positions[box.handle] = box.rect
+    for box in boxes:
+      if box.handle == bodyHandle: continue # host exclusively owns body position
+      let control = win.controls.getOrDefault(box.handle)
+      if control == nil: continue
+      let px = pixelEdges(box.rect, dpi)
+      let parent = pixelEdges(positions.getOrDefault(control.entity.parent), dpi)
+      let w = max(0, px.right - px.left)
+      let h = max(0, px.bottom - px.top)
+      win.placeControl(control, (px.left - parent.left, px.top - parent.top, w, h),
+        (0, 0, w, h))
+    # The outer layout's sibling-order pass intentionally excludes this domain.
+    # Restore its own native z/tab order rather than HWND creation/hash-table order.
+    var siblings: Table[NodeHandle, seq[HWND]]
+    for box in boxes:
+      if box.handle == bodyHandle: continue
+      let control = win.controls.getOrDefault(box.handle)
+      if control != nil: siblings.mgetOrPut(control.entity.parent, @[]).add(control.window)
+    for children in siblings.values:
+      var previous: HWND
+      for window in children:
+        if win.calls.windowPos(window, previous, 0, 0, 0, 0,
+            0x0001'u32 or 0x0002'u32 or SWP_NOACTIVATE) == 0:
+          nativeError("SetWindowPos scroll area tab order")
+        previous = window
+    scroll.applyPlan(plan, scale)
+    # The content domain is not clipped to the viewport via a persistent region:
+    # the real viewport ancestor clips it, including after a scroll-only move.
+    win.showControl(body, true)
+
+proc applyScrollIntents(win: Win32Backend) =
+  let focused = win.scrollFocus
+  win.scrollFocus = nil
+  for scroll in win.scrolls.values:
+    if not scroll.attached or not scroll.published: continue
+    while scroll.hasIntent: scroll.applyIntent(scroll.takeIntent())
+    if focused != nil and focused != scroll.viewport and IsChild(scroll.content, focused) != 0:
+      var field, content: RECT
+      if GetWindowRect(focused, addr field) == 0 or GetWindowRect(scroll.content, addr content) == 0:
+        nativeError("GetWindowRect scroll focus")
+      scroll.noteReveal(float64(field.top - content.top) / scroll.scale,
+        float64(field.bottom - content.top) / scroll.scale)
+      scroll.applyIntent(scroll.takeIntent())
+
+proc scrollTurn(win: Win32Backend) =
+  try: win.applyScrollIntents()
+  except CatchableError as error:
+    if win.session != nil and win.session.ownsBackend(win.protocol):
+      win.session.faultBackendEffects(win.protocol, "scroll effects failed: " & error.msg)
+    raise error
+
 proc applyRowBoxes(win: Win32Backend, boxes: seq[ListRowBox], dpi: int32) =
   ## The only Position/Region/Show path for list row subtrees: commit apply,
   ## geometry apply and rollback replay all come through here. Rect, clip and DPI
@@ -3896,6 +4214,7 @@ proc layoutOverlays(win: Win32Backend, dpi: int) =
   # growing popover body would inflate the dialog it is anchored in.
   var levelEntities = win.current
   if win.popovers.len != 0: levelEntities = withoutPopoverBodies(win.current)
+  levelEntities = withoutScrollBodies(levelEntities)
   var scope = initLayoutScope(levelEntities,
     proc(entity: MountedEntity, available: DipSize): DipSize =
       win.measureControl(entity, available))
@@ -3975,6 +4294,7 @@ proc relayout*(win: Win32Backend, content: DipSize, dpi: int) =
   if win.popovers.len != 0:
     # Same exclusion for the page flow: bodies are laid out only while shown.
     page = withoutPopoverBodies(page)
+  page = withoutScrollBodies(page)
   let boxes = layoutTree(page, content,
     proc(entity: MountedEntity, available: DipSize): DipSize = win.measureControl(entity, available))
   var byHandle: Table[NodeHandle, LayoutBox]
@@ -4141,6 +4461,7 @@ proc relayout*(win: Win32Backend, content: DipSize, dpi: int) =
     # layoutOverlays keeps the flag when a bar step still needs a retry, so this
     # pass must not clear it unconditionally.
     win.layoutOverlays(dpi)
+  win.layoutScrollAreas()
   inc win.stats.layouts
   win.dirty = false
   win.listDirty = false
@@ -4228,6 +4549,64 @@ proc validateNavigation(win: Win32Backend, batch: UpdateBatch) =
   for count in children.values:
     if count != 1: fail("Win32 navigation requires one active page")
 
+proc preflightScrollGeometry(win: Win32Backend,
+    entities: Table[NodeHandle, MountedEntity]) =
+  var hasScroll = false
+  for entity in entities.values:
+    if entity.isScrollRole(UiRole.scrollArea): hasScroll = true
+  if not hasScroll: return
+  let domain = withoutScrollBodies(entities)
+  let outer = withoutPopoverBodies(domain)
+  let dpi = max(96, int(win.calls.dpi(win.host.windowHandle)))
+  let bar = overlayBarThickness(dpi)
+  var scope = initLayoutScope(entities,
+    proc(entity: MountedEntity, size: DipSize): DipSize = win.measureControl(entity, size))
+  proc validate(boxes: seq[LayoutBox]) =
+    for box in boxes:
+      let root = entities.getOrDefault(box.handle)
+      if not root.isScrollRole(UiRole.scrollArea): continue
+      let width = box.rect.width
+      if width <= 0: fail("scroll area requires positive content width")
+      for child in entities.values:
+        if child.parent == root.handle and child.isScrollRole(UiRole.scrollAreaContent):
+          let bodyHandle = child.handle
+          let plan = planVerticalScroll(width, box.rect.height, bar, 0.0,
+            proc(w: float64): tuple[width, height: float64] =
+              let extent = scope.measureSubtree(bodyHandle, DipSize(width: w, height: 1_000_000))
+              (extent.width, extent.height))
+          if plan.contentOverflowsWidth: fail("scroll area content exceeds viewport width")
+  var page = outer
+  for handle, entity in outer:
+    var node = entity
+    var depth = 0
+    while node.handle != NoHandle and depth <= MaxDepth:
+      if node.overlay.isSome:
+        page.del(handle)
+        break
+      node = outer.getOrDefault(node.parent)
+      inc depth
+  let context = win.host.context
+  validate(layoutTree(page, DipSize(width: context.contentWidth, height: context.contentHeight),
+    proc(entity: MountedEntity, size: DipSize): DipSize = win.measureControl(entity, size)))
+  var outerScope = initLayoutScope(outer,
+    proc(entity: MountedEntity, size: DipSize): DipSize = win.measureControl(entity, size))
+  var panelScope = initLayoutScope(domain,
+    proc(entity: MountedEntity, size: DipSize): DipSize = win.measureControl(entity, size))
+  for handle, entity in outer:
+    if entity.overlay.isSome:
+      let width = entity.overlay.get.overlayWidth
+      let size = outerScope.measureSubtree(handle, DipSize(width: width, height: 1_000_000))
+      let rect = DipRect(width: width, height: size.height)
+      validate(outerScope.layoutSubtree(handle, rect, rect))
+  for handle, entity in domain:
+    if entity.isScrollRole(UiRole.popoverContent):
+      let parent = entities.getOrDefault(entity.parent)
+      if parent.popover.isNone: continue
+      let width = parent.popover.get.popoverWidth
+      let size = panelScope.measureSubtree(handle, DipSize(width: width, height: 1_000_000))
+      let rect = DipRect(width: width, height: size.height)
+      validate(panelScope.layoutSubtree(handle, rect, rect))
+
 proc prepareStandardUi(win: Win32Backend,batch:UpdateBatch) =
   win.preparedFields.clear()
   win.preparedTheme=win.initialTheme
@@ -4240,6 +4619,59 @@ proc prepareStandardUi(win: Win32Backend,batch:UpdateBatch) =
       if op.kind==opRemove:removed.incl(op.handle)
   var entities:Table[NodeHandle,MountedEntity]
   for entity in win.navigationCandidates(batch.isDelta,removed):entities[entity.handle]=entity
+  var scrollMembers: Table[NodeHandle, seq[MountedEntity]]
+  for entity in entities.values:
+    scrollMembers.mgetOrPut(entity.parent, @[]).add(entity)
+  for entity in entities.values:
+    let root = entity.isScrollRole(UiRole.scrollArea)
+    let body = entity.isScrollRole(UiRole.scrollAreaContent)
+    if entity.handle in win.current and
+        (root != win.current[entity.handle].isScrollRole(UiRole.scrollArea) or
+         body != win.current[entity.handle].isScrollRole(UiRole.scrollAreaContent)):
+      fail("changing a scroll role requires a new key")
+    if entity.handle in win.current and win.current[entity.handle].parent != entity.parent:
+      let previous = win.controls.getOrDefault(entity.handle)
+      if previous != nil and win.scrollOwner(previous) != nil:
+        fail("moving a scroll content control across native parents requires a new key")
+    var inScroll = root
+    var ancestor = entity.parent
+    var depth = 0
+    while ancestor != NoHandle and depth <= MaxDepth:
+      let parent = entities.getOrDefault(ancestor)
+      if parent.isScrollRole(UiRole.scrollArea): inScroll = true
+      if root and (parent.kind == NodeKind.virtualList or parent.row.isSome):
+        fail("scroll areas inside virtualized rows are not supported")
+      ancestor = parent.parent
+      inc depth
+    if inScroll:
+      if entity.overlay.isSome or entity.popover.isSome or entity.select.isSome or
+          entity.kind == NodeKind.virtualList or entity.row.isSome:
+        fail("overlay, popup and virtualized domains inside scroll content are not supported")
+      if entity.handle in win.current and win.current[entity.handle].parent != entity.parent:
+        fail("moving a scroll content control across native parents requires a new key")
+    if root or body:
+      if entity.kind != NodeKind.column: fail("scroll area roles require columns")
+      if root:
+        if entity.props.layout.height.isNone or entity.props.layout.height.get.kind != dkFixed:
+          fail("scroll area requires fixed height")
+        let reason = scrollAreaHeightReason(entity.props.layout.height.get.value)
+        if reason.len != 0: fail(reason)
+        let children = scrollMembers.getOrDefault(entity.handle)
+        if children.len != 1 or not children[0].isScrollRole(UiRole.scrollAreaContent):
+          fail("scroll area requires exactly one content child")
+        var ancestor = entity.parent
+        var depth = 0
+        while ancestor != NoHandle and depth <= MaxDepth:
+          let parent = entities.getOrDefault(ancestor)
+          if parent.isScrollRole(UiRole.scrollArea): fail("nested scroll areas are not supported")
+          ancestor = parent.parent
+          inc depth
+      else:
+        if not entities.getOrDefault(entity.parent).isScrollRole(UiRole.scrollArea):
+          fail("scroll area content requires its viewport parent")
+        if scrollMembers.getOrDefault(entity.handle).len == 0:
+          fail("scroll area requires non-empty content")
+  win.preflightScrollGeometry(entities)
   # Validate both against the whole candidate before any HWND creation.
   # GroupBox cannot morph to/from a STATIC at a stable row identity. Reject
   # before native effects; callers change the group's key for that transition.
@@ -4300,6 +4732,50 @@ proc prepareStandardUi(win: Win32Backend,batch:UpdateBatch) =
           elif child.kind!=NodeKind.column or members.getOrDefault(child.handle).len!=0 or child.props.standardUi.isSome:
             fail("input addon supports text and layout spacers only")
         if texts!=1:fail("input addon requires exactly one text")
+  # Radio groups are real stock radio buttons with one accepted value. The
+  # accepted value is validated here as well: a caller that renders an option
+  # list which no longer contains the accepted value is refused instead of
+  # silently showing the first option.
+  # Stable native identity and role changes. This pre-pass compares the
+  # *accepted* old role with the candidate new role for every live entity before
+  # any native effect. A radio role on either side with any change (including
+  # to/from "no standard role" and across node kinds) is refused outright: the
+  # HWND keeps the button type and static class it was created with, so patching
+  # the metadata would silently leave behaviour behind the declared role.
+  for entity in entities.values:
+    if entity.handle notin win.controls: continue
+    let previous = win.controls[entity.handle].entity.props.standardUi
+    let candidate = entity.props.standardUi
+    let oldRole = if previous.isSome: some(previous.get.role) else: none(UiRole)
+    let newRole = if candidate.isSome: some(candidate.get.role) else: none(UiRole)
+    if oldRole == newRole: continue
+    if (oldRole.isSome and oldRole.get in {UiRole.radioGroup, UiRole.radioGroupItem}) or
+        (newRole.isSome and newRole.get in {UiRole.radioGroup, UiRole.radioGroupItem}):
+      fail("changing a radio role requires a new key")
+  for entity in entities.values:
+    if entity.props.standardUi.isNone: continue
+    let role = entity.props.standardUi.get.role
+    if role notin {UiRole.radioGroup, UiRole.radioGroupItem}: continue
+    if role == UiRole.radioGroup:
+      if entity.kind != NodeKind.column: fail("radio group must be a column")
+      var states: seq[RadioItem]
+      for child in members.getOrDefault(entity.handle):
+        if child.kind != NodeKind.checkbox or not isRadioItemRole(child):
+          fail("radio group only supports direct radio options")
+        states.add(radioState(child))
+      let reason = radioSelectionReason(states, entity.props.control.radioValue.get(""))
+      if reason.len != 0: fail(reason)
+    else:
+      if entity.kind != NodeKind.checkbox: fail("radio option must be a check control")
+      if entity.parent == NoHandle or entity.parent notin entities:
+        fail("radio option requires its radio group")
+      let group = entities[entity.parent]
+      if not isRadioGroupRole(group): fail("radio option requires its radio group")
+      let accepted = group.props.control.radioValue.get("")
+      let optionValue = entity.props.control.radioValue.get("")
+      if accepted.len != 0 and optionValue != accepted and
+          entity.props.control.checked.get(false):
+        fail("radio option cannot be accepted outside its group")
   win.preparedTheme=resolveTheme(entities,win.initialTheme)
   win.preparedFields=resolveFields(entities)
 
@@ -4509,6 +4985,7 @@ proc apply(win: Win32Backend, batch: UpdateBatch) =
   win.applyOverlayGeometry()
   if win.overlayDirty: needsLayout = true
   win.applyFields()
+  win.maintainRadioGroups()
   if needsLayout and batch.ops.len > 0:
     let ctx = win.host.context
     # Commit-apply entry: candidate frames stay prepared until the real accept.
@@ -4780,13 +5257,14 @@ proc maintainFocus(win: Win32Backend) =
   if not win.theme.isShadcn or highContrastActive() or target==nil or
       GetForegroundWindow()!=win.host.windowHandle or
       GetAncestor(target,2)!=win.host.windowHandle or
-      role.isNone or role.get notin {UiRole.button,UiRole.input,UiRole.textarea,UiRole.checkbox,UiRole.switch} or
+      role.isNone or role.get notin {UiRole.button,UiRole.input,UiRole.textarea,
+        UiRole.checkbox,UiRole.switch,UiRole.radioGroupItem} or
       IsWindowVisible(target)==0 or IsWindowEnabled(target)==0 or
-      (role.get in {UiRole.button,UiRole.checkbox,UiRole.switch} and
+      (role.get in {UiRole.button,UiRole.checkbox,UiRole.switch,UiRole.radioGroupItem} and
         (SendMessageW(target,0x0129,0,0) and 1)!=0):
     hideFocusRing(win.focusAdornment)
     return
-  if role.get in {UiRole.checkbox,UiRole.switch}:
+  if role.get in {UiRole.checkbox,UiRole.switch,UiRole.radioGroupItem}:
     let glyph=checkMetrics(role.get,standardSize(target))
     showFocusRing(win.focusAdornment,win.host.windowHandle,target,
       standardFocusColor(win.theme,target),win.calls,radiusDip=glyph.radius,
@@ -4826,6 +5304,7 @@ proc safeListTurn*(win: Win32Backend) =
   win.publishListFacts()
   discard win.session.drainRowRequests()
   win.listGeometry()
+  win.scrollTurn()
   win.maintainFocus()
   win.maintainLive()
   win.reportError()
@@ -4868,6 +5347,7 @@ proc nativeTurn(win: Win32Backend) =
   win.overlayTurn()
   win.selectTurn()
   win.popoverTurn()
+  win.scrollTurn()
   win.maintainFocus()
   win.maintainLive()
 proc tick(win: Win32Backend) =
@@ -5093,6 +5573,19 @@ when defined(leafProtocolProbes):
   proc popoverCountForTest*(win: Win32Backend): int =
     ## Probe-only receipt: how many owned panel hosts the backend still keeps.
     win.stats.livePopovers
+
+  proc controlBindingForTest*(win: Win32Backend, handle: NodeHandle): uint64 =
+    ## Probe-only: the current native binding generation of one live control, so
+    ## an envelope can be built that the session really accepts.
+    win.checkOwner()
+    let control = win.controls.getOrDefault(handle)
+    if control == nil: 0'u64 else: control.binding
+
+  proc popoverPublishedRectForTest*(win: Win32Backend, handle: NodeHandle): bool =
+    ## Probe-only receipt: was a panel rectangle ever PUBLISHED for this root?
+    ## A placed-but-not-shown panel must not be reported as published.
+    win.checkOwner()
+    win.popoverRects.hasKey(handle)
 
   proc popoverStateForTest*(win: Win32Backend, handle: NodeHandle):
       Win32Popover =

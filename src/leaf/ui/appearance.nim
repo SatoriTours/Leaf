@@ -53,12 +53,19 @@ type UiCheckColors* = object
 
 proc checkAppearance*(mode: UiColorMode, role: UiRole, surface: SrgbColor,
     checked = false, disabled = false, invalid = false): UiCheckColors =
-  if role notin {UiRole.checkbox,UiRole.switch} or (invalid and role==UiRole.switch):
+  if role notin {UiRole.checkbox,UiRole.switch,UiRole.radioGroupItem} or
+      (invalid and role!=UiRole.checkbox):
     raise newException(ValueError,"unsupported check appearance")
   let p=neutralPalette(mode)
   var fill=surface
   var border,mark: SrgbColor
-  if role==UiRole.checkbox:
+  if role==UiRole.radioGroupItem:
+    # Neutral radio: the ring carries the state, the inner dot is the mark.
+    # An unchecked radio keeps the input border, a checked one turns primary.
+    if mode==UiColorMode.dark: fill=composite(withAlpha(p[UiColorToken.input],0.3),surface)
+    border=if checked:p[UiColorToken.primary] else:composite(p[UiColorToken.input],fill)
+    mark=p[UiColorToken.primary]
+  elif role==UiRole.checkbox:
     if mode==UiColorMode.dark: fill=composite(withAlpha(p[UiColorToken.input],0.3),surface)
     if checked: fill=p[UiColorToken.primary]
     border=if checked:p[UiColorToken.primary] else:composite(p[UiColorToken.input],fill)

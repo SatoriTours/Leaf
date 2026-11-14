@@ -4,8 +4,8 @@
 import std/[tables, math, options]
 from ./styles import MaxStyleNumber, normalizeProps
 import ./[core, ui_contract, overlay_protocol, select_protocol,
-  popover_protocol]
-export select_protocol, popover_protocol
+  popover_protocol, scroll_area_protocol, radio_group_protocol]
+export select_protocol, popover_protocol, scroll_area_protocol, radio_group_protocol
 import ./ui/tokens
 import ./ui/[skeleton_component, spinner_component]
 export skeleton_component, spinner_component
@@ -121,6 +121,59 @@ proc switch*(label: string, checked: bool, onChange: Callback = nil,
   core.ui(NodeKind.toggle,key=key,text=label,disabled=disabled,
     onChange=(if disabled:nil else:onChange),attributes=attrs,
     styles=style({"height":"20"}))
+
+proc radioItem(value, label, key: string, disabled, checked: bool,
+    handler: Callback): Node =
+  var attrs = attributes(UiRole.radioGroupItem)
+  attrs["radio_value"] = value
+  attrs["checked"] = $checked
+  core.ui(NodeKind.checkbox, key=key, text=label, disabled=disabled,
+    onChange=(if disabled or handler == nil: nil else: handler),
+    attributes=attrs, styles=style({"height":"20"}))
+
+proc radioRequest(value: string, handler: Callback): Callback =
+  ## A radio option never owns the business callback: activation becomes one
+  ## typed change request carrying the declared option value.
+  if handler == nil: return nil
+  let target = handler
+  result = proc(e: Event) =
+    target(Event(kind: change, value: value, checked: true))
+
+proc radioGroupItem*(value, label: string, key = "", disabled = false): Node =
+  ## One declared option of the enclosing radio group. The group owns the
+  ## accepted value and the single change handler; an option is never
+  ## interactive on its own and carries no boolean business callback.
+  radioItem(value, label, key, disabled, false, nil)
+
+proc radioGroup*(items: openArray[Node], value: string, label = "", key = "",
+    disabled = false, onChange: Callback = nil): Node =
+  ## Controlled vertical single selection over real native radio buttons.
+  ## The accepted value is state held by the caller; an empty value means
+  ## nothing is selected, and a click or Space key only requests a value.
+  ## Options must be non-empty and unique, and an accepted value that no longer
+  ## exists is refused instead of silently falling back to the first option.
+  var states: seq[RadioItem]
+  for item in items:
+    if item == nil: fail("radio group requires standard options")
+    let props = normalizeProps(item)
+    if props.standardUi.isNone or props.standardUi.get.role != UiRole.radioGroupItem:
+      fail("radio group requires standard radio options")
+    let optionValue = props.control.radioValue.get("")
+    states.add(RadioItem(value: optionValue, enabled: not (item.disabled or disabled),
+      checked: value.len != 0 and optionValue == value))
+  let reason = radioSelectionReason(states, value)
+  if reason.len != 0: fail(reason)
+  var options: seq[Node]
+  for index, item in items:
+    let optionValue = states[index].value
+    options.add(radioItem(optionValue, item.text, item.key,
+      item.disabled or disabled, optionValue == value,
+      radioRequest(optionValue, onChange)))
+  var attrs = attributes(UiRole.radioGroup)
+  attrs["radio_value"] = value
+  core.ui(NodeKind.column, key=key, text=label, children=options,
+    disabled=disabled, styles=style({"gap":"12", "width":"full"}),
+    attributes=attrs)
 
 proc theme*(mode: UiColorMode, child: Node, key = ""): Node =
   ## Explicit window-root configuration, not a nested/local theme component.
@@ -497,6 +550,39 @@ proc popoverContent*(children: seq[Node], key = ""): Node =
   core.ui(NodeKind.column, key = key, children = children,
     styles = style({"width": "full", "padding": "16", "gap": "8"}),
     attributes = attributes(UiRole.popoverContent))
+
+proc scrollAreaContent*(children: seq[Node], key = ""): Node =
+  ## The single scrolling content subtree. Ordinary columns/cards/fields and
+  ## native EDIT controls live here; nothing is virtualized, so the whole subtree
+  ## stays mounted and scrolling only moves geometry.
+  for child in children:
+    if child == nil: fail("scroll area content cannot hold a nil child")
+  core.ui(NodeKind.column, key = key, children = children,
+    styles = style({"width": "full", "gap": "8"}),
+    attributes = attributes(UiRole.scrollAreaContent))
+
+proc scrollArea*(content: Node, height: float64, key = ""): Node =
+  ## Bounded vertical viewport with a persistent content subtree. First slice:
+  ## vertical only, a real native viewport with the system scrollbar, no nested
+  ## scroll area (typed refusal, never a silent clip) and no horizontal scroll.
+  if content == nil or content.kind != NodeKind.column:
+    fail("scroll area requires standard content")
+  let contentProps = normalizeProps(content)
+  if contentProps.standardUi.isNone or
+      contentProps.standardUi.get.role != UiRole.scrollAreaContent:
+    fail("scroll area requires standard content")
+  if content.children.len == 0:
+    fail("scroll area requires non-empty content")
+  let reason = scrollAreaHeightReason(height)
+  if reason.len != 0: fail(reason)
+  for child in content.children:
+    let childProps = normalizeProps(child)
+    if childProps.standardUi.isSome and childProps.standardUi.get.role in
+        {UiRole.scrollArea, UiRole.scrollAreaContent}:
+      fail("nested scroll areas are not supported")
+  core.ui(NodeKind.column, key = key, children = @[content],
+    styles = style({"height": $height, "width": "full"}),
+    attributes = attributes(UiRole.scrollArea))
 
 proc popover*(trigger: Node, content: Node, open = false,
     side = PopoverSide.bottom, align = PopoverAlign.alignStart,

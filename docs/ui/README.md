@@ -43,6 +43,7 @@ Button 支持 default／destructive／outline／secondary／ghost／link、norma
 | Status／Alert 实时区域 | 内部基础层已验收；Spinner 已验收，Alert 已接入待本轮独立验收；读屏器现场及 150% DPI 未完成 |
 | 完整 Field 及其余 M1 | 未完成 |
 | 单选 Select：原生 owned 锚定弹层、受控 value／open、键鼠与 Dialog 内作用域 | 交互、发布边界、锚定、专用 UIA provider（展开／值／选择／禁用项／事件／退役）与真实截图已自测 |
+| 非模态 Popover：原生 owned 锚定内容浮层、受控 open、内容内原生控件与 Dialog 内作用域 | 交互、发布边界、锚定／避让、外点／Esc／Tab 请求、故障回执与资源归零、跨进程 UIA（自然树发现／非模态／Invoke／Value／Dialog 作用域）已自测；浅深／窄窗／Dialog 截图已生成但未做视觉复核 |
 | M2 浮层、M3 数据、M4 专项复杂组件 | 后续阶段，不宣称支持 |
 
 Button／Input／Textarea 的 3 DIP 外侧焦点环使用单一 owned、非激活、透点装饰窗，不侵占控件本体；Button 遵循系统隐藏焦点提示，Input／Textarea 保留编辑焦点提示。移动／失活先隐藏，普通 native turn 重新定位，释放使用现有资源所有权机制。原生 GDI 尚无 CSS 阴影／动效的等价实现，不宣称完整像素一致性。
@@ -570,3 +571,160 @@ Esc／Tab／外点、禁用项跳过与不可提交、长列表滚动、owner �
 显示失败回执、退役与资源归零）、`tests/windows/select_client.cs`（跨进程 UIA 与真实截图：
 弹层浅色／深色／Dialog 内上下文／页面）。仅 96 DPI 切片；150% 真实缩放、高对比、IME、真实读屏器
 与完整上游组件集仍未完成。
+
+## Popover（原生非模态锚定内容浮层首片）
+
+`examples/ui_controls/popover.nim` 是独立入口。面板是**真实 owned 非模态窗口**
+（`WS_POPUP|WS_CAPTION`，owner 为触发器所在顶层窗口）：不裁剪父容器、不禁用 owner、不全局置顶、
+不进入任务栏、没有第二个消息泵；`WS_CAPTION` 只用于让 stock 代理暴露 `Window`+`WindowPattern
+(IsModal=false)`，客户端区仍是整窗。内容用既有标准子树（Button／Input／Label／Select 等），
+不是把 Select 列表改造成通用容器，也不是把模态 Dialog 改造成全局宿主。
+
+    let node = standard.popover(
+      standard.popoverTrigger("打开", key = "pp-trigger"),
+      standard.popoverContent(@[
+        standard.label("提示", key = "pp-label"),
+        standard.input(acceptedText, key = "pp-edit"),
+        standard.popoverClose("关闭", key = "pp-close")], key = "pp-body"),
+      open = acceptedOpen, name = "面板", key = "pp",
+      onOpenChange = proc(e: Event) = acceptedOpen = e.open)   # 开／关请求
+
+
+> **重建说明（2026-11-14，用户明确授权）**：自下一节起的 Popover 尾段与整个 ScrollArea 章节是
+> **依已验合同与现存证据重建**的内容，**不是**旧原文的逐字恢复。旧文件为 698 行、`sha256=58f5bb66…`，
+> 该版本在工具 50KB 有界读取后被回写截断而丢失，未在可达范围内找到权威副本；旧 SHA 不再成立。
+>
+> 重建依据：Popover 计划与 `popover_protocol.nim`、Popover 原生/共享测试与真实入口、
+> `m2-scrollarea-result.json` 与 ScrollArea 计划、独立报告 `m2-scrollarea-independent-review.md`、
+> 真实 API（`ui.nim` 的 `popover`/`scrollArea`、`scroll_area_protocol.nim`、
+> `backends/win32/scroll_area_host.nim`）以及本任务早期对旧文件的有界读取片段。
+> 本文件当前 sha256 记录在外部证据索引；未声称恢复旧 SHA。
+
+### 事务与请求
+
+`open` 完全受控；`openChange`（`Event.open=false`）只是请求。触发器、Esc、外点、关闭部件、Tab
+边界与系统关闭都只登记一次请求；调用方忽略时面板与原生 EDIT 保留、accepted 状态不变，不偷偷销毁
+窗口，也不把同一请求重复投递。面板发布发生在接受 revision 之后的普通 turn：面板／浮层窗口的创建、显示与焦点效果
+不在 `prepare/apply` 中执行；这不表示 prepare 不创建任何控件 HWND。旧实例的排队事件不会更新同 key 的新实例（绑定与 revision 在派发前复核）。
+
+### 键盘、焦点与作用域
+
+面板打开后聚焦首个合法内容控件，没有可聚焦项时聚焦面板本身。Esc、外点与显式关闭后，若仍拥有前台
+则恢复到触发器或确定的回退目标；失去应用前台时不抢回。Tab／Shift+Tab 在内容内顺序移动，到边界时
+请求关闭并让位给 owner 的合法后继／前驱；调用方若忽略该关闭请求，面板保持显示且不强迫焦点回来
+（这是本切片的显式原生非模态策略，不声称与上游逐键等价）。嵌套 Popover 在首片显式拒绝；内容中的
+Select 打开时第一次 Esc 只作用于 Select，其关闭后的 Esc 才请求关闭 Popover；Popover 可以位于
+Dialog 内，所有目标仍受最顶层模态域约束，外层关闭按后进先出退役，不解除仍存在的外层模态禁用。
+
+### 锚定与几何
+
+默认请求下方、起始边对齐；`sideOffset` 默认 4 DIP（上限 64），宽度 0 表示默认 288 DIP（上游
+`w-72`，允许 160..720），面板与工作区保持 16 DIP 边距。请求侧放不下时按可用空间翻转到另一侧；
+内容在目标宽度下测量，候选超出预算时整个 revision 被拒绝，不发布半截面板。owner 移动、滚动、
+最小化或隐藏时不出现悬空或不可达浮层，也不复用缓存矩形；布局与主题变化保留活跃 EDIT 的
+HWND／草稿／选区／Undo（关闭再开不承诺跨销毁 Undo）。
+
+### 失败回执与资源
+
+创建、定位、显示、销毁逐步保留真实回执：创建失败完整回滚（class 与 cookie 回执释放、不跟踪半开
+host，恢复路径是新实例），显示失败不计「已显示」；真实消息泵中的显示失败经 tick 使后端
+fault／冻结事件，runNative 清理并向应用入口抛出，不能承诺应用内下一 turn 自动恢复。
+底层宿主／重绘债的可重试性不等于应用级恢复；销毁失败保留真实失败回执。最终 dispose 后 `livePopovers`、`liveWindows`、`liveFonts`、`liveRoots` 归零。
+
+### 验证入口
+
+`examples/ui_controls/popover.nim` 是独立入口（页面、Dialog 内表单、内容内 Select、接受与拒绝关闭、
+浅深／窄窗）；`tests/windows/popover_client.cs` 是独立编译的 CLR UIA 客户端，用自然树发现触发
+Button 与命名非模态面板，核对名称／角色／`WindowPattern.IsModal=false`／Invoke／Value 与受控状态；
+`tests/windows/test_win32_popover.nim` 现有 35 项原生用例覆盖上述请求、作用域、锚定、故障回执与
+资源归零。
+
+### 已知差异与未验证项
+
+只实现非模态首片：不提供 modal 参数、菜单项导航、Tooltip／HoverCard、任意递归 Popover，也没有
+动画、CSS 阴影或自绘箭头；Tab 边界策略是 Leaf 的首片取舍，不是上游逐键等价。视觉方面只在
+96 DPI 下生成浅／深／窄窗／Dialog 组合截图，本实现端无图像能力、不以像素脚本代替视觉复核；
+150% DPI、高对比、IME、真实读屏器、触摸与全平台未验证。清单记录的参考路径为
+`apps/v4/registry/new-york-v4/ui/popover.tsx`，参考 hash 为 `sha256=3f99d3ad…0757`；
+该记录仅反映清单与保存副本一致，来源与权威性仍未核实，本轮未重新获取，不视为来源核验通过。
+
+## ScrollArea（纵向有限视口首片）
+
+```nim
+let form = standard.scrollArea(
+  standard.scrollAreaContent(@[
+    standard.field(@[standard.label("名称"),
+      standard.input(name, key = "name", onChange = onNameChange)]),
+    standard.button("保存", onClick = onSave)
+  ], key = "form-content"), height = 240, key = "form-viewport")
+```
+
+Win32 标准主题声明 `saVertical`：真实带系统纵向滚动条的 HWND viewport，唯一的持久正文 HWND
+承载控件。滚动只移动正文，不调用用户 view 或重建 EDIT；支持滚轮、系统拖拽、viewport 聚焦时的
+方向／PageUp／PageDown／Home／End，以及 Tab／焦点进入离屏字段时显露。多行 EDIT 保留自身滚轮
+处理，编辑器按键不被容器抢占。正文缩短／窗口改变后 offset 夹紧，短内容不显示滚动条。
+
+高度必须有限且在 `(0, 20000]` DIP；必须有且仅有一个非空 `scrollAreaContent`。水平溢出、嵌套
+ScrollArea、正文内的 Dialog／Popover／Select 弹出域或 virtualList、虚拟行内的 ScrollArea
+在候选阶段明确拒绝。稳定身份不能跨原生父域搬移；改父级时需要新身份。它不是大列表虚拟化替代品，
+也不提供水平滚动、惯性触摸或自绘覆盖式滚动条。非 Win32 标准主题或未声明能力的后端拒绝使用。
+
+`examples/ui_controls/scroll_area.nim` 是真实入口：页面表单、浅深切换、Dialog 内显式 240 DIP
+正文、常驻标题／页脚、内存保存拒绝与恢复。Dialog 仍保留原有尺寸和超高拒绝策略；不会自动给所有
+Dialog 包滚动。外层 Popover 的内容域也可放有限 ScrollArea，不等于支持正文再嵌套弹出域。
+
+失败语义：原生滚动条写入后会读回；内容移动失败时尝试恢复原生滚动条，offset/range 只在效果成功后
+发布。回滚失败保留原始错误及 secondary，不伪称原生恢复成功。普通滚动 turn 的错误冻结后端并沿
+既有运行边界传播／清理；提交阶段的布局错误沿既有候选 apply／rollback 契约处理。单独 host 用例中
+捕获异常并重试，不等于应用会忽略错误继续接受业务事件。
+
+验证仍按证据限定：当前目标为 Windows 96 DPI 的有限表单切片；150% DPI、高对比、IME、真实读屏器、
+触摸和全平台尚未验证。截图需有界等待窗口输入空闲及正常绘制，不以强制重绘制造通过图，也不把这一
+同步条件当即时首帧性能承诺。受限验收范围记录在外部统一证据索引（独立共享 12/0、布局 39/0、
+virtualList 17/0、实际入口 22/0，复用同源原生 18/0、Popover 35/0），不覆盖上述未验证项，
+不能据此宣称完整 M2 已完成。
+
+## RadioGroup（原生纵向单选组首片）
+
+```nim
+let value = ctx.value(state).shipping            # 调用方持有的已接受值
+standard.radioGroup(@[
+  standard.radioGroupItem("standard", "标准配送", key = "ship-standard"),
+  standard.radioGroupItem("express", "加急配送", key = "ship-express"),
+  standard.radioGroupItem("pickup", "自取（暂停）", key = "ship-pickup", disabled = true)
+], value, key = "shipping", label = "配送方式",
+  onChange = proc(e: Event) = updateAccept(e.value))   # Event.value 是选项值
+```
+
+每个选项都是真实 stock `BUTTON` + `BS_RADIOBUTTON`（不是 `BS_AUTORADIOBUTTON`、不是 Checkbox，
+也不用普通按钮伪造），因此进程外 UIA 角色是 RadioButton。刻意不用自动互斥类型：系统不得越过受控
+接受事务清除兄弟项，`value` 是唯一选择权威。点击／Space／UIA SelectionItem.Select 只投递一次
+`change` 请求并带选项值；回调不更新 `value` 时，该轮 apply 依据已接受值恢复原生勾选状态，被拒绝的
+候选不会污染下一次选择。重复激活已接受项不重复提交；disabled 选项可以被接受但永不响应用户输入。
+
+键盘与焦点：每个组只有一个 Tab 入口（已接受且可用项，否则第一可用项，全禁用则无 Tab stop）；
+Up／Down 在组内循环并跳过禁用项，Home／End 到首尾可用项，方向键只移动焦点、不改变选择，Space
+和鼠标才请求选择；Tab／Shift+Tab 照常离组。焦点落入 stock 单选会触发 USER32 的自动勾选，后端在
+同一条消息内按已接受值恢复并抑制该伪通知，因此 Tab 到某选项不会改变业务值。组以 `WS_GROUP`
+划界，兄弟组互不清除。
+
+稳定身份与角色变化：已接受身份的新角色与旧角色会被比较；只要任一侧是 radioGroup／radioGroupItem
+而角色发生变化（含变为"无标准角色"、组角色退出），就在任何原生副作用之前拒绝并要求新 key。
+check→radio 与 radio→check 两个方向同样拒绝。NodeKind 改变在本运行时是新的原生身份，由组结构
+校验在副作用前拒绝，不当作"保持身份换角色"处理。
+
+约束：非空且唯一的选项值；组 `value` 为 `""` 表示未选择，非空但不在选项中、空组、重复值、把普通
+Checkbox 或其他部件当选项、候选里移除已接受选项都会在构造或 prepare 阶段拒绝，不会悄悄选第一项；
+prepare 拒绝后仍保持原有接受树、HWND 身份、勾选与焦点，下一次合法候选正常应用。仅纵向单组单值；
+不做横向／RTL、非受控模式或整套 Form。
+
+受限项：视觉为 Neutral 近似（16 DIP 圆环，选中为主色圆环加 6 DIP 内点），未逐像素核对上游
+`radio-group.tsx`（来源 SHA 仍未解决），因此不声称与上游逐像素一致。`examples/ui_controls/radio_group.nim`
+是真实入口（接受／拒绝、禁用项、初始未选择组、浅深切换、窄窗、Dialog＋ScrollArea 组合）。真实入口
+客户端在 Dialog 内实际执行点击接受、拒绝保持、方向键焦点与组隔离，并按"主窗∪owned Dialog"的窗口
+并集截图（窄主窗下同样完整），关闭后核对外层无额外顶层窗口。当前只在 Windows 96 DPI 验证；
+150% DPI、高对比、IME、读屏器、触摸、全平台与完整 M2 未验证。
+
+状态：代码功能已通过 **Windows 96 DPI 受限独立复验**（共享 12/0、原生 11/0、实际入口 75/0）；
+主控已目视核查最终自测入口的 9 张截图，并按独立审查清单修正文档措辞。
+这是本切片的受限验收，不代表全量测试、完整 M2 或上述未验证项通过。

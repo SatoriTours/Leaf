@@ -64,6 +64,9 @@ type
     enabled*: Option[bool]
     checked*: Option[bool]
     progress*: Option[float64]
+    radioValue*: Option[string]
+      ## Declared option value of one radio item, or the accepted value of a
+      ## radio group. Absent for every other control.
     variant*: Option[ControlVariant]
     resetToken*: Option[uint64]
     multiline*: Option[bool]
@@ -251,8 +254,10 @@ proc decorationFromStyles(styles: Styles): DecorationProps =
 proc attributeAllowed(kind: NodeKind, name: string): bool =
   if name in ["ui_role", "ui_variant", "ui_size", "ui_invalid", "ui_loading", "ui_color_mode", "ui_opacity", "ui_angle"]: return true
   case kind
-  of NodeKind.button, NodeKind.tag, NodeKind.text, NodeKind.column, NodeKind.row: name == "variant"
-  of NodeKind.checkbox, NodeKind.toggle: name == "checked"
+  of NodeKind.button, NodeKind.tag, NodeKind.text, NodeKind.row: name == "variant"
+  of NodeKind.column: name in ["variant", "radio_value"]
+  of NodeKind.checkbox: name in ["checked", "radio_value"]
+  of NodeKind.toggle: name == "checked"
   of NodeKind.progress: name == "value"
   of NodeKind.input: name in ["input_reset_token", "variant", "multiline"]
   else: false
@@ -291,6 +296,8 @@ proc controlFrom(node: Node): ControlProps =
   of NodeKind.text, NodeKind.column, NodeKind.row:
     if "variant" in node.attributes:
       result.variant = some(styleVariant(node.attributes["variant"]))
+    if "radio_value" in node.attributes:
+      result.radioValue = some(node.attributes["radio_value"])
   of NodeKind.input:
     result.value = some(node.text)
     if "multiline" in node.attributes:
@@ -306,6 +313,8 @@ proc controlFrom(node: Node): ControlProps =
     result.enabled = some(not node.disabled)
     if "checked" in node.attributes:
       result.checked = some(styleChecked(node.attributes["checked"]))
+    if "radio_value" in node.attributes:
+      result.radioValue = some(node.attributes["radio_value"])
   of NodeKind.progress:
     if "value" in node.attributes:
       result.progress = some(styleProgress(node.attributes["value"]))
@@ -390,6 +399,8 @@ proc standardUiFrom(node: Node): Option[StandardUiProps] =
         UiRole.selectTrigger: NodeKind.button
     of UiRole.select, UiRole.selectContent: NodeKind.column
     of UiRole.selectItem: NodeKind.row
+    of UiRole.radioGroup: NodeKind.column
+    of UiRole.radioGroupItem: NodeKind.checkbox
     of UiRole.popover, UiRole.popoverContent: NodeKind.column
     of UiRole.popoverTrigger, UiRole.popoverClose: NodeKind.button
     else: NodeKind.column
@@ -437,6 +448,19 @@ proc standardUiFrom(node: Node): Option[StandardUiProps] =
     fail("select content cannot be disabled; disable the select or one item")
   if props.role == UiRole.selectItem and node.children.len != 0:
     fail("select item cannot contain children")
+  if props.role == UiRole.radioGroup:
+    # The accepted value is explicit; "" is the real "nothing selected" state
+    # and is never replaced by the first option.
+    if "radio_value" notin node.attributes:
+      fail("radio group requires its accepted value")
+  elif props.role == UiRole.radioGroupItem:
+    if "radio_value" notin node.attributes:
+      fail("radio option requires its value")
+    if node.attributes["radio_value"].len == 0:
+      fail("radio option value cannot be empty")
+    if node.children.len != 0: fail("radio option cannot contain children")
+  elif "radio_value" in node.attributes:
+    fail("radio option value requires a radio role")
   if props.role in {UiRole.popoverTrigger, UiRole.popoverContent, UiRole.popoverClose} and
       (node.handler(click) != nil or node.handler(change) != nil or
        node.handler(submit) != nil or node.handler(back) != nil or
@@ -491,7 +515,7 @@ proc normalizeProps*(node: Node): NormalizedProps =
   result.standardUi = standardUiFrom(node)
   if result.standardUi.isSome and (result.standardUi.get.role in UiGroupRoles or
       result.standardUi.get.role in {UiRole.spinner, UiRole.dialog, UiRole.alertDialog,
-        UiRole.select, UiRole.selectTrigger, UiRole.popover}):
+        UiRole.select, UiRole.selectTrigger, UiRole.popover, UiRole.radioGroup}):
     result.control.label = some(node.text)
     result.accessibility.label = some(node.text)
 

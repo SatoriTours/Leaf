@@ -46,8 +46,15 @@ type
     requestPending*: bool # one request per input, never re-sent each turn
     needsLayout*: bool
     scale*: float64
+    needsThemeRepaint*: bool
+      ## A theme change still owes the panel and its children a repaint. It stays
+      ## set when the repaint itself fails, so the next ordinary turn retries the
+      ## real repaint instead of treating the new theme as already painted.
 
 const
+  RdwInvalidate = 0x0001'u32
+  RdwErase = 0x0004'u32
+  RdwAllChildren = 0x0080'u32
   WmEraseBackground = 0x0014'u32
   WmPaint = 0x000f'u32
   WmNcCalcSize = 0x0083'u32
@@ -91,10 +98,14 @@ proc wide(value: string): seq[WCHAR] =
 proc nativeError(operation: string) {.noreturn.} =
   fail(operation & " failed: Win32 error " & $lastError())
 
-proc surfaceFill(theme: NativeTheme): uint32 {.raises: [].} =
-  if theme == systemTheme: return 0x00ffffff'u32
-  try: colorRef(theme.palette.surface)
-  except CatchableError: 0x00ffffff'u32
+proc surfaceFill(theme: NativeTheme, window: HWND): uint32 {.raises: [].} =
+  ## Resolve the panel background through the SAME function the panel's children
+  ## use (skin.surfaceColor). Painting the panel from palette.surface while the
+  ## body resolved palette.canvas produced two different colors in one panel.
+  ## Returns an already converted COLORREF; callers must not convert again.
+  if theme == systemTheme: return colorRef(0x00ffffff'u32)
+  try: colorRef(surfaceColor(theme, window))
+  except CatchableError: colorRef(0x00ffffff'u32)
 
 proc ownerCheck(host: Win32Popover) {.raises: [CatchableError].} =
   if host == nil: fail("Win32 popover is nil")
@@ -145,7 +156,7 @@ proc paintPanel(host: Win32Popover, window: HWND, dc: HDC): bool {.raises: [].} 
   var rect: RECT
   try:
     if host.calls.clientRect(window, addr rect) == 0: return false
-    discard host.calls.setDCBrushColor(dc, colorRef(surfaceFill(host.theme)))
+    discard host.calls.setDCBrushColor(dc, surfaceFill(host.theme, window))
     let brush = host.calls.getStockObject(DcBrush)
     if brush == nil: return false
     discard host.calls.fillRect(dc, addr rect, cast[HBRUSH](brush))
@@ -276,14 +287,46 @@ proc openWindows*(host: Win32Popover) {.raises: [CatchableError].} =
       0, 0, 0, 0, host.ownerWindow, nil, host.instance,
       cast[pointer](host.cookie))
     if panel == nil: nativeError("CreateWindowExW popover panel")
+    # Record the real HWND receipt BEFORE any step that can fail: a refused
+    # surface mark must leave the window owned and cleanable instead of dropping
+    # it. The failure is raised with its own last error and the existing
+    # closeWindows rollback performs (and reports) the cleanup; nothing is
+    # destroyed and discarded in this branch, so the primary error cannot be
+    # overwritten by a cleanup error.
     host.windows.panel = panel
+    # The panel is a surface: mark it so the panel fill and every child resolve
+    # the same background (skin.surfaceColor walks up to this mark).
+    if markPanelSurface(panel, host.calls.setProp) == 0:
+      nativeError("SetPropW popover panel surface")
+    # A fresh window paints from scratch with the current theme.
+    host.needsThemeRepaint = false
 
 proc setTheme*(host: Win32Popover, theme: NativeTheme) {.raises: [CatchableError].} =
-  if host.theme == theme: return
-  host.theme = theme
-  host.needsLayout = true
+  when defined(leafProtocolProbes):
+    if host.theme != theme:
+      echo "PANELTHEME from=", host.theme, " to=", theme
+  if host.theme != theme:
+    host.theme = theme
+    host.needsLayout = true
+    host.needsThemeRepaint = true
+  elif not host.needsThemeRepaint: return
   if host.windows.panel != nil:
-    discard host.calls.invalidate(host.windows.panel, nil, 1)
+    # A surface-only invalidation leaves the panel's body and text children with
+    # their old pixels (the same defect already fixed for the modal surface in
+    # overlay_host). Repaint the panel AND every child, only when the theme
+    # really changed or a previous repaint failed, so an ordinary turn stays
+    # paint-free.
+    when defined(leafProtocolProbes):
+      echo "PANELTHEME repaint hwnd=", uint64(cast[uint](host.windows.panel)),
+        " theme=", host.theme
+    # The theme is already updated here: a refused repaint is a real native
+    # failure and must be reported (the modal surface does the same). The debt
+    # stays recorded, so the next ordinary turn retries the repaint instead of
+    # claiming a themed panel it never painted.
+    if host.calls.redrawWindow(host.windows.panel, nil, nil,
+        RdwInvalidate or RdwErase or RdwAllChildren) == 0:
+      nativeError("RedrawWindow popover panel")
+    host.needsThemeRepaint = false
 
 proc applyProps*(host: Win32Popover, props: PopoverProps, theme: NativeTheme) {.raises: [CatchableError].} =
   host.props = props
@@ -431,3 +474,9 @@ proc closePanelWindow*(host: Win32Popover): ref CatchableError {.raises: [].} =
 proc resourcesReleased*(host: Win32Popover): bool {.raises: [].} =
   host != nil and host.windows.panel == nil and not host.windows.classRegistered and
     not host.windows.rootPublished
+
+when defined(leafProtocolProbes):
+  proc popoverReceiptsForTest*(): int {.raises: [].} =
+    ## Probe-only: how many cookie->host receipts this thread still holds. This
+    ## is the table the callback uses, not a mirror of the backend's counters.
+    popovers.len

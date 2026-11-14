@@ -22,7 +22,13 @@ proc win32Capabilities*(theme = systemTheme): BackendCapabilities =
     decorations: {},
     variants: {variantDefault},
     controls: {cfInputReset, cfInputMultiline})
+    # `scrollAreas` stays EMPTY until the real native viewport (WS_VSCROLL +
+    # persistent content window + wheel/scrollbar/Tab-reveal routing) is wired in
+    # this backend. Declaring the axis before the implementation would silently
+    # degrade a scroll area into a plain clipped column, which this project
+    # forbids; an undeclared axis is refused at prepare instead.
   if theme.isShadcn:
+    result.scrollAreas = {saVertical}
     result.standardUi = {low(UiRole)..high(UiRole)}
     # A real owned modal window with the in-application scrim is only available
     # with the shadcn surface; the system theme rejects it instead of drawing a

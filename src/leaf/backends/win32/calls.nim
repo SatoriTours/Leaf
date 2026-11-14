@@ -1,6 +1,10 @@
 ## Internal per-host call table. System defaults forward every call to Win32.
 import ./api
 
+{.push stdcall, dynlib: "user32.dll", importc, raises: [].}
+proc SetPropW(window: HWND, name: WidePtr, data: HANDLE): BOOL
+{.pop.}
+
 type Win32Calls* = object
   registerClass*: proc(windowClass: ptr WNDCLASSEXW): ATOM {.closure, raises: [CatchableError].}
   unregisterClass*: proc(name: WidePtr, instance: HINSTANCE): BOOL {.closure, raises: [CatchableError].}
@@ -77,6 +81,8 @@ type Win32Calls* = object
   setBkMode*: proc(dc: HDC, mode: int32): int32 {.closure, raises: [CatchableError].}
   redrawWindow*: proc(window: HWND, update: ptr RECT, region: HRGN,
     flags: UINT): BOOL {.closure, raises: [CatchableError].}
+  setProp*: proc(window: HWND, name: WidePtr, data: HANDLE): BOOL
+    {.closure, raises: [CatchableError].}
 
 proc systemWin32Calls*(): Win32Calls =
   result.registerClass = proc(windowClass: ptr WNDCLASSEXW): ATOM = RegisterClassExW(windowClass)
@@ -172,3 +178,5 @@ proc systemWin32Calls*(): Win32Calls =
   result.setBkMode = proc(dc: HDC, mode: int32): int32 = SetBkMode(dc,mode)
   result.redrawWindow = proc(window: HWND, update: ptr RECT, region: HRGN,
       flags: UINT): BOOL = RedrawWindow(window,update,region,flags)
+  result.setProp = proc(window: HWND, name: WidePtr, data: HANDLE): BOOL =
+    SetPropW(window,name,data)

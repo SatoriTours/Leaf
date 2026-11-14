@@ -7,7 +7,7 @@
 ## can honour. Callbacks, Node references and native pointers never appear here.
 import std/[tables, hashes, options, sets, unicode]
 import ./[core, styles, list_protocol, navigation_protocol, graphics, canvas_input,
-  overlay_protocol, select_protocol, popover_protocol]
+  overlay_protocol, select_protocol, popover_protocol, scroll_area_protocol]
 # `HostListProps` is a pure owned value; the backend stores the same type the
 # host wire uses, without importing `host_protocol` (which would be a cycle).
 export list_protocol, navigation_protocol
@@ -57,6 +57,11 @@ type
     ## an undeclared feature is rejected, never degraded into an inline panel.
     pfNonModal
 
+  ScrollAreaFeature* = enum
+    ## Explicit scroll-area behaviours a backend must declare. Required: an
+    ## undeclared feature is rejected, never degraded into an inline clip.
+    saVertical
+
   SelectFeature* = enum
     ## Explicit select behaviours a backend must declare. Required: an
     ## undeclared feature is rejected, never degraded into an inline list.
@@ -77,6 +82,9 @@ type
     controls*: set[ControlFeature]
     standardUi*: set[UiRole]
     overlays*: set[OverlayKind]
+    scrollAreas*: set[ScrollAreaFeature]
+      ## Real scrollable viewports a backend hosts; an undeclared axis is
+      ## rejected instead of turning hidden overflow into a fake scroll.
     selects*: set[SelectFeature]
     popovers*: set[PopoverFeature]
       ## Owned non-modal anchored panel features.
@@ -279,6 +287,7 @@ proc fullCapabilities*(): BackendCapabilities =
       variantWarning, variantInfo, variantOutline, variantGhost, variantSecondary},
     controls: {cfInputReset, cfInputMultiline},
     standardUi: {low(UiRole)..high(UiRole)},
+    scrollAreas: {saVertical},
     overlays: {low(OverlayKind)..high(OverlayKind)})
 
 proc supportsVariant(capabilities: BackendCapabilities, variant: ControlVariant,
@@ -317,6 +326,20 @@ proc checkTypedCapabilities*(nodeId:string,kind:NodeKind,props:NormalizedProps,c
 
   if props.standardUi.isSome and props.standardUi.get.role notin capabilities.standardUi:
     fail("backend does not support required standard UI role: " & nodeId)
+
+  if props.standardUi.isSome and
+      props.standardUi.get.role in {UiRole.scrollArea, UiRole.scrollAreaContent}:
+    # A scroll area is a real viewport, never a clip fallback: the backend must
+    # declare the axis and the root must carry an explicit finite height.
+    if saVertical notin capabilities.scrollAreas:
+      fail("backend does not support a vertical scroll area: " & nodeId)
+    if props.standardUi.get.role == UiRole.scrollArea:
+      if kind != NodeKind.column:
+        fail("scroll area must be a column: " & nodeId)
+      if props.layout.height.isNone or props.layout.height.get.kind != dkFixed:
+        fail("scroll area requires an explicit finite height: " & nodeId)
+      let reason = scrollAreaHeightReason(props.layout.height.get.value)
+      if reason.len != 0: fail(reason & ": " & nodeId)
 
   if kind notin capabilities.kinds:
     fail("backend does not support control " & kind.kindName & ": " & nodeId)

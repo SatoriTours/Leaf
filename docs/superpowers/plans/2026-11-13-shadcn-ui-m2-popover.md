@@ -49,3 +49,137 @@
 - 正式manifest先从本地生成实体→复制guest同字节→建前核missing/mismatch/extra→新目录构建→建后校漂移→GUI前复制EXE到主机并校SHA→运行后核源/EXE/清单。记录实际命令、资源对象/客户端源码与EXE完整SHA，保留旧失败；不能只有哈希无文件，也不能重建覆盖旧已验产物。
 - Windows沿现有control与SDK，GUI串行、有限timeout与唯一tag。每轮先收证据再清本轮cache/完成任务/核PID+启动时间+路径的自有闲置进程，保留EXE/源码/SDK/清单/截图，最后核磁盘（起点约13.53GiB）。旧Ready任务不动，不擅自改DPI/HC/IME/前台策略/认证或重启VM。
 - 约10–15分钟无有效落盘保存缺口；同类根因两轮不收敛交主控，不增加模型/探针无限重试。遇工具/profile/新架构授权阻塞立即保存短状态并结束回合，不能以联系工具不可用当许可。
+
+## 执行进展（Popover 故障语义切片）——**历史已撤回**
+
+> 本节关于"显示失败不 fault session／不冻结事件，可在同实例同 generation 重试"的结论**已作废**：
+> 那是测试捷径 `safeListTurn` 的观察。真实入口 `host.pump` → `safeTurn` → `bridge.nativeTick`
+> → `Win32Backend.tick` 在转发错误前调用 `faultBackendEffects`（fault + 事件冻结 + 应用退出）。
+> 当前合同见「第二轮」与 `docs/ui/README.md`。原文保留作历史记录，不删除。
+
+- 已改为可判别故障注入：单层 spy calls（panel class 前缀匹配、一次性拒绝、真实 nil HWND／FALSE／
+  SetLastError 5 与已命中计数），不再使用未注入的 systemWin32Calls。
+- 创建失败：改为"被拒 revision"场景（popover root 只存在于候选 revision），断言真实命中、产品
+  错误消息（含 `popover panel construction rolled back`）、class 注册与回执释放、无可达 host；
+  产品侧 `ensurePopoverHost` 失败即完整回滚（释放 class／cookie 回执、不跟踪半开 host），恢复
+  路径明确为新实例。
+- 显示失败：断言真实命中、产品错误消息、无"已显示"计数、不 fault session／不冻结事件、accepted
+  open 与面板／EDIT 保留，并在**同实例同 generation** 的下一普通 turn 重试成功且只计一次发布。
+- 销毁失败：拒绝目标限定为该面板 HWND（不再误伤子窗口），断言产品错误消息与回执保留，重试后
+  `liveWindows／liveFonts／liveRoots／livePopovers == 0`。
+- 负控（`m2-popover-negative5`）：移除回滚 + 吞掉显示失败检查后，恰好上述两用例失败
+  （`message.contains("... rolled back")`、`seamAttempts.unregister == 1`、
+  `popoverCountForTest() == 0`、`did not become visible`、`popoverShows` 两次计数），其余 28 项
+  通过，编译 exit 0／运行 exit 1 —— 证明断言可失败。
+- 正向（`m2-popover-native98`）：编译 exit 0、运行 exit 0、30 OK／0 FAILED，输入 hash 见外部
+  status；受影响回归 `m2-popover-regress-f1`：shared popover／dialog／select／components 全绿，
+  native dialog 72/1（与 HEAD 基线 `m2-popover-dialogbase-f1` 同项失败，属既有视觉样式问题）、
+  native select 3 项因 guest 前台加锁失败（`window could not be made foreground`，与本次改动无关）、
+  select lifecycle 4/4。
+- 文档：`docs/ui/README.md` 增加 Popover 章节与边界表行；上游 `popover.tsx`（sha256
+  `3f99d3ad…`）加入许可证 manifest，`test_ui_licenses` 通过（`m2-popover-licenses-f1`）。
+- 仍未完成：完整跨进程 UIA 客户端矩阵（`tests/windows/popover_client.cs` 尚不存在，仅有早期
+  自然树发现证据）、浅深／窄窗／Dialog 内实际截图与视觉复核、完整 Windows 套件整轮、150% DPI／
+  高对比／IME／读屏器现场；本轮不声明独立验收。
+
+## 执行进展（第二轮：故障合同与跨进程 UIA）
+
+- **显示失败改按真实入口取证**：此前用测试捷径 `safeListTurn` 得出的"不 fault／可同实例重试"不成立。
+  真实链路 `host.pump()` → `safeTurn()` → `bridge.nativeTick()` → `Win32Backend.tick()` →
+  `nativeTurn()` → `popoverTurn()` → `Win32Popover.show()` 中，`tick()` 在转发错误前调用
+  `faultBackendEffects`：session faulted、业务事件冻结，异常离开泵，`runNative` 清理后抛给应用
+  入口（真实应用退出）。用例改为断言该合同（含 `enqueue` 被拒、无 `popoverShows` 增量、
+  accepted open／面板／EDIT 保留），负控 `m2-popover-negative6`（去掉 `tick` 的 fault 包装）
+  恰好让该用例失败（`f.s.faulted`、`eventsFrozen`），其余 30 项通过。
+- **回滚失败路径**：新增 `UnregisterClassW` 一次性拒绝用例，断言错误消息含
+  `popover panel rollback failed` + `UnregisterClassW popover panel`、回执保留
+  （`popoverCountForTest() == 1`），随后 teardown 二次注销成功并四计数归零
+  （`m2-popover-native100`：编译 exit 0、运行 exit 0、31 OK／0 FAILED）。
+- **跨进程 UIA 客户端**：新增 `tests/windows/popover_client.cs`（`m2-popover-uia-f5`：应用构建 exit 0、
+  客户端构建 exit 0、运行 exit 0、55 OK／0 FAILED）：从应用／对话框元素子树自然发现面板
+  （位置记录 `scope-subtree`）、Window＋`IsModal=false`、非置顶、owner 不被禁用、stock
+  EDIT／Text／Button、SetValue 与回读、关闭即隐藏且草稿重开后保留、深色主题、窄 owner 仍在工作区、
+  Dialog 内面板归属 dialog 并随其关闭隐藏。截图 6 张（浅色／深色 2 张／窄窗／Dialog 内 2 张），
+  路径与 sha256 见外部 status；**未做视觉复核**（本会话无图像查看能力），不声明视觉通过。
+- **Select 三项前台失败的独立性**：同一会话用 HEAD 基线 `backend.nim` 复跑
+  `m2-popover-selectbase-f1`，结果与当前输入完全一致（10 OK／3 FAILED，三项均为
+  `window could not be made foreground`），且诊断记录 session=1、`userInteractive=true`、
+  `foregroundHwnd` 非零；因此该三项是环境前台加锁而非本改动回归。未改系统前台策略。
+- 文档按已证范围收窄：显示失败不再写成"可安全重试"，改为既有故障合同；仍缺 150% DPI、高对比、
+  IME、读屏器、截图视觉复核与完整 Windows 套件整轮。
+
+## 执行进展（第三轮：I1 主题重绘 + 证据绑定 + Minor）
+
+- **I1 先 RED 后修**：新增原生用例读真实屏幕像素（`WindowFromPoint` 归属 + 屏幕 DC 取色 +
+  主导色），修复前 `m2-popover-red-theme5` 为 **32 项中 1 FAILED**：`THEME panel light=16777215
+  dark=16777215 label dark=0 edit dark=1381653`，即深色下面板与正文仍是白底。探针进一步定位：
+  `PANELPAINT theme=shadcnDark fill=1513239` 说明面板自身已按深色重绘，但它的正文容器
+  （`Static` 覆盖整个客户区）从未重绘，且面板填充用 `palette.surface`、正文解析回
+  `palette.canvas`。修复（仅 popover/skin 最小面）：
+  1) `popover_host.setTheme` 由单窗口 `InvalidateRect` 改为
+     `redrawWindow(panel, nil, nil, RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN)`（与
+     `overlay_host.overlayTheme` 同族做法；只在主题真正变化时执行，普通 turn 不重绘）；
+  2) 面板窗口用 `skin.markPanelSurface` 标记为主 surface，`paintPanel` 改用
+     `skin.surfaceColor(theme, window)`（导出），使面板填充与正文/文字子控件同源；
+  3) 顺带修正面板填充的 COLORREF 二次转换（通道交换）。
+  修复后 `m2-popover-themefix4`：编译 exit 0、运行 exit 0、**32 OK／0 FAILED**；`THEME panel
+  light=16777215 dark=1513239 label dark=1513239 edit dark=2171169`，并断言浅→深→浅、EDIT
+  HWND/草稿/选区/Undo 状态不变。未改动系统按钮基线样式。
+- **证据绑定（I2/I3）**：新运行全部在跑前记录 12 个输入文件 sha256 + 全树 manifest sha256
+  （`eff0ee6d… files:11624`）、nim/gcc/csc 版本、构建命令、EXE sha256、编译与运行退出码、
+  跑后输入漂移（空）。A/B 基线改为**显式换入 HEAD 三文件（backend/skin/popover_host）→ 校验
+  哈希 → 跑套件 → 换回并校验当前哈希**：`m2-popover-ab-head-f3` 换入 `f0e9452b…/c9bca486…/
+  8bcdc362…`（全部 matchesHead）、换回 `eecedb19…/7eb452db…/196316b8…`（全部 matchesCurrent），
+  结果与当前输入 `m2-popover-regress-f2` **逐项相同**：dialog 72/1（同一条
+  `GetWindowTheme` 失败）、select 10/3（同三条，3 处 `could not be made foreground`）、
+  select lifecycle 4/0、shared 18/14/23/9/1 全绿。
+- **negative5 定位**：其失败行指向已被替换的首轮测试断言，只能证明旧测试/旧语义；当前显示合同的
+  负控是 `m2-popover-negative6`（`f.s.faulted`/`eventsFrozen` 两行与当前文件逐字对应）。
+- **Minor 处理**：M1 回滚成功同时 `popoverRects.del`；M2 新增"回滚失败后移除 Popover 走
+  stale-drop 二次注销"断言；M3 新增故障**前**同一 envelope 被接受的正控（同 session/同 mount
+  generation/真实 binding）；M4 新增 `popoverReceiptsForTest()`（cookie 表）断言与
+  `seamAttempts.destroy` 记录；M5 新增"place 后未发布"断言（`popoverPublishedRectForTest` 为
+  false + 面板矩形非零）；M6 见上方撤回标注；M7 新截图重新生成。
+- **截图**：`m2-popover-uia-f6` 的 6 张 PNG 路径与 sha256 见外部 status；像素统计（仅佐证，
+  不作视觉结论）：深色图近白像素占比 17.11% → **7.97%**、近黑 78.64% → **85.87%**。
+- 仍未完成：截图视觉复核（本会话无图像查看能力）、150% DPI／高对比／IME／真实读屏器／跨平台、
+  完整 Windows 套件整轮、来源安全（上游 popover.tsx 仍 UNRESOLVED）。
+
+## 执行进展（第四轮：surface 标记失败回执 + 重绘失败上报）
+
+- **问题**：`openWindows` 在 `markPanelSurface` 失败分支里 `discard destroyWindow(panel)` 且把
+  `host.windows.panel = panel` 放在标记之后——销毁结果被丢弃、HWND 回执丢失，且销毁调用会覆盖
+  `lastError()`，使抛出的主错误变成 `Win32 error 0`。
+- **RED（收窄陈述）**：`m2-popover-mark-red2`（编译 exit 0、运行 exit 1、31 OK／**4 FAILED**）
+  证明的是**消息级三条失败**（见下）。深层所有权回退负控未做，故不宣称"全合同 RED"；同轮第 4 项
+  `failed show faults…` 失败由实现者报告为**新用例漏 `close` 造成 cookie 表外溢**，其旧测试源
+  未留存、无法独立复核，**不作为已证产品 RED**。
+  - `surface-mark failure rolls the panel back…` → `message.contains("SetPropW popover panel surface
+    failed: Win32 error 5")` 失败（原始错误被清理调用覆盖）；
+  - `failed surface mark whose cleanup also fails…` → 缺少
+    `DestroyWindow popover panel failed: Win32 error 5`（销毁被 discard，清理错误不可见）；
+  - `theme redraw failure is reported and retried…` → 缺少 `RedrawWindow popover panel failed: …`
+    （返回值被忽略，静默承诺换肤成功）；
+  - 另 1 项 `failed show faults…` 因该轮新用例夹具未关闭造成 cookie 表外溢（测试夹具缺陷，
+    与产品无关，已在同一轮补 `defer: close(f)`）。
+- **修复**：
+  1) `openWindows`：`CreateWindowExW` 成功后**立即**写 `host.windows.panel`，再调
+     `markPanelSurface(panel, host.calls.setProp)`；失败直接 `nativeError("SetPropW popover panel
+     surface")`（错误码仍是 SetProp 的），不做分支内销毁，清理与上报由既有 `closeWindows`／
+     `ensurePopoverHost` 负责（主错误在前、清理错误以 `; popover panel rollback failed: …` 追加）。
+  2) `setTheme`：重绘前记录 "重绘债" `needsThemeRepaint`；`RedrawWindow` 返回 0 时
+     `nativeError("RedrawWindow popover panel")`（与 `overlayTheme` 同合同），债务保留，下一普通
+     turn 重试；成功才清零，普通 turn 仍不重绘。新建面板时债务清零（新窗口本就按当前主题首绘）。
+  3) 接缝：新增最小 `Win32Calls.setProp`（仅 SetProp 操作）供注入复用；`skin.markPanelSurface`
+     增加带 `SetPropProc` 的重载，删除随之失效的单参重载与注释里多余的反斜杠。
+- **GREEN（最终）**：`m2-popover-mark-green3`（编译 exit 0、运行 exit 0、**35 OK／0 FAILED**，
+  EXE `8b76879f6682b81e69ae199355d48e7b24bd899d324c04be439fee4a7e0693df`，依赖子集
+  `sha256:beae3013…nimFiles:645`）；`mark-green1`／`mark-green2` 为中间历史（前者缺最终
+  `skin.nim` 单参重载删除，后者未含最终文档编辑），不作为最终记录。主题色实测仍为
+  `panel dark=1513239, label dark=1513239, edit dark=2171169`（正常视觉未变）。
+- 复用映射：`uia-f7` 的 5 张截图与 55 项断言按依赖复用（本轮只改失败资源路径与重绘错误分支，
+  正常渲染路径未变）；dialog/select 的 HEAD A/B（`ab-head-f4`）与当前输入回归（`regress-f3`）
+  不重跑，因为改动只落在 popover 失败分支（`calls/skin/popover_host` 均为 Windows-only 且
+  dialog/select 不经过 `markPanelSurface`／`setTheme` 失败分支）。
+- 文档：README 增加两条合同（标记失败回执、重绘失败上报+重试）；中间 tag
+  （`red-theme5`／`themefix1..4`／`final1`）标注为历史并指向最终记录。
