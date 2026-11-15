@@ -81,6 +81,27 @@ proc persist(model: Notebook, storage: NotesStore, favorite = false, archive = f
   except CatchableError as error:
     result.status = "保存失败：" & error.msg
 
+proc navAction(target: NotesView, state: State[Notebook]): Callback =
+  ## Bind the target by parameter. Capturing the loop-local value made every
+  ## navigation button act on the final enum value (archive).
+  result = proc(e: Event) =
+    discard state.update(proc(value: Notebook): Notebook =
+      result = value
+      result.view = target
+      result.tag = ""
+      result.status = ""
+      result.reconcileSelection())
+
+proc tagAction(filter: string, state: State[Notebook]): Callback =
+  ## Same reason as navAction: capture the filter by parameter.
+  result = proc(e: Event) =
+    discard state.update(proc(value: Notebook): Notebook =
+      result = value
+      result.view = notesAll
+      result.tag = filter
+      result.status = ""
+      result.reconcileSelection())
+
 proc quiet(label, key: string, selected: bool, action: Callback): Node =
   button(label, key=key, variant=(if selected: "primary" else: "ghost"),
     styles=style({"width":"full", "height":"34"}), onClick=action)
@@ -114,25 +135,17 @@ let NotebookView = defineComponent[NotesStore, State[Notebook]]("LeafNotes",
           discard state.set(next)),
       text("我的空间", key="space", variant="secondary", styles=style({"height":"32"}))]
     for view in NotesView:
-      let target = view
       let key = case view
         of notesAll: "nav-all"
         of notesFavorites: "nav-favorites"
         of notesArchive: "nav-archive"
       navigation.add(quiet(view.viewLabel, key, model.view == view and model.tag.len == 0,
-        proc(e: Event) =
-          discard state.update(proc(value: Notebook): Notebook =
-            result = value; result.view = target; result.tag = ""; result.status = ""
-            result.reconcileSelection())))
+        navAction(view, state)))
     navigation.add(text("标签", key="tagsLabel", variant="secondary",
       styles=style({"height":"40"})))
     for label in ["灵感", "日常", "项目"]:
-      let filter = label
       navigation.add(quiet("·  " & label, "tag-" & label, model.tag == label,
-        proc(e: Event) =
-          discard state.update(proc(value: Notebook): Notebook =
-            result = value; result.view = notesAll; result.tag = filter; result.status = ""
-            result.reconcileSelection())))
+        tagAction(label, state)))
     navigation.add(column(@[], key="navSpace", styles=style({"height":"full", "flex_grow":"1"})))
     navigation.add(separator(key="navRule", styles=style({"width":"full"})))
     navigation.add(text("仅存于本机 · SQLite", key="local", variant="secondary"))

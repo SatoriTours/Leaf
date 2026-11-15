@@ -1,6 +1,6 @@
 # 标准 UI（进行中）
 
-标准库基于固定 shadcn/ui `new-york-v4`／Neutral 参考，不依赖 React、Tailwind 或 WebView。当前实现 Button、Input、Textarea、布尔 Checkbox／Switch、垂直 Label／Field、字段描述／错误、Card、Badge／Separator、Empty、确定 Progress、Kbd 及 managed Skeleton 的受限子集；**M0／M1 尚未整体验收，不是完整 shadcn 组件库**。
+标准库基于固定 shadcn/ui `new-york-v4`／Neutral 参考，不依赖 React、Tailwind 或 WebView。截至 2026-11-15（代码基线 `5ce24ea`）已实现：Button、Input、Textarea、布尔 Checkbox／Switch、垂直 Label／Field、字段描述／错误、Card、Badge／Separator、Empty、确定 Progress、Kbd、managed Skeleton／Spinner、ButtonGroup、InputGroup，Status／Alert 的专用原生 UIA 实时区域子集，以及 M2 首片 Dialog／AlertDialog、Select、Popover、ScrollArea、RadioGroup；统一目录入口为 `examples/ui_showcase/catalog.nim`。**M0／M1 尚未整体验收；M2 均为首片，不是完整 shadcn 组件库**。各切片状态与两条实际入口的验收清单见[开发进度总览](../progress.md#当前总览2026-11-15)。
 
 ## 显式使用
 
@@ -40,18 +40,20 @@ Button 支持 default／destructive／outline／secondary／ghost／link、norma
 | 阴影、完整 Label／错误说明可访问性关联、高对比／IME 现场 | 未完成 |
 | Textarea／垂直 Label／Field、本页布局 | 本页100%浅深视觉／已测关键路径独立复核通过，150%及完整Field仍未覆盖 |
 | 布尔 Checkbox／Switch | 布尔子集在100%真实环境功能／独立浅深视觉通过（不等于完整M1） |
-| Status／Alert 实时区域 | 内部基础层已验收；Spinner 已验收，Alert 已接入待本轮独立验收；读屏器现场及 150% DPI 未完成 |
+| Status／Alert 实时区域 | 内部基础层与 Spinner 受限验收通过；文字 Alert 子集 96 DPI 受限验收通过（`passed_scoped_96dpi_alert_text`）；读屏器现场及 150% DPI 未完成 |
 | 完整 Field 及其余 M1 | 未完成 |
 | 单选 Select：原生 owned 锚定弹层、受控 value／open、键鼠与 Dialog 内作用域 | 交互、发布边界、锚定、专用 UIA provider（展开／值／选择／禁用项／事件／退役）与真实截图已自测 |
 | 非模态 Popover：原生 owned 锚定内容浮层、受控 open、内容内原生控件与 Dialog 内作用域 | 交互、发布边界、锚定／避让、外点／Esc／Tab 请求、故障回执与资源归零、跨进程 UIA（自然树发现／非模态／Invoke／Value／Dialog 作用域）已自测；浅深／窄窗／Dialog 截图已生成但未做视觉复核 |
-| M2 浮层、M3 数据、M4 专项复杂组件 | 后续阶段，不宣称支持 |
+| 纵向 ScrollArea：`saVertical` 有限视口、焦点显露、候选拒绝与故障回滚 | 96 DPI 受限验收通过（共享 12/0、布局 39/0、virtualList 17/0、实际入口 22/0，复用同源原生 18/0、Popover 35/0）；不支持水平溢出、嵌套与正文内弹出域 |
+| 原生 RadioGroup：stock `BS_RADIOBUTTON`、受控单值、单 Tab 入口与角色稳定 key 拒绝 | 96 DPI 受限验收通过（共享 12/0、原生 11/0、实际入口 75/0）；仅纵向单组单值，未逐像素核对上游 |
+| M2 其余组件、M3 数据、M4 专项复杂组件 | 后续阶段，不宣称支持 |
 
 Button／Input／Textarea 的 3 DIP 外侧焦点环使用单一 owned、非激活、透点装饰窗，不侵占控件本体；Button 遵循系统隐藏焦点提示，Input／Textarea 保留编辑焦点提示。移动／失活先隐藏，普通 native turn 重新定位，释放使用现有资源所有权机制。原生 GDI 尚无 CSS 阴影／动效的等价实现，不宣称完整像素一致性。
 
 旧 PowerShell 动态调用路径曾报告 Pane 并在代理注册时抛异常；同一原生窗口在独立编译的 CLR UIA 客户端中已验证正确角色、模式、焦点、名称与标签。保留该客户端路径差异，不据此断言所有 UIA 消费者通过，也未为此修改系统配置或增加自定义 provider。
 
 参考提交及 MIT 原文保存在 `src/leaf/vendor/shadcn-ui/`，发行包的许可证清单会包含它们。设计及计划见 `docs/superpowers/`。唯一执行状态／证据索引：
-``/.local/state/agent-artifacts/leaf/2026-11-07-shadcn-ui-design/status.md`。
+`~/.local/state/agent-artifacts/leaf/2026-11-07-shadcn-ui-design/status.md`。本页 2026-11-15 的状态校正与入口验收清单见[开发进度总览](../progress.md#当前总览2026-11-15)，本轮命令与结果索引为 `~/.local/state/agent-artifacts/leaf/2026-11-15-beta-closure/status.md`。
 
 ## 本页视觉实现与限制
 

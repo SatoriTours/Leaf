@@ -2,7 +2,7 @@
 
 **2026-10-31 当前入口：** Windows 默认使用 Win32，省略 backend 即可；`leaf pack --target windows` 生成无渲染桥接 DLL 的 ZIP，SDK 使用原生 schema 2。当前测试与发布状态见[进度](progress.md)，使用方法见[原生表单](../examples/native_forms/README.md)和[打包](packaging.md)。下文带日期的验收数字均保留其历史输入范围。
 
-当前代码／CI 状态统一见[开发进度总览](progress.md#当前总览2026-10-31)：`8b683ca` 的官方 Windows runner 已实际编译／运行成功，不再是仅 18 套代码生成检查的阶段。runner 动态收集 `tests/windows/test_*.nim`，不代表全部 `probe_*.nim` 或现场矩阵通过。身份、日志和未关闭门见[Windows 验收](windows-acceptance.md)。下文日期化数字仅保留对应历史输入，不批准完整平台或资源／现场门。
+当前代码／CI 状态统一见[开发进度总览](progress.md#当前总览2026-11-15)：`8b683ca` 的官方 Windows runner 已实际编译／运行成功，不再是仅 18 套代码生成检查的阶段。runner 动态收集 `tests/windows/test_*.nim`，不代表全部 `probe_*.nim` 或现场矩阵通过。身份、日志和未关闭门见[Windows 验收](windows-acceptance.md)。下文日期化数字仅保留对应历史输入，不批准完整平台或资源／现场门。
 
 2026-10-18 后续[真实窗口补验](windows-window-validation.md)：GPUI ABI1/2 本批任务流程、native_forms 键盘与基础 UIA 通过，期间发现原生模型标签缺字、resize才恢复的视觉失败；现已补局部客户区失效与屏幕回归，八套97/0开发自测及独立复验通过，重建应用的原键盘路径自然态完整。原失败保留。真实 IME、物理混合双屏和完整辅助技术 H 门仍未关闭；下方历史 NotRun 表述保留其日期范围。
 

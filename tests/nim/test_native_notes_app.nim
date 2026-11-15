@@ -89,3 +89,85 @@ suite "Leaf Notes real application":
     discard rt.dispatch("save", Event(kind: click))
     check rt.find("saveStatus").node.text.contains("保存失败")
     check rt.find("title").node.text == "不要丢失"
+
+  test "favourite views follow persisted flags and keep the search filter":
+    # Mirrors the failing live step: seeds already carry two favourites, a new
+    # note favourited in-session must appear in the favourites view, and the
+    # search query survives a view change (it is not cleared by nav).
+    let store = openNotesStore(base / "favorites-view.sqlite3")
+    defer: store.close()
+    let rt = newRuntime(notesApp(store))
+    defer: rt.closeRuntime()
+    check store.notes(view = notesFavorites).len == 2
+    discard rt.dispatch("nav-favorites", Event(kind: click))
+    check rt.find("listHeading").node.text == "已收藏"
+    check rt.find("resultCount").node.text == "2 份笔记"
+    discard rt.dispatch("nav-all", Event(kind: click))
+    discard rt.dispatch("new", Event(kind: click))
+    discard rt.dispatch("favorite", Event(kind: click))
+    check store.notes(view = notesFavorites).len == 3
+    discard rt.dispatch("nav-favorites", Event(kind: click))
+    check rt.find("resultCount").node.text == "3 份笔记"
+    check rt.find("title") != nil
+    discard rt.dispatch("search", Event(kind: change, value: "专注"))
+    check rt.find("resultCount").node.text == "1 份笔记"
+    discard rt.dispatch("nav-all", Event(kind: click))
+    check rt.find("resultCount").node.text == "1 份笔记"
+
+  test "nav and tag bindings target their own view":
+    # RED matrix for the loop-captured callbacks: every nav button and every tag
+    # button must act on its own value, also after a re-render.
+    let store = openNotesStore(base / "nav-matrix.sqlite3")
+    defer: store.close()
+    let rt = newRuntime(notesApp(store))
+    defer: rt.closeRuntime()
+    let view = proc(key: string): tuple[heading: string, count: string] =
+      discard rt.dispatch(key, Event(kind: click))
+      result.heading = rt.find("listHeading").node.text
+      result.count = rt.find("resultCount").node.text
+    var seen = view("nav-all")
+    check seen.heading == "全部笔记"
+    check seen.count == "4 份笔记"
+    seen = view("nav-favorites")
+    check seen.heading == "已收藏"
+    check seen.count == "2 份笔记"
+    seen = view("nav-archive")
+    check seen.heading == "归档"
+    check seen.count == "0 份笔记"
+    check rt.find("emptyNotes") != nil
+    # second pass after re-renders must still resolve per key
+    seen = view("nav-favorites")
+    check seen.count == "2 份笔记"
+    seen = view("nav-all")
+    check seen.count == "4 份笔记"
+    seen = view("nav-favorites")
+    check seen.count == "2 份笔记"
+    # tags: 灵感 2, 日常 1, 项目 1 and each returns to its own filter
+    seen = view("tag-灵感")
+    check seen.heading == "灵感"
+    check seen.count == "2 份笔记"
+    seen = view("tag-日常")
+    check seen.heading == "日常"
+    check seen.count == "1 份笔记"
+    seen = view("tag-项目")
+    check seen.heading == "项目"
+    check seen.count == "1 份笔记"
+    seen = view("nav-all")
+    check seen.heading == "全部笔记"
+    check seen.count == "4 份笔记"
+
+  test "selection and query stay consistent across nav and tags":
+    let store = openNotesStore(base / "nav-query.sqlite3")
+    defer: store.close()
+    let rt = newRuntime(notesApp(store))
+    defer: rt.closeRuntime()
+    discard rt.dispatch("search", Event(kind: change, value: "专注"))
+    check rt.find("resultCount").node.text == "1 份笔记"
+    discard rt.dispatch("nav-favorites", Event(kind: click))
+    check rt.find("resultCount").node.text == "1 份笔记"
+    check rt.find("title") != nil
+    discard rt.dispatch("tag-灵感", Event(kind: click))
+    check rt.find("listHeading").node.text == "灵感"
+    check rt.find("resultCount").node.text == "1 份笔记"
+    discard rt.dispatch("search", Event(kind: change, value: ""))
+    check rt.find("resultCount").node.text == "2 份笔记"

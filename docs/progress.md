@@ -1,11 +1,127 @@
 # 开发进度与下一步
 
-## 当前总览（2026-10-31）
+## 当前总览（2026-11-15）
 
-**阶段：Windows 优先的 beta；应用开发与打包链路已有实测证据，但最新本地候选出现未澄清的 Defender 检测，交付门阻塞。稳定版、完整平台验收和高负载性能目标尚未完成。**
-本节是当前状态入口；下方日期化记录保留各批次的输入与失败，其中“未提交／待 CI”等措辞仅指当时快照。
+**阶段：Windows 优先的 beta 收口。代码已到 `5ce24ea`，标准 UI 的 M2 首片（Dialog／Select／Popover／ScrollArea／RadioGroup）与组件目录、Notes 演示均已有实现和局部验收；完整 beta 交付门仍未满足：Model／数据库两条工作流的 `macos-14` job 未获 runner、0 step 即取消（原因未确定），安全检测判定未回，资源预算未定位，现场能力缺口仍在。未发布稳定版，也不宣称完整验收通过。**
 
-**当前本地基线（2026-11-07 核对）：** `24b697d` 已提交动态布局三份产品文件及新增回归；此前 `4359d20` 已提交列表焦点、搜索宽度和工具链修复。下方旧批次的“未提交”描述仅代表当时状态。在线 beta 的最后已记录基线为 `8b683ca`，本次未查询远端／发布状态，不将其当作实时确认；安全交付门及最终 SHA 的完整 CI 仍未关闭。此前列表卡死修复已有实际鼠标、CRUD、持久化、打包搬迁的限定独立复核及 Windows 27套／199项累计回归，不能据此称原在线 beta 已修复。
+- **代码基线（2026-11-15 实查）**：本轮开发起点的本地 HEAD 与 `origin/main` 同为 `5ce24ea3f555fead058d3f64d3effc6e992783f7`（2026-11-14T22:20:39+08:00，30 文件）。**本轮修改前**工作区 tracked／untracked 干净，本次提交范围为 5 份文档、1 份产品源码、1 份回归测试及 3 个非 CI 验收工具。应用／产品基线为 `5ce24ea`，上一已交付基线为 `8b683ca1`（2026-10-31），其间另有 `a0cc6d9`、`c10f341`。SDK 是独立滚动 beta 资产，不与产品基线混称（见下）。下方日期化记录中的"未提交／待 CI"只描述当时快照。
+- **同 SHA Actions（本轮 `gh run list/view --commit` 实查，不是转述）**：
+  - `43604374056` Nim 与 Windows 原生：**success**；`runtime`／`windows` 两个 job 全部 step success，日志分别为 `Passed all 206 Nim test suites`（`tests/nim` 201 套 ＋ `tests/release` 5 套）与 `Passed all 48 Windows host test suites`，无 FAILED／SKIPPED。
+  - `43604373986` Leaf SDK 发布：**success**（metadata／build windows-x86_64／publish）。**发布不等于完整验收**：pre-release `beta`（名称 `Leaf beta.5ce24ea3f555`）本次只重建 `leaf-sdk-windows-x86_64.zip`（9,690,122 B，2026-11-14T14:36Z）；`leaf-sdk-linux-x86_64`、`leaf-sdk-macos-x86_64`、`leaf-sdk-macos-aarch64` 仍是 2026-10-24 的旧资产。`refs/tags/beta` → `5ce24ea`、release body 也写该 Commit，但 release 的 `target_commitish` 字段为 `148fa15f…`（不一致，仅记录，不作为身份依据）；SDK artifact `sdk-windows-x86_64`（9,563,004 B，digest `0bcb61f0…`）未过期。
+  - `43604374022` Model 三平台、`43604374002` 数据库三平台：**cancelled（必需门未过）**。ubuntu／windows job success；两个 `macos-14` job **未分配 runner、0 step 即取消**：run 创建于 14:20:43Z，job 于 14:20:44Z（创建后 1 秒）结束，`runner_name`／`runner_group_name` 为空、`labels=[macos-14]`。仅凭这些字段无法区分 runner 容量、账户／macOS 分钟额度、组织策略或定向取消，**原因未确定**，本页不据此诊断。相邻提交 `a0cc6d9` 的 `43551601368`（数据库）与 `43551601419`（Model）在同一秒 03:25:57Z 出现完全相同形态（run 创建 03:25:56Z），说明不是一次性抖动；而 `8b683ca1` 上 macOS 曾 success。按"取消≠通过"，三平台必需门未满足；需仓库所有者从平台侧核查后重跑，本任务不自行 rerun／dispatch，也不把该现象归因于本改动。
+- **本地与客机验证**：Linux 宿主无 Nim；后续已复用 Windows 客机完成 Notes 受影响共享回归（app 8、store 4、controls 3 项）及下述限定实窗复验。未重复旧 SHA 的全量测试；本次产品修改的全量结果须以新提交 Actions 为准。
+- **本次提交范围**：Notes 导航／标签回调捕获修复、对应回归测试、三个非 CI 验收工具及五份进度文档，共 10 文件。用户已授权提交并推送；这是明确未完成的修复检查点，不是完整 beta 验收通过。未改 CI、认证或系统设置。证据与后续提交 SHA／Actions 结果保存在 `~/.local/state/agent-artifacts/leaf/2026-11-15-beta-closure/status.md`。
+
+### 最小收口表（2026-11-15）
+
+实现／自测／独立验收／完整回归／平台范围分开记录；"独立验收"写旧批次时表示对应源码已漂移，不能外推到 `5ce24ea`。CI 绿灯不等于完整 beta 通过。
+
+| 范围 | 实现 | 自测 | 独立验收 | 完整回归 | 平台范围 |
+| --- | --- | --- | --- | --- | --- |
+| 标准 UI M1（Button／Input／Textarea／Field／Card／Boolean／展示／Progress／Kbd／Skeleton／Spinner／Status／Alert／ButtonGroup／InputGroup／运行期主题） | 已合入 `5ce24ea` | 共享 `test_ui_*` ＋ 原生 `test_win32_*` 局部套件 | 逐切片 96 DPI 受限复核通过（Alert 结论 `passed_scoped_96dpi_alert_text`） | 同 SHA CI 206／48 套 success | Windows 96 DPI；150%／高对比／IME／真实读屏器未验 |
+| M2 首片（Dialog／AlertDialog、Select、Popover、ScrollArea、RadioGroup） | 已合入 `5ce24ea` | 共享＋原生＋真实入口客户端自测 | RadioGroup 12/11/75 可外推到本 SHA（哈希实查）；ScrollArea 入口 22/0 早于 radio 切片，本 SHA 只有组合树内回归 runExit 0；Popover 截图未做视觉复核 | 同一 push 的 `43604374056` success | 仅 Windows 96 DPI；均为首片，不是完整 M2 |
+| 组件目录 `examples/ui_showcase` | 已合入 | 共享 `test_ui_catalog`（4 项）＋原生 `test_win32_catalog`（2 项：480×700 窄窗、换肤保 EDIT HWND／字体／选区） | 既有批次独立审查通过；入口与客户端文件未漂移，但 `src/leaf/ui.nim` 已变，旧批次不能当本 SHA 运行证据 | 同 SHA CI 覆盖上述两套 | 96 DPI；跨进程 UIA 客户端不在 CI |
+| Notes 入口 `examples/native_notes` | 已合入 | 共享套件覆盖业务语义（播种一次、搜索标题与正文及 emoji、草稿跨记录、校验与关闭连接后的写失败、收藏／归档持久化、保存重开）；不覆盖 UI 焦点与提示渲染、正常退出、`integrity_check`、不可写介质 | **无当前 SHA 的独立实窗验收**；2026-11-15 实窗尝试被系统通知抢占前台阻塞 | 同 SHA CI 覆盖共享套件；实窗客户端已补但未跑通 | Windows 96 DPI |
+| 生成应用／脚手架／打包／SDK 安装重定位 | 已合入 | 共享与 Windows CI 套件 | 2026-10-31／11-07 批次限定通过（旧 SHA） | 同 SHA CI success | Windows x64 |
+| 资源预算（cold USER／GDI） | 未修复 | 历史探针失败与止损保留 | 无 | — | **阻断交付门** |
+| 安全检测（Defender `Trojan:Win32/Bearfoos.A!ml`） | 未关闭 | 样本已恢复、提交材料齐全 | 等待微软判定；无门户读取授权 | — | **阻断交付门** |
+| 三平台数据库／Model | 已实现 | ubuntu＋windows success | — | **macOS cancelled → 未完成** | 必需门未满足 |
+
+## 入口验收清单（2026-11-15）
+
+两条实际入口的手工验收步骤与已有自动化入口。命令按既有文档与批次记录复用，不另造测试调度系统；自动化项若同 SHA CI 已覆盖则不本地重跑。共同前提：Windows x64 非提权交互 Session 1、96 DPI、使用带 v6／PMv2 manifest 的既有构建路径、数据库与截图目录独立（不污染既有库），不改系统主题／DPI／缩放。需要实窗补验时按 [Windows 环境](windows-environment.md) 的按需启停约定使用既有 VM。
+
+### Notes 入口 `examples/native_notes`
+
+构建与启动（既有 README 命令）：
+
+```powershell
+nim c -d:release --out:target/nim/leaf.exe src/leaf_cli.nim
+cd examples/native_notes
+..\..\target\nim\leaf.exe build --output target/LeafNotes.exe
+.\target\LeafNotes.exe --database .\acceptance-YYYYMMDD.sqlite3 --theme light
+```
+
+自动化入口（同 SHA CI 已执行，无需本地重跑）：`tests/nim/test_native_notes.nim`（首次播种一次、重开保留编辑、搜索标题与正文含 emoji、收藏／归档独立持久化、空标题与关闭连接后保存的失败不改坏数据）、`tests/nim/test_native_notes_app.nim`（草稿跨笔记切换、保存后重开读回、搜索空态恢复、新建可选、归档／还原、整理不偷存草稿、空标题与关闭后写失败显示错误并保留草稿）、`tests/nim/test_notes_controls.nim`（多行 CRLF 规范化与能力拒绝）。三者都在 CI `runtime` job 的 206 套内。
+
+覆盖边界（按源码实查）：这里的"写失败"是**保存前关闭连接**后的 `DatabaseError`（`test_native_notes.nim` 末尾、`test_native_notes_app.nim` 最后一项），不是不可写介质；`examples/native_notes/store.nim` 走 `openDatabase`，`src/leaf/sqlite.nim` 以 `READWRITE|CREATE`（`0x10006`，`busy_timeout` 5000ms）打开、没有只读回退；不可写介质在打开／初始化阶段的表现依平台与 SQLite 行为而定，本轮未实测，也**不以只读介质制造保存失败**。共享套件同样不覆盖：标题获得焦点与提示渲染、应用层"已收藏"视图（只有 `nav-archive` 与 store 级 `notesFavorites`）、正常退出、`PRAGMA integrity_check`。这些属于下面手工条目的内容。
+
+手工条目（每条记录截图、数据库快照、进程退出码）：
+
+1. **新建**：点"＋ 新建笔记"→ 列表出现"未命名笔记"且被选中；标题区可点击或经 Tab 进入编辑并成功键入（**不承诺自动聚焦**；业务语义由共享套件覆盖，焦点行为属手工项）；首次启动仅四条示例，重开不重复播种。
+2. **搜索筛选**：输入标题片段、正文片段、emoji → 结果计数与列表匹配；无匹配显示空态；清空恢复；切"已收藏"／"归档"视图正确（"已收藏"应用层视图只有手工项，套件只覆盖 `nav-archive` 与 store 级 favorites）。
+3. **草稿切换**：改标题／正文未保存 → 切另一条再切回，草稿仍在且底部提示未保存；收藏／归档不保存草稿文本。
+4. **校验／保存失败**：标题清空保存 → 提示"标题不能为空"且草稿保留（共享套件已覆盖文案与草稿保留）。写失败路径是**候选步骤，待下一片实测，未实跑不称已验证**：应用打开并载入一条记录后，用第二个连接对**本次新建的验收库**执行 `BEGIN IMMEDIATE`（或 `EXCLUSIVE`）并持有写锁，再在应用内保存；本实现 `busy_timeout` 为 5000ms，需预留约 5 秒，操作整体超时上限 15 秒。步骤必须在 `finally` 中 `ROLLBACK` 并关闭第二连接以释放锁，然后核对界面显示"保存失败"且草稿保留。第二个连接的事务模式与 WAL 行为须先按 `src/leaf/sqlite.nim` 与 SQLite 版本实测确认。**不得用改权限／只读属性制造失败**：本实现以 `READWRITE|CREATE` 打开、无只读回退；不可写介质在打开／初始化阶段的实际表现依平台与 SQLite 行为而定，本轮未实测。
+5. **收藏归档**：收藏 → 已收藏视图可见；归档 → 笔记视图消失、归档视图可见；"移回笔记"可还原。
+6. **保存重开**：保存 → 状态"所有更改已保存" → 正常退出（手工项）→ 同 `--database` 重开读回标题／正文／标志；对副本执行 `PRAGMA integrity_check`（手工项，套件未覆盖）。
+
+范围外与缺口：真实中文 IME、150% DPI／混屏、高对比、真实读屏器、触摸、跨平台；未保存草稿不跨进程保留属设计。2026-11-15 已补 `tests/windows/notes_client.cs`（UIA/键鼠双模式，未提交）与 `tests/windows/notes_db_tool.nim`（第二连接锁与 `integrity_check`），但**本机实窗键鼠仍被启动时抢占前台的系统通知窗口阻塞**，见"2026-11-15 组件目录与 Notes 实窗切片"；因此焦点与提示渲染、正常退出、`integrity_check`、不可写介质目前仍只有手工／未完成状态，不能由共享套件绿灯代替。
+
+### 标准组件目录 `examples/ui_showcase/catalog.nim`
+
+该入口没有 `leaf.json`（`leaf build` 不可用），也不在 CLI 生成应用的构建路径内，必须显式带 v6／PMv2 manifest 编译。完整可复现命令如下（仓库根执行；**2026-11-15 已在既有 Windows VM 实跑：manifest exit 0、catalog exit 0**，见下文实窗切片）：
+
+```powershell
+# 1) 生成 manifest 对象：复用 src/leaf/windows_manifest.compileWindowsManifest
+#    （与 leaf build 内部同一实现），不改仓库、不新增 leaf.json。
+$env:Path = "C:\LeafTests\tools\mingw64\bin;C:\LeafTests\tools\leaf-sdk\toolchain\nim\bin;" + $env:Path
+@'
+import leaf/windows_manifest, std/os
+echo compileWindowsManifest("src", "target/nim/ui-manifest", r"C:\LeafTests\tools\mingw64\bin\gcc.exe")
+'@ | Set-Content -Encoding ASCII "$env:TEMP\mk-ui-manifest.nim"
+nim c -r --hints:off --path:src --out:"$env:TEMP\mk-ui-manifest.exe" "$env:TEMP\mk-ui-manifest.nim"
+
+# 2) 编译目录入口（沿用旧批次同一组开关）
+nim c --hints:off --threads:on -d:leafProtocolProbes `
+  --passC:-D_WIN32_WINNT=0x0A00 --passC:-DWINVER=0x0A00 `
+  --passL:target/nim/ui-manifest/leaf_app_manifest.o --path:src `
+  --out:target/nim/ui_catalog.exe examples/ui_showcase/catalog.nim
+```
+
+来源与约束：第 2 步与旧批次 `~/.local/state/agent-artifacts/leaf/2026-11-07-shadcn-ui-design/evidence/commands/leaf-catalog-demo-build.py` 逐字一致；第 1 步的 API 与参数顺序取自 `src/leaf/windows_manifest.nim` 的 `compileWindowsManifest(sources, cacheDirectory, gccPath)`，`sources` 必须是包含 `leaf/resources/windows/leaf_app.manifest` 的目录（本仓库为 `src`），gcc 必须是 Nim 实际使用的同一 MinGW GCC（`leaf build` 用 `gccFromBuildScript` 校验；本段沿用 SDK 固定路径，若不同需按该方式取值）。
+
+静态核对与待验证（下一片 Windows）：`-d:leafProtocolProbes` 打开的是分布于多个 Win32 后端模块与多套宿主测试的探针接缝（例如 canvas、live_provider、select_provider 等；此处不维护模块／套件计数，避免漂移）；**入口是否必需该开关和 `--threads:on` 未实测**，旧批次为与宿主套件同一输入而保留。直接 `nim c` 不嵌入同一资源（见[源码开发](development.md)），不能与上面产物混作同一输入。
+
+自动化入口：`tests/nim/test_ui_catalog.nim`（导航保留草稿与主题、校验拒绝并保留草稿、保存／取消内存语义、反馈／空态／动画状态、布尔偏好与组合动作跨页）、`tests/windows/test_win32_catalog.nim`（五页在 480×700 内适配、页切换 provider 计数、换肤保 EDIT HWND／字体／选区、跨页保留值）；两者都在同 SHA CI 的 206／48 套内。跨进程 UIA／真实键鼠客户端 `tests/windows/catalog_client.cs` **不在 CI**，需按批次脚本模板实窗运行（模板见 `~/.local/state/agent-artifacts/leaf/2026-11-07-shadcn-ui-design/evidence/commands/leaf-catalog-visual.ps1`，`TAGPLACEHOLDER` 替换为批次名）。
+
+手工条目：
+
+1. **目录导航**：五个分类（表单／组合／反馈／空态／动画）Tab／Space／点击均可切换，当前页标题正确。
+2. **主题**：顶部按钮切浅深；切换后原生 EDIT 的 HWND、字体与选区保留，页面内容不跳变。
+3. **原生输入**：名称、简介（多行换行）、地址前缀／后缀组合均可真实键入；受控值跨页保留。
+4. **禁用／错误／焦点**：保存按钮按 dirty 禁用／启用；空名称显示"名称不能为空。"并保留草稿；焦点环与 Tab 顺序正确。
+5. **键鼠**：真实鼠标点击、Space 激活按钮、Tab 进入控件；组合组计数增减与重置生效。
+6. **窄窗**：480×700 下各页无裁剪、无越界控件；更矮窗口没有自动滚动，不作承诺。
+
+范围外与缺口：150% DPI、高对比、IME、真实读屏器、触摸、跨平台；跨页不承诺保留 Undo／选区／IME 会话。
+
+本轮总体判定：**catalog 整体未通过／未完成**（仅 496 宽组合页深色单状态限定视觉通过，其余窄页与窄窗 Tab 无证据）；**Notes 全流程阻塞**；两处根因（catalog 窄窗绘制、外部前台占用）均未确定。
+
+### 2026-11-14 标准 UI M2 首片与提交（历史补齐）
+
+- `a0cc6d9`（11:25）为标准 UI 组件检查点与 Notes 演示；`5ce24ea`（22:20）新增原生 ScrollArea、RadioGroup 并加固 Popover，共 30 文件。
+- 各首片口径：Dialog／AlertDialog 为真实 owned 模态层；Select 为 owned 锚定下拉；Popover 为 owned 非模态浮层；ScrollArea 为 `saVertical` 有限视口；RadioGroup 为 stock `BS_RADIOBUTTON` 受控单值。均只覆盖 Windows 96 DPI 的受限状态。
+- 文档事故如实保留：`docs/ui/README.md` 旧 698 行版本在工具 50KB 有界读取后被回写截断，用户明确授权后按已验合同与现存证据重建（**非原文逐字恢复**，旧 sha `58f5bb66…` 不再成立）；损坏副本与缺口记录留在外部索引。
+- 切片外推范围（按哈希实查）：`m2-radio-group-result.json` 的 `files` 共 14 项，其中 13 项与当前 `5ce24ea` 字节相同（唯一差异是重建后的 `docs/ui/README.md`），因此 RadioGroup 的 96 DPI 受限验收可外推到该 SHA；`m2-scrollarea-result.json` 的 `files` 有 4 项已变（`src/leaf/ui.nim`、`ui_contract.nim`、`backends/win32/backend.nim`、`docs/ui/README.md`），其入口级 22/0 运行早于 radio 切片，**不能外推**——`5ce24ea` 上 ScrollArea 的直接证据是 radio 批次内的回归套件 runExit 0，没有入口重跑。其余切片各有自己的 96 DPI 受限复验记录，但"每个切片都有记录"不等于"都在本 SHA 上重跑过"。
+- RadioGroup 在独立审查指定的三处措辞修正后收口为 `accepted-restricted-96dpi`；该结论只覆盖 96 DPI 受限范围。
+- 用户口令授权提交并 push `origin/main`；随后四个 push 工作流的结果由本页 2026-11-15 总览记录。详细切片证据见 `~/.local/state/agent-artifacts/leaf/2026-11-07-shadcn-ui-design/status.md`。
+
+### 2026-11-15 组件目录与 Notes 实窗切片（部分通过，Notes 交互阻塞）
+
+在既有 Windows 11 VM（`leaf-a2-windows`，非提权 Session 1、Defender 实时防护开启、单 96 DPI）复用 5ce24ea 源码实跑：`git archive` 解出 997 文件，叠加本轮 2 个新增测试工具共 999 文件，与本地逐文件 SHA256 一致（0 mismatch）。新增两个测试工具（未提交）：`tests/windows/notes_client.cs`（UIA/键鼠双模式客户端）与 `tests/windows/notes_db_tool.nim`（第二连接锁 + 数据库检查）。
+
+- **构建与身份**：manifest 生成 exit 0；`ui_catalog.exe` 6,655,230 B `1bfc5161…`、`LeafNotes.exe` 3,949,457 B（`leaf build`）`942eb331…`、`leaf.exe` 1,634,420 B `5ac5bebd…`、`notes_db_tool.exe` 430,922 B `4cd581a0…`；全部 exit 0。
+- **产物 hash 冲突（保留原始）**：`notes_db_tool.exe` 首次构建为 430,922 B `7b5cac96…`（`slice-1115/build-result.json` 记录的就是这一次），随后按参数校验／输出文件修正源码并重编为 `4cd581a0…`；两者都保留，不以后者覆盖前者的记录。
+- **有界诊断（2026-11-15，一次 catalog 目标）**：复用同 hash `ui_catalog.exe`，用保留原 20×25ms 判定的临时诊断副本复现同一 `groups-narrow` 失败；失败瞬间与相隔 1063ms 的第二次只读采样均为 55 个窗口（含 6 个不可见）`updateBool=false`、pending 0，前台 handle 131228 即本应用 root（**无前台争抢**）；两张自然截图字节相同 `d475f68d…`（未用 `RedrawWindow/UpdateWindow`）。该结果只证明**两个采样点**稳定，不宣称区间内无重绘；失败时刻无时间戳，收敛耗时无上界，**根因未知**。应用自然退出 `ExitCode=0`，runner 侧客户端退出码 **unknown**（未补成 1）。catalog 应用启动累计 **3 次**（2 批 + 1 诊断）。
+- **manifest 资源**：用 `FindResourceEx(24,1,0)` 读回两个 GUI 产物内嵌 manifest（各 736 B 文本）：均含 `Microsoft.Windows.Common-Controls` v6 与 `PerMonitorV2`；`leaf.exe`（CLI，plain `nim c`）无 manifest，属既有构建差异，不计为缺陷。
+- **组件目录（真实键鼠，两批次）**：均 Session 1、非提权、Defender 开；DPI.Window=96。已执行并通过：五页导航、深/浅切换后 EDIT HWND 与字体选区保持、真实键盘输入、Space 勾选/开关、Value 置空触发"名称不能为空。"、保存/取消、进度推进到 100% 后按钮禁用、空态创建、动画加载/卸载、组合组计数、跨页草稿保留；每批留下 **15 张截图**（浅/深/错误/反馈/空态/动画），**窄窗截图 0 张**（诊断批另留 496 宽组合页深色 1 张，限定视觉通过）。两批都在**首个窄窗截图（496 宽组合页 `groups-narrow`）**处失败：`Paint did not settle`（20×25ms 采样窗），点位固定可复现；其后的表单/反馈/空态/动画窄窗截图与 **Tab 切页均未执行**。原因未判定（隐藏/不可见子窗遗留 update region 与客户端采样启发式均未排除，最小采样建议见 status），不当作产品缺陷结论；未追加采样（catalog 累计 3 次应用启动）。
+- **Notes（阻塞，已停止重试）**：历史 20 批（14 main + 6 uia）全部失败于前台／键入前置。**2026-11-15 第 5 轮**环境实测（Session 1 非提权、Defender 开、前台为任务控制台、无卡住通知窗）后，前置检查**通过**（一次自有窗激活＋一次 Unicode 输入到自身搜索框并清除）；同一应用继续主流程，已真实通过新建、标题清空后键入、正文两行＋emoji、搜索（正文／emoji／空态／恢复）、收藏切换，但在 `已收藏` 视图显示 `0 份笔记` 时停止——同库只读查询为 `id=5 favorite=1`、`favoritesVisible=3`，UI 与 DB 不一致，**未定性为产品缺陷，交主控裁决**；本轮 5 次应用启动（累计 25，计数不重置），客户端退出码经 Handle-first 模板取得 1。
+- **Notes 收藏筛选已定位并最小修复（2026-11-15，headless）**：最小捕获试验证实循环内 `let target = view` 被闭包按同一位置捕获，导航全部落到 `归档`、标签全部落到 `项目`；RED 矩阵复现（nav-all/nav-favorites 均显示 归档/0 份），既有 5 个用例通过，但未覆盖其它导航／标签按钮。修复为 `navAction`/`tagAction` 回调工厂（application.nim +23/−10），GREEN：Notes app 7/7、store 4/4、controls 3/3 全 OK；这是该 headless 批次的结论；后续真实窗口限定复验见下。
+- **后续真实窗口限定通过**：修复产品 `bc399c6c…`／EXE `4192e72f…` 在 Windows 96 DPI 浅色入口独立核验通过三视图、三标签、query 跨导航保留、新笔记收藏后 3 份、归档／还原、跨记录草稿与空标题拒绝。新增共享断言后 app 8/8 通过。该结论不覆盖保存成功与重开。
+- **保存补验与工具问题（未通过）**：先后遇到保存后未恢复输入焦点、裸命令行参数拆分、执行端误选旧客户端；均保留原始失败，不算产品保存／emoji 缺陷证据。v2 身份预检已实测错误哈希拒绝、正确产物及含空格路径下 same-exe 自检通过；这些只是工具前置。
+- **最终停点与累计**：Notes 累计 32 次应用启动，历史额外重试偏差保留。最后一批在新建前 `FOREGROUND_BLOCKED`，当时前台句柄为 0；该批 SessionId／提权状态／桌面活跃状态未记录，原因未知。保存、同库重开、深色、锁步仍未完成；VM 已停止。catalog 累计 3 次，仅 496 宽深色组合页单状态视觉限定通过，绘制等待超时根因仍未知。当前三个验收工具可编译但不在自动 CI 入口内，不能当作端到端全绿。旧基线 206/48 套不覆盖本次新产品改动；待核新 SHA 全量 Actions，现场／安全／资源门仍单列未关闭。
+- **安全与资源**：Defender 实时防护始终 true；只读查询 `Get-MpThreatDetection`/`Get-MpThreat` 仍只有 10-31 的 `Trojan:Win32/Bearfoos.A!ml`（`IsActive=false`），本轮产物**无新增检测**；未启动资源追踪目标、未改 DPI/主题/ACL/认证、未安装工具。
+- **范围外**：150% DPI、高对比、IME、真实读屏器、触摸未验证；本轮截图未经实现端目视（实现端无图像能力），视觉复核留给独立验收。
 
 ### 2026-11-07 Windows PowerShell 零目标回放续验
 
@@ -169,10 +285,15 @@ Canvas 既有真实入口证据主要限定于 **Windows VM、非提权 Session 
 
 ### 下一步与未关闭项
 
-1. **真实业务负载与显示性能**：固定叶子诊断已证明本场景的收益；后续需要有代表性的业务布局／交互及实际显示测量，才能判断端到端体验和 FPS。自动尺寸／动态内容不由该诊断覆盖，不重复已通过的六进程批次。
-2. **既有功能收口**：三主题表单、列表部分滚动及生成应用关键流程均限定独立通过；后续只补尚缺范围。真实中文 IME、物理混屏／键鼠、屏幕阅读器、高对比及高 DPI 缺证据时单列未完成，不扩成新组件开发。
-3. **资源可靠性**：原 cold USER4>3／GDI10>2 预算失败仍未关闭；对象级观察见到额外 Region，但创建栈、归属和释放责任尚未证明。此前栈采集只有前缀且目标被中止，不是根因结论；既有诊断止损继续有效，本轮不新增资源追踪目标。详见[资源与现场门复核](windows-acceptance.md#2026-10-29-资源与现场门复核)。
-4. **高负载性能路线**：先完成当前补验，再按测量结果决定新的绘制架构取舍；没有新增 renderer、合批方案或万对象性能达标承诺。
+2026-11-15 复核后的顺序（每项都以可核实证据收口，不按旧绿灯外推）：
+
+1. **三平台必需门**：两个 `macos-14` job 未获 runner 即取消、原因未确定（相邻 `a0cc6d9` 复发同一形态）；需仓库所有者从平台侧（容量／分钟额度／组织策略）核查后重跑 Model／数据库两条工作流。本任务不自行 rerun／dispatch，不以 ubuntu／windows 绿灯替代，也不诊断额度或账单。
+2. **Notes 与组件目录的当前 SHA 实窗验收**：按[入口验收清单](#入口验收清单2026-11-15)在既有 Windows 96 DPI 环境执行。Notes 入口没有 Windows 实窗／UIA 客户端是明确缺口，需先补客户端或如实记为手工证据。
+3. **真实业务负载与显示性能**：固定叶子诊断已证明本场景收益；后续需要有代表性的业务布局／交互及实际显示测量，才能判断端到端体验和 FPS。自动尺寸／动态内容不由该诊断覆盖，不重复已通过的六进程批次。
+4. **既有功能收口**：三主题表单、列表部分滚动及生成应用关键流程均限定独立通过；后续只补尚缺范围。真实中文 IME、物理混屏／键鼠、屏幕阅读器、高对比及高 DPI 缺证据时单列未完成，不扩成新组件开发。
+5. **资源可靠性**：原 cold USER4>3／GDI10>2 预算失败仍未关闭；对象级观察见到额外 Region，但创建栈、归属和释放责任尚未证明。既有诊断止损继续有效，不新增资源追踪目标。详见[资源与现场门复核](windows-acceptance.md#2026-10-29-资源与现场门复核)。
+6. **安全交付门**：Defender `Trojan:Win32/Bearfoos.A!ml` 判定仍等微软回复（编号由用户提供），本任务无门户读取授权；恢复样本与提交材料保留，不执行样本、不关闭防护。
+7. **高负载性能路线**：先完成当前补验，再按测量结果决定新的绘制架构取舍；没有新增 renderer、合批方案或万对象性能达标承诺。
 
 平台：Windows x64 是当前桌面目标；Linux/macOS GUI 未实现，仅共享 headless；Android 保留原生路径，设备矩阵未完整验收。原生 `--watch` 暂不支持。
 
@@ -203,6 +324,19 @@ Canvas 既有真实入口证据主要限定于 **Windows VM、非提权 Session 
 - 停止追加目标：本片共一次编译、两次应用启动，失败原文及脚本均保留。新方法的 `GetScrollBarInfo` 定位和实际拖动路径尚未现场验证；不能用初始截图或正常退出替代部分滚动／独立验收。全量自动化沿用原产品 HEAD 的 CI，不宣称本轮新全量通过。
 
 证据位于统一证据索引同目录的 `partial-scroll/summary.json`；原始运行标签为 `quality-list-partial-1029`、`quality-list-partial-reuse-1029`。后续先将数据库检查移出应用持有期或采用一致性查询，再决定是否继续现场验证；本片未授权无限重跑，资源追踪预算不变。
+
+<a id="当前总览2026-10-31"></a>
+
+## 2026-10-31 总览快照（历史，原文保留）
+
+> 本节旧标题为 `## 当前总览（2026-10-31）`，降级后由上方显式 HTML 锚点保留旧外部链接 `progress.md#当前总览2026-10-31`。
+
+> 以下为 2026-10-31 当时的"当前总览"原文，仅作历史保留；当前状态见本页[当前总览](#当前总览2026-11-15)。
+
+**阶段：Windows 优先的 beta；应用开发与打包链路已有实测证据，但最新本地候选出现未澄清的 Defender 检测，交付门阻塞。稳定版、完整平台验收和高负载性能目标尚未完成。**
+本节是当前状态入口；下方日期化记录保留各批次的输入与失败，其中“未提交／待 CI”等措辞仅指当时快照。
+
+**当前本地基线（2026-11-07 核对）：** `24b697d` 已提交动态布局三份产品文件及新增回归；此前 `4359d20` 已提交列表焦点、搜索宽度和工具链修复。下方旧批次的“未提交”描述仅代表当时状态。在线 beta 的最后已记录基线为 `8b683ca`，本次未查询远端／发布状态，不将其当作实时确认；安全交付门及最终 SHA 的完整 CI 仍未关闭。此前列表卡死修复已有实际鼠标、CRUD、持久化、打包搬迁的限定独立复核及 Windows 27套／199项累计回归，不能据此称原在线 beta 已修复。
 
 ## 历史执行记录
 
