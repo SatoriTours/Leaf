@@ -1,11 +1,30 @@
 when not defined(windows): {.error: "Canvas native tests require real Windows".}
-import std/[unittest, options, os, osproc, strtabs, strutils]
+import std/[unittest, options, os, osproc, strtabs, strutils, math]
 import leaf
 import leaf/[native_layout, backend_session, ui_thread, canvas_input]
 import leaf/backends/win32/[api, host, backend, canvas]
 from leaf/canvas_hit import target
+import ../canvas_dpi_oracle
 
 if commandLineParams() == @["--canvas-startup-check"]: quit(0)
+
+when not declared(GetThreadDpiAwarenessContext):
+  {.push stdcall, dynlib: "user32.dll", importc, raises: [].}
+  proc GetThreadDpiAwarenessContext(): pointer
+  proc AreDpiAwarenessContextsEqual(left, right: pointer): int32
+  {.pop.}
+
+proc perMonitorV2Process(): bool =
+  AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), cast[pointer](-4)) != 0
+
+proc canvasDpiScale(window: HWND): float64 =
+  ## The oracle needs the same PerMonitorV2 context the backend and the driver use,
+  ## so the precondition is asserted instead of assumed: a DPI this process cannot
+  ## vouch for would make the expectation indistinguishable from the 96 DPI default.
+  doAssert perMonitorV2Process(), "Canvas DPI oracle needs a PerMonitorV2 process"
+  let dpi = GetDpiForWindow(window)
+  doAssert dpi > 0, "GetDpiForWindow failed"
+  float64(dpi) / 96.0
 
 proc frame(radius: float64): CanvasFrame =
   let builder = newCanvasBuilder(viewBox = some(vec2(640, 360)), background = color("#101820"))
@@ -379,7 +398,19 @@ when defined(leafProtocolProbes):
       check GetCapture() != window
       win.safeListTurn()
       check nativePointerLog == @["start", "drag", "end"]
-      check abs(parseFloat(runtime.find("pointer-x").node.text)-60) < 0.000001
+      let dpiScale = canvasDpiScale(window)
+      # canvas.nim draws into the measured client pixels divided by the window DPI,
+      # so both axes of the oracle box come from GetClientRect, not from the
+      # declared 200 DIP layout height.
+      let canvasDip = vec2(float64(client.right)/dpiScale, float64(client.bottom)/dpiScale)
+      let perDip = designUnitsPerDip(vec2(100.0, 100.0), canvasDip)
+      if dpiScale == 1.0:
+        # The fixture's documented 96 DPI contract: 20 physical px is 10 design units.
+        check abs(parseFloat(runtime.find("pointer-x").node.text)-60) < 0.000001
+      # Any other DPI makes the same physical motion 20/dpiScale DIP, so a literal
+      # 60 would demand a fixed pixel delta and reject a correct DPI conversion.
+      check abs(parseFloat(runtime.find("pointer-x").node.text)-
+        (50.0 + 20.0/dpiScale*perDip)) < 0.000001
       check runtime.find("pointer-dragging").node.text == "false"
       check runtime.find("pointer-count").node.text == "1"
 
@@ -694,3 +725,78 @@ suite "Canvas scene-local immutable path reuse":
     finally:
       surface.close();window.requestClose();check window.pump()==0
     check canvasResourceCounts()==baseline
+
+
+var nativeWideLog: seq[string]
+component NativePointerWidePage:
+  state:
+    x = 50.0
+    dragging = false
+  view:
+    column:
+      text x:
+        key: "wide-x"
+      text $dragging:
+        key: "wide-dragging"
+      canvas:
+        key: "wide-canvas"
+        width: fill
+        height: 200
+        viewBox: (200, 100)
+        circle:
+          key: "wide-dot"
+          center: (50, 50)
+          radius: 20
+          onDragStart:
+            nativeWideLog.add("start")
+            dragging = true
+          onDrag(e):
+            x += e.delta.x
+          onDragEnd:
+            nativeWideLog.add("end")
+            dragging = false
+
+when defined(leafProtocolProbes):
+  suite "Canvas non-unit viewBox pointer contract":
+    test "the same physical drag follows the active viewBox meet scale":
+      nativeWideLog = @[]
+      let baseline = canvasResourceCounts()
+      let activity = newUiScopeActivity()
+      let runtime = newRuntime(guardUiApplication(
+        componentApplication(component(NativePointerWidePage, ()), "Canvas wide viewBox"),
+        proc(): uint64 = uint64(GetCurrentThreadId()), activity))
+      let host = createHost("Canvas wide viewBox", DipSize(width: 320, height: 300))
+      host.setStartupScope(proc(): bool = activity.busy or runtime.installingHook or runtime.installingUpdate)
+      let win = newWin32Backend(host, renderer=CanvasRenderer.software)
+      let session = win.attachWin32Backend(runtime)
+      win.bindSession(session)
+      defer:
+        host.destroyHost()
+        runtime.closeRuntime()
+        check canvasResourceCounts() == baseline
+      let window = win.canvasWindowForTest(session.handleFor(runtime.find("wide-canvas").id))
+      check window != nil
+      var client: RECT
+      check GetClientRect(window, addr client) != 0
+      let dpiScale = canvasDpiScale(window)
+      # viewBox (200, 100) inside the same measured client box: the meet scale is
+      # width-limited here, a different mapping from the 100 x 100 page.
+      let canvasDip = vec2(float64(client.right)/dpiScale, float64(client.bottom)/dpiScale)
+      let perDip = designUnitsPerDip(vec2(200.0, 100.0), canvasDip)
+      let dipPerDesign = 1.0 / perDip
+      check abs(dipPerDesign - min(canvasDip.x/200.0, canvasDip.y/100.0)) < 1e-9
+      let cy = int32(client.bottom div 2)
+      let press = int32(round(50.0*dipPerDesign*dpiScale))
+      proc widePosition(x: int32): LPARAM = LPARAM(uint32(uint16(x)) or (uint32(uint16(cy)) shl 16))
+      discard SendMessageW(window, 0x0201, 1, widePosition(press))
+      check GetCapture() == window
+      discard SendMessageW(window, 0x0200, 1, widePosition(press+20))
+      discard SendMessageW(window, 0x0202, 0, widePosition(press+20))
+      check GetCapture() != window
+      check nativeWideLog.len == 0
+      win.safeListTurn()
+      check nativeWideLog == @["start", "end"]
+      check runtime.find("wide-dragging").node.text == "false"
+      # 20 physical px are 20/dpiScale DIP, mapped by this viewBox's own meet scale.
+      check abs(parseFloat(runtime.find("wide-x").node.text)-
+        (50.0 + 20.0/dpiScale*perDip)) < 0.000001

@@ -25,6 +25,12 @@ public class PopoverClient
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int X, Y; }
 
+    [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")] static extern IntPtr GetThreadDpiAwarenessContext();
+    [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")] static extern IntPtr GetWindowDpiAwarenessContext(IntPtr window);
+    [DllImport("user32.dll")] static extern bool AreDpiAwarenessContextsEqual(IntPtr a, IntPtr b);
+    [DllImport("user32.dll")] static extern int GetAwarenessFromDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out RECT rect);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
@@ -343,8 +349,108 @@ public class PopoverClient
         Check(IsWindowEnabled(scopeHwnd), label + ": owner window stays enabled");
     }
 
+    // Cursor input, Win32/UIA rectangles and captured screen pixels only describe
+    // one space while this driver runs in the same PerMonitorV2 context as the
+    // application, so the gate requires PMv2, prints what it actually got and
+    // fails closed; there is no system-aware fallback.
+    const int ExitDpiApiMissing = 21;
+    const int ExitNotPerMonitorV2 = 22;
+    const int ExitWindowDpiUnavailable = 23;
+    static readonly IntPtr PerMonitorV2Context = new IntPtr(-4);
+
+    static string DescribeDpiContext(IntPtr context)
+    {
+        if (context == IntPtr.Zero) return "none";
+        if (AreDpiAwarenessContextsEqual(context, PerMonitorV2Context)) return "per_monitor_v2";
+        // This API only separates unaware/system/per-monitor; the equality check
+        // above is what distinguishes PMv1 from PMv2.
+        switch (GetAwarenessFromDpiAwarenessContext(context))
+        {
+            case 0: return "unaware";
+            case 1: return "system";
+            case 2: return "per_monitor_v1";
+            default: return "unknown";
+        }
+    }
+
+    static int ReportMissingDpiApi()
+    {
+        Console.WriteLine("[DPI] unsupported: the user32 DPI awareness APIs are missing on this Windows");
+        return ExitDpiApiMissing;
+    }
+
+    static int RequireProcessPerMonitorV2()
+    {
+        try
+        {
+            // false is expected when an embedded manifest already fixed the context,
+            // so the effective context decides; anything but PMv2 is a hard failure.
+            bool set = SetProcessDpiAwarenessContext(PerMonitorV2Context);
+            IntPtr effective = GetThreadDpiAwarenessContext();
+            Console.WriteLine("[DPI] setPerMonitorV2=" + set + " effective=" + DescribeDpiContext(effective));
+            if (!AreDpiAwarenessContextsEqual(effective, PerMonitorV2Context)) return ExitNotPerMonitorV2;
+            return 0;
+        }
+        catch (EntryPointNotFoundException) { return ReportMissingDpiApi(); }
+        catch (DllNotFoundException) { return ReportMissingDpiApi(); }
+    }
+
+    static int RequireWindowPerMonitorV2(IntPtr window, string label)
+    {
+        IntPtr context;
+        try { context = GetWindowDpiAwarenessContext(window); }
+        catch (EntryPointNotFoundException) { return ReportMissingDpiApi(); }
+        catch (DllNotFoundException) { return ReportMissingDpiApi(); }
+        Console.WriteLine("[DPI] " + label + " window=" + DescribeDpiContext(context));
+        return AreDpiAwarenessContextsEqual(context, PerMonitorV2Context) ? 0 : ExitNotPerMonitorV2;
+    }
+
+    static int DpiCheck(bool condition, string message)
+    {
+        Console.WriteLine((condition ? "[DPI-OK] " : "[DPI-FAILED] ") + message);
+        return condition ? 0 : 1;
+    }
+
+    // Executable contract for the gate itself. It creates no window and touches no
+    // product code: only this driver's own process/thread DPI context is injected.
+    static int DpiGateContract()
+    {
+        int failures = 0;
+        IntPtr system = new IntPtr(-2);
+        IntPtr perMonitorV1 = new IntPtr(-3);
+        failures += DpiCheck(RequireProcessPerMonitorV2() == 0, "first gate pass enters per_monitor_v2");
+        bool repeated = SetProcessDpiAwarenessContext(PerMonitorV2Context);
+        failures += DpiCheck(!repeated, "a repeated SetProcessDpiAwarenessContext returns false");
+        failures += DpiCheck(RequireProcessPerMonitorV2() == 0, "the gate still passes when the setter returned false");
+        IntPtr previous = SetThreadDpiAwarenessContext(system);
+        try
+        {
+            failures += DpiCheck(DescribeDpiContext(GetThreadDpiAwarenessContext()) == "system",
+                "the description names the injected system context");
+            failures += DpiCheck(RequireProcessPerMonitorV2() == ExitNotPerMonitorV2,
+                "the gate rejects the injected system context with " + ExitNotPerMonitorV2);
+            failures += DpiCheck(SetThreadDpiAwarenessContext(perMonitorV1) != IntPtr.Zero,
+                "the driver can inject a per-monitor V1 context for the description check");
+            failures += DpiCheck(DescribeDpiContext(GetThreadDpiAwarenessContext()) == "per_monitor_v1",
+                "the description separates per-monitor V1 from per_monitor_v2");
+        }
+        finally
+        {
+            SetThreadDpiAwarenessContext(previous);
+        }
+        failures += DpiCheck(DescribeDpiContext(GetThreadDpiAwarenessContext()) == "per_monitor_v2",
+            "the previous PerMonitorV2 context is restored");
+        failures += DpiCheck(DescribeDpiContext(PerMonitorV2Context) == "per_monitor_v2",
+            "the PerMonitorV2 pseudo-handle is described as per_monitor_v2");
+        Console.WriteLine("[DPI] contract failures=" + failures);
+        return failures == 0 ? 0 : 1;
+    }
+
     public static int Main(string[] args)
     {
+        if (args.Length == 1 && args[0] == "--dpi-contract") return DpiGateContract();
+        int dpiGate = RequireProcessPerMonitorV2();
+        if (dpiGate != 0) return dpiGate;
         if (args.Length < 3)
         {
             Console.Error.WriteLine("usage: PopoverClient <exe> <outDir> <pidFile>");
@@ -361,6 +467,8 @@ public class PopoverClient
                 25000, "main window");
             if (main == null) return 7;
             var mainHwnd = new IntPtr(main.Current.NativeWindowHandle);
+            int windowGate = RequireWindowPerMonitorV2(mainHwnd, "page");
+            if (windowGate != 0) return windowGate;
             Activate(mainHwnd, "page");
             Settle(800);
             DumpWindows(process.Id);
