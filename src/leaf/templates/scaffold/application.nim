@@ -14,5 +14,5 @@ proc createApplication*(database: storage.Database = nil): Application =
       ShellModel(router: newComponentRouter(ctx, applicationRoutes(), generatedPages(connection))),
     proc(ctx: ComponentContext, p: int, model: ShellModel): UiDescription =
       renderShell(ctx, model.router))
-  componentApplication(component(shell, 0), ApplicationTitle, WindowWidth, WindowHeight)
+  app(shell, 0, ApplicationTitle, WindowWidth, WindowHeight)
     .withNativeTheme(matsuLight)

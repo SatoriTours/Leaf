@@ -7,6 +7,8 @@
 | 示例 | 看什么 |
 | --- | --- |
 | [counter.nim](counter.nim) | 声明式布局、State、增加与重置 |
+| [component_counter.nim](component_counter.nim) | `component / state / view / app` 入门 |
+| [stepper.nim](stepper.nim) · [booking](booking/README.md) | 组件库、双向模型、日期确认与跨端入口 |
 | [todo.nim](todo.nim) | 受控输入、稳定业务 id、添加与删除 |
 | [components.nim](components.nim) | 两个子组件各自持有状态，局部更新 |
 | [kit.nim](kit.nim) | 输入、开关、校验、保存与重置 |

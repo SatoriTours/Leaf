@@ -11,11 +11,9 @@ component Counter:
       row:
         gap: 8
         button "增加":
-          onClick:
-            count += 1
+          count += 1
         button "重置":
-          onClick:
-            count = 0
+          count = 0
 
 when isMainModule:
-  quit(run(Counter, title = "Leaf 计数器", width = 400, height = 240))
+  quit(run(app(Counter, title = "Leaf 计数器", width = 400, height = 240)))

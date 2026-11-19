@@ -1,0 +1,8 @@
+{
+  "name": "Leaf Booking",
+  "identifier": "dev.leaf.booking",
+  "version": "0.1.0",
+  "entry": "main.nim",
+  "include": ["application.nim", "booking_controls.nim", "main.nim", "mobile.nim"],
+  "platforms": {"android": {"entry": "mobile.nim"}}
+}

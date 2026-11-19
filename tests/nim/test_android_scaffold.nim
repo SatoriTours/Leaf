@@ -10,6 +10,7 @@ const
   ResourcesProbe = staticRead("../fixtures/android_scaffold/resources.nim")
   InitProbe = staticRead("../fixtures/android_scaffold/init_resources.nim")
   OldMain = staticRead("../../src/leaf/templates/legacy_init/main.nim")
+  PreviousMobileApp = staticRead("../../src/leaf/templates/legacy_init/mobile_app.nim")
   OldApp = staticRead("../../src/leaf/templates/legacy_init/app.nim")
 
 
@@ -100,3 +101,12 @@ suite "generated Android project entries":
     check readFile(root / "src/main.nim") == OldMain
     check readFile(root / "src/app.nim") == OldApp
     check readProject(root).android.enabled
+
+
+  test "untouched previous mobile template still upgrades without rewriting source":
+    let root = base / "previous-mobile-init"
+    initProject(root)
+    writeFile(root / "src/app.nim", PreviousMobileApp)
+    check matchesMinimalTemplate(root)
+    discard generateScaffold(ScaffoldOptions(mode: smApplication), root)
+    check readFile(root / "src/app.nim") == PreviousMobileApp

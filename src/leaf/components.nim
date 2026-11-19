@@ -10,7 +10,11 @@ import ./component_lifecycle
 export component_lifecycle
 export component_view
 import ./[component_dsl, canvas_dsl, graphics]
-export component_dsl except displayTextInternal
+export component_dsl except displayTextInternal, ModelBindingInternal
+import ./declarative_fields
+export declarative_fields
+import ./date_picker
+export date_picker
 export canvas_dsl, graphics
 import ./component_routing
 export component_routing

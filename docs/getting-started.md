@@ -8,9 +8,9 @@
 
 ```mermaid
 flowchart LR
-    A["State：保存数字"] --> B["render：描述界面"]
+    A["state：保存数字"] --> B["view：描述界面"]
     B --> C["点击按钮"]
-    C --> D["update：更新状态"]
+    C --> D["按钮动作：更新状态"]
     D --> A
 ```
 
@@ -31,42 +31,26 @@ leaf run
 ```nim
 import leaf
 
-let Counter = defineComponent[int, State[int]]("Counter",
-  proc(ctx: MountContext, initial: int): State[int] =
-    ctx.state(initial),
-  proc(ctx: ComponentContext, initial: int, count: State[int]): UiDescription =
-    let n = ctx.value(count)
-    componentView:
-      column:
-        styles: {"padding": "32", "gap": "16"}
-        text "我的第一个 Leaf 应用":
-          styles: {"font_size": "24", "weight": "bold"}
-        text $n:
-          key: "count"
-          styles: {"font_size": "48"}
-        button "增加 +1":
-          key: "add"
-          onClick(e):
-            discard count.update(proc(v: int): int = v + 1))
-
-proc counterApp(): Application =
-  componentApplication(component(Counter, 0), "第一个 Leaf 应用", 460, 320)
+component Counter:
+  state:
+    count = 0
+  view:
+    column:
+      padding: 32
+      gap: 16
+      text "我的第一个 Leaf 应用"
+      text count:
+        key: "count"
+      button "增加 +1", key = "add":
+        count += 1
 
 when isMainModule:
-  quit(run(counterApp()))
+  quit(run(app(Counter, title = "第一个 Leaf 应用", width = 460, height = 320)))
 ```
 
-执行 `leaf run`，点击“增加 +1”。只需要记住三个操作：
+`state` 在组件挂载时初始化；`view` 读取状态；按钮动作更新状态。稳定的 `key` 也让测试能按名称点击或读取控件。`app` 构造应用描述，`run` 负责桌面或 headless 启动。
 
-| 操作 | 意义 | 发生的位置 |
-| --- | --- | --- |
-| `ctx.state(initial)` | 创建由组件持有的状态 | 挂载时，执行一次 |
-| `ctx.value(count)` | 读取本次渲染的状态 | render 中 |
-| `count.update(...)` | 从当前值计算下一个值 | 用户事件中 |
-
-`defineComponent` 的两个函数分别负责**初始化**和**渲染**；`componentApplication` 把根组件变成窗口应用。泛型参数是初始参数和组件模型的类型，不是每个控件都要写的模板。
-
-> 不要在 render 中写 State，也不要用普通全局变量代替需要事务化提交的组件状态。事件写入先排队，再由 Runtime 校验并提交；普通 Nim 副作用不随 UI 拒绝自动回滚。
+> 不要在 `view` 渲染期间写状态。事件写入由 Runtime 校验和提交；普通 Nim 副作用不会随着 UI 拒绝而回滚。
 
 ## 3. 不打开窗口，也能检查交互
 
@@ -83,6 +67,7 @@ leaf --headless --click add --click add
 
 | 想继续学 | 去哪里 |
 | --- | --- |
+| 声明可复用控件、绑定输入 | [声明式组件](declarative-components.md) · [预约示例](../examples/booking/README.md) |
 | 增加布局、输入框和列表 | [Nim API](nim-api.md) · [待办源码](../examples/todo.nim) |
 | 看完整应用可以长什么样 | [Windows 原生表单](../examples/native_forms/README.md) |
 | 不想从零搭页面和数据库 | [生成 CRUD 应用](scaffolding.md) |

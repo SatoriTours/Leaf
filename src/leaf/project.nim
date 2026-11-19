@@ -7,6 +7,7 @@ when defined(windows): import ./windows_paths
 const
   MainTemplate = staticRead("templates/main.nim")
   AppTemplate = staticRead("templates/app.nim")
+  PreviousMobileAppTemplate = staticRead("templates/legacy_init/mobile_app.nim")
   MobileTemplate = staticRead("templates/mobile.nim")
   LegacyMainTemplate = staticRead("templates/legacy_init/main.nim")
   LegacyAppTemplate = staticRead("templates/legacy_init/app.nim")
@@ -233,7 +234,7 @@ proc matchesMinimalTemplate*(root: string): bool =
   readFile(root / "leaf.json") ==
     pretty(mobileProjectConfig(name, "src/main.nim", "src/mobile.nim", @["src", "assets"])) & "\n" and
     readFile(root / "src/main.nim") == MainTemplate and
-    readFile(root / "src/app.nim") == AppTemplate and
+    readFile(root / "src/app.nim") in [AppTemplate, PreviousMobileAppTemplate] and
     fileExists(root / "src/mobile.nim") and readFile(root / "src/mobile.nim") == MobileTemplate
 
 proc initProject*(path: string) =

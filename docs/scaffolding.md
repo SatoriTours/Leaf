@@ -18,6 +18,8 @@ leaf run
 
 你会得到可运行的首页、搜索、设置和 **Notes 的列表 / 新建 / 编辑 / 详情**。已保存记录进入 SQLite，关闭重开仍在；未保存草稿不持久化。`g` 是 `generate` 的别名。
 
+最小的 `leaf init` 模板在 `src/app.nim` 使用 [`component / state / view / app`](declarative-components.md)，桌面和 Android 入口共用该工厂。完整 CRUD 脚手架用 `app` 组装根应用，路由、数据库所有权和已有页面继续使用低层组件 API。
+
 > 启动会应用待执行迁移，`leaf --check` 也会初始化数据库。测试时用独立 `LEAF_DATABASE_PATH`，不要指向生产数据。
 
 ## 2. 知道代码放在哪里

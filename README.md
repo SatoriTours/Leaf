@@ -26,6 +26,10 @@
 
 ## 状态 → 界面 → 事件
 
+从[第一个应用](docs/getting-started.md)使用 `component / state / view / app` 开始。看[预约示例](examples/booking/README.md)如何把 `textField name`、`datePicker day, earliest = today()` 与可复用的 `stepper guests, maximum = 6` 绑定到同一份状态。按钮块直接写 Nim 动作，不需要写回调包装。
+
+[声明式组件指南](docs/declarative-components.md)说明 `model`、只读 `prop`、平台契约和本轮验证边界。下面的低层 API 仍然受支持。
+
 业务和组件状态留在 Nim；Windows 界面使用系统的按钮、输入框和其他原生控件，不依赖浏览器或 Rust 渲染桥接。
 
 ```nim
