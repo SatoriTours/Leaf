@@ -1,30 +1,34 @@
-import std/[os, strutils]
+import std/os
 import leaf
-import ./[store, application]
+import ./[store, application, launch_options]
 
 proc main(): int =
-  var database = getDataDir() / "leaf-notes" / "notes.sqlite3"
-  var theme = matsuLight
-  var args = commandLineParams()
-  while args.len > 0 and args[0] in ["--database", "--theme"]:
-    if args.len < 2 or args[1].len == 0 or args[1].startsWith("--"):
-      stderr.writeLine("Usage: LeafNotes [--database <path>] [--theme light|dark|system] [Leaf options]")
-      return 2
-    if args[0] == "--database": database = args[1]
-    else:
-      case args[1]
-      of "light": theme = matsuLight
-      of "dark": theme = matsuDark
-      of "system": theme = systemTheme
-      else:
-        stderr.writeLine("Theme must be light, dark or system")
-        return 2
-    args = args[2 .. ^1]
+  var options: LaunchOptions
   try:
+    options = parseLaunchOptions(commandLineParams())
+  except LaunchOptionError as error:
+    stderr.writeLine(error.msg)
+    stderr.writeLine(UsageText)
+    return 2
+  if options.help:
+    stdout.writeLine(UsageText)
+    return 0
+  var database: string
+  try:
+    database = prepareDatabase(options, getDataDir(), getTempDir())
+  except LaunchOptionError as error:
+    stderr.writeLine(error.msg)
+    return 2
+  try:
+    stdout.writeLine((if options.demo: "Demo database: " else: "Database: ") & database)
+    if options.demo:
+      stdout.writeLine("Reopen: --database \"" & database & "\"")
+    flushFile(stdout)
     let storage = openNotesStore(database)
     defer: storage.close()
-    echo "SQLite: ", absolutePath(database)
-    result = run(notesApp(storage, theme), args)
+    stdout.writeLine("Seed: " & (if storage.seeded: "created" else: "existing"))
+    flushFile(stdout)
+    result = run(notesApp(storage, options.theme), options.remaining)
   except CatchableError as error:
     stderr.writeLine(error.msg)
     result = 1

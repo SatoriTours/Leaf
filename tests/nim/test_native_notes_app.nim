@@ -1,12 +1,51 @@
 import ./cleanup_support
 import std/[unittest, os, tempfiles, tables, strutils]
-import leaf/[core, components]
+import leaf/[core, components, backend, native_layout, styles]
 import ../../examples/native_notes/[store, application]
 
 let base = createTempDir("leaf-notes-app-", "")
 removeDirectoryOnExit(base)
 
+proc notebookBoxes(root: MountedNode, width: float64): Table[string, LayoutBox] =
+  var entities: Table[NodeHandle, MountedEntity]
+  var keys: Table[NodeHandle, string]
+  proc collect(node: MountedNode, parent: NodeHandle, index: int) =
+    let handle = NodeHandle(uint64(entities.len + 1))
+    keys[handle] = node.node.key
+    entities[handle] = MountedEntity(handle: handle, parent: parent, index: index,
+      nodeId: node.id, kind: node.node.kind, props: normalizeProps(node.node))
+    for i, child in node.children: collect(child, handle, i)
+  collect(root, NoHandle, 0)
+  # The critical boxes use explicit sizes or fill. Deliberately offer a large
+  # intrinsic measure so text must not take width away from the commands.
+  proc measure(entity: MountedEntity, available: DipSize): DipSize =
+    DipSize(width: 600, height: 24)
+  for box in layoutTree(entities, DipSize(width: width, height: 560), measure):
+    result[keys[box.handle]] = box
+
 suite "Leaf Notes real application":
+  test "editor commands share a baseline and stay fully visible in a narrow window":
+    let store = openNotesStore(base / "layout.sqlite3")
+    defer: store.close()
+    let rt = newRuntime(notesApp(store))
+    defer: rt.closeRuntime()
+    for width in [1000.0, 720.0]:
+      let boxes = notebookBoxes(rt.find("notebook"), width)
+      let first = boxes["favorite"].rect
+      let last = boxes["save"].rect
+      check first.width >= 72
+      check first.height >= 32
+      for key in ["favorite", "archive", "save"]:
+        let box = boxes[key]
+        check box.rect.width == first.width
+        check box.rect.height == first.height
+        check box.rect.y == first.y
+        check box.rect.x >= box.clip.x
+        check box.rect.x + box.rect.width <= box.clip.x + box.clip.width
+      check last.x + last.width == boxes["title"].rect.x + boxes["title"].rect.width
+      check boxes["body"].rect.width >= 280
+      check boxes["body"].rect.height >= 220
+
   test "edits stay draft across note changes and only save persists across reopen":
     let path = base / "drafts.sqlite3"
     let store = openNotesStore(path)

@@ -51,10 +51,12 @@ proc viewLabel(view: NotesView): string =
 
 proc excerpt(value: string): string =
   for line in value.splitLines():
-    if strutils.strip(line).len > 0:
-      let runes = line.toRunes()
-      return $runes[0 ..< min(22, runes.len)]
-  "还没有正文，写下第一个想法。"
+    let paragraph = strutils.strip(line)
+    if paragraph.len > 0:
+      # Leave room for the ellipsis in the fixed-width list at CJK glyph widths.
+      let runes = paragraph.toRunes()
+      return $runes[0 ..< min(12, runes.len)] & (if runes.len > 12: "…" else: "")
+  "还没有正文"
 
 proc persist(model: Notebook, storage: NotesStore, favorite = false, archive = false): Notebook =
   result = model.snapshot()
@@ -102,9 +104,17 @@ proc tagAction(filter: string, state: State[Notebook]): Callback =
       result.status = ""
       result.reconcileSelection())
 
-proc quiet(label, key: string, selected: bool, action: Callback): Node =
-  button(label, key=key, variant=(if selected: "primary" else: "ghost"),
-    styles=style({"width":"full", "height":"34"}), onClick=action)
+let
+  navigationControl = style({"width":"full", "height":"34"})
+  editorCommand = style({"width":"84", "height":"34"})
+  editorPane = style({"width":"full", "height":"full", "padding":"20", "gap":"8"})
+
+proc navigationItem(label, key: string, selected: bool, action: Callback): Node =
+  # Keep the native button left-aligned in both states. A separate surface
+  # marks the current view without giving it the weight of a primary command.
+  column(@[button(label, key=key, variant="ghost", styles=navigationControl,
+    onClick=action)], key=key & "-surface",
+    variant=(if selected: "primary" else: "default"), styles=navigationControl)
 
 let NotebookView = defineComponent[NotesStore, State[Notebook]]("LeafNotes",
   proc(ctx: MountContext, storage: NotesStore): State[Notebook] =
@@ -115,12 +125,12 @@ let NotebookView = defineComponent[NotesStore, State[Notebook]]("LeafNotes",
     let model = ctx.value(state)
     let shown = model.visible()
     let currentIndex = model.indexOf(model.selected)
-    let actionStyle = style({"height":"32"})
     var navigation = @[
-      text("Leaf Notes", key="brand", variant="primary", styles=style({"height":"36"})),
-      text("想法，有处安放。", key="brandHint", variant="secondary",
-        styles=style({"height":"28"})),
-      button("＋ 新建笔记", key="new", styles=style({"width":"full", "height":"34"}),
+      text("Leaf Notes", key="brand", variant="primary",
+        styles=style({"width":"full", "height":"32"})),
+      text("本地写作空间", key="brandHint", variant="secondary",
+        styles=style({"width":"full", "height":"20"})),
+      button("新建笔记", key="new", variant="secondary", styles=navigationControl,
         onClick=proc(e: Event) =
           var next = model.snapshot()
           try:
@@ -133,22 +143,26 @@ let NotebookView = defineComponent[NotesStore, State[Notebook]]("LeafNotes",
           except CatchableError as error:
             next.status = "新建失败：" & error.msg
           discard state.set(next)),
-      text("我的空间", key="space", variant="secondary", styles=style({"height":"32"}))]
+      text("笔记库", key="space", variant="secondary",
+        styles=style({"width":"full", "height":"26"}))]
+    var views: seq[Node]
     for view in NotesView:
       let key = case view
         of notesAll: "nav-all"
         of notesFavorites: "nav-favorites"
         of notesArchive: "nav-archive"
-      navigation.add(quiet(view.viewLabel, key, model.view == view and model.tag.len == 0,
-        navAction(view, state)))
+      views.add(navigationItem(view.viewLabel, key,
+        model.view == view and model.tag.len == 0, navAction(view, state)))
+    navigation.add(column(views, key="views", styles=style({"width":"full", "gap":"2"})))
     navigation.add(text("标签", key="tagsLabel", variant="secondary",
-      styles=style({"height":"40"})))
+      styles=style({"width":"full", "height":"26"})))
+    var tags: seq[Node]
     for label in ["灵感", "日常", "项目"]:
-      navigation.add(quiet("·  " & label, "tag-" & label, model.tag == label,
-        tagAction(label, state)))
-    navigation.add(column(@[], key="navSpace", styles=style({"height":"full", "flex_grow":"1"})))
-    navigation.add(separator(key="navRule", styles=style({"width":"full"})))
-    navigation.add(text("仅存于本机 · SQLite", key="local", variant="secondary"))
+      tags.add(navigationItem("·  " & label, "tag-" & label, model.tag == label, tagAction(label, state)))
+    navigation.add(column(tags, key="tags", styles=style({"width":"full", "gap":"2"})))
+    navigation.add(column(@[], key="navSpace", styles=style({"height":"full"})))
+    navigation.add(text("仅存于本机", key="local", variant="secondary",
+      styles=style({"width":"full", "height":"22"})))
 
     var keys: seq[string]
     for note in shown: keys.add($note.id)
@@ -156,26 +170,28 @@ let NotebookView = defineComponent[NotesStore, State[Notebook]]("LeafNotes",
       proc(index: int): Node =
         let note = shown[index]
         let id = note.id
+        let selected = id == model.selected
         column(@[
-          button((if note.favorite: "☆ " else: "") & note.title, key="note-" & $id,
-            variant="ghost", styles=style({"width":"full", "height":"32"}),
+          button(note.title, key="note-" & $id, variant="ghost", styles=navigationControl,
             onClick=proc(e: Event) =
               discard state.update(proc(value: Notebook): Notebook =
                 result = value; result.selected = id; result.status = "")),
-          text(note.body.excerpt, key="excerpt-" & $id, variant="secondary",
-            styles=style({"width":"full", "height":"20"})),
-          text(note.tag & "  ·  " & note.updated &
-            (if model.dirty(note): "  ·  未保存" else: ""), key="meta-" & $id,
-            variant="secondary", styles=style({"height":"18"}))],
-          key="card-" & $id, variant=(if model.selected == id: "primary" else: "secondary"),
-          styles=style({"padding":"10", "gap":"3", "width":"full", "height":"100"})),
-      rowHeight=100, overscan=1,
+          column(@[
+            text(note.body.excerpt, key="excerpt-" & $id, variant="secondary",
+              styles=style({"width":"full", "height":"18"})),
+            text(note.tag & (if note.favorite: " · 已收藏" else: "") &
+              (if model.dirty(note): " · 未保存" elif selected: " · 正在编辑" else: ""),
+              key="meta-" & $id, variant="secondary", styles=style({"width":"full", "height":"18"}))],
+            key="details-" & $id, styles=style({"width":"full", "padding":"8", "gap":"2"}))],
+          key="card-" & $id, variant=(if selected: "primary" else: "secondary"),
+          styles=style({"width":"full", "height":"92"})),
+      rowHeight=92, overscan=1,
       styles=style({"width":"full", "height":"full", "flex_grow":"1"}))
     var listChildren = @[
       text((if model.tag.len > 0: model.tag else: model.view.viewLabel),
-        key="listHeading", variant="primary", styles=style({"height":"36"})),
+        key="listHeading", variant="primary", styles=navigationControl),
       input(model.query, key="search", placeholder="搜索标题与正文",
-        styles=style({"width":"full", "height":"36"}),
+        styles=navigationControl,
         onChange=proc(e: Event) =
           discard state.update(proc(value: Notebook): Notebook =
             result = value; result.query = e.value; result.status = ""
@@ -190,10 +206,12 @@ let NotebookView = defineComponent[NotesStore, State[Notebook]]("LeafNotes",
     var editor: Node
     if currentIndex < 0:
       editor = column(@[
-        text("留一点空间，给新的想法。", key="emptyEditor", variant="primary"),
-        text("选择左侧笔记，或点击「新建笔记」开始。", key="emptyHint", variant="secondary"),
-        text(model.status, key="saveStatus", variant="danger")], key="editor",
-        variant="primary", styles=style({"width":"full", "height":"full", "padding":"40", "gap":"16"}))
+        text("未选择笔记", key="emptyEditor", variant="primary", styles=navigationControl),
+        text("从列表选择笔记，或新建一份。", key="emptyHint", variant="secondary",
+          styles=style({"width":"full", "height":"44"})),
+        text(model.status, key="saveStatus", variant="danger",
+          styles=style({"width":"full", "height":"28"}))], key="editor",
+        variant="primary", styles=editorPane)
     else:
       let note = model.drafts[currentIndex]
       let isDirty = model.dirty(note)
@@ -202,31 +220,26 @@ let NotebookView = defineComponent[NotesStore, State[Notebook]]("LeafNotes",
         else: "所有更改已保存"
       editor = column(@[
         row(@[
-          text(model.view.viewLabel & "  /  笔记", key="breadcrumb", variant="secondary",
-            styles=style({"width":"full"})),
-          button((if note.favorite: "取消收藏" else: "收藏"), key="favorite", variant="ghost",
-            styles=actionStyle, onClick=proc(e: Event) =
+          button((if note.favorite: "取消收藏" else: "收藏"), key="favorite", variant="secondary",
+            styles=editorCommand, onClick=proc(e: Event) =
               discard state.set(model.persist(storage, favorite=true))),
-          button((if note.archived: "移回笔记" else: "归档"), key="archive", variant="ghost",
-            styles=actionStyle, onClick=proc(e: Event) =
+          button((if note.archived: "移回笔记" else: "归档"), key="archive", variant="secondary",
+            styles=editorCommand, onClick=proc(e: Event) =
               discard state.set(model.persist(storage, archive=true))),
-          button("保存", key="save", styles=style({"width":"80", "height":"32"}),
+          button("保存", key="save", styles=editorCommand,
             onClick=proc(e: Event) =
               discard state.set(model.persist(storage)))],
-          key="editorToolbar", styles=style({"width":"full", "height":"32", "gap":"8", "align":"center"})),
-        separator(key="editorRule", styles=style({"width":"full"})),
-        text(note.tag & "  /  本地笔记", key="noteTag", variant="secondary",
-          styles=style({"height":"24"})),
+          key="editorToolbar", styles=style({"width":"full", "height":"34", "gap":"8", "justify":"end"})),
+        text(note.tag & " · 本地笔记", key="noteTag", variant="secondary",
+          styles=style({"width":"full", "height":"24"})),
         input(note.title, key="title", placeholder="给这份笔记起个名字",
           resetToken=uint64(note.id), variant="primary",
-          styles=style({"width":"full", "height":"52"}),
+          styles=style({"width":"full", "height":"44"}),
           onChange=proc(e: Event) =
             discard state.update(proc(value: Notebook): Notebook =
               result = value; let i = result.indexOf(note.id)
               if i >= 0: result.drafts[i].title = e.value
               result.status = "")),
-        text("编辑于 " & note.updated & "  ·  " & $unicode.runeLen(note.body) & " 字",
-          key="noteTime", variant="secondary", styles=style({"height":"24"})),
         input(note.body, key="body", multiline=true, resetToken=uint64(note.id), variant="ghost",
           styles=style({"width":"full", "height":"full", "flex_grow":"1"}),
           onChange=proc(e: Event) =
@@ -236,13 +249,13 @@ let NotebookView = defineComponent[NotesStore, State[Notebook]]("LeafNotes",
               result.status = "")),
         text(status, key="saveStatus", variant=(if model.status.len > 0: "danger" else: "secondary"),
           styles=style({"width":"full", "height":"22"}))],
-        key="editor", variant="primary",
-        styles=style({"width":"full", "height":"full", "padding":"28", "gap":"12"}))
+        key="editor", variant="primary", styles=editorPane)
     host(row(@[
-      column(navigation, key="navigation", styles=style({"width":"182", "height":"full", "padding":"18", "gap":"8"})),
+      column(navigation, key="navigation",
+        styles=style({"width":"168", "height":"full", "padding":"20", "gap":"8"})),
       column(listChildren, key="noteList", variant="secondary",
-        styles=style({"width":"272", "height":"full", "padding":"18", "gap":"12"})),
+        styles=style({"width":"224", "height":"full", "padding":"20", "gap":"8"})),
       editor], key="notebook", styles=style({"width":"full", "height":"full", "gap":"1"}))))
 
 proc notesApp*(storage: NotesStore, theme = matsuLight): Application =
-  componentApplication(component(NotebookView, storage), "Leaf Notes", 1184, 660).withNativeTheme(theme)
+  componentApplication(component(NotebookView, storage), "Leaf Notes", 984, 580).withNativeTheme(theme)

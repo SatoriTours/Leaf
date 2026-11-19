@@ -33,6 +33,8 @@ leaf --headless --click add --click add counter.nim
 | [native_forms](native_forms/README.md) | Win32 受控输入、reset、键盘与失败候选 | Windows x64，native |
 | [native_list](native_list/README.md) | 10,000 行虚拟列表、行 State、SQLite 保存重开 | Windows x64，native |
 
+`native_notes` 自带 `--demo`：每次启动在系统临时目录新建隔离的数据集（不删除、不覆盖已有文件），打印路径与重开命令，与 `%APPDATA%` 用户库隔离；其 [README](native_notes/README.md) 给出从干净 checkout 构建、批次目录截图和保存→退出→用同一路径重开的步骤。截图必须来自真实窗口，`--headless` 通过不代表窗口显示。
+
 共享 DSL 中的装饰与布局能力由各原生后端声明，不保证任意示例的所有样式都可呈现。[当前范围与未关闭项](../docs/progress.md)。
 
 七页旧展示源保留作[headless 业务示例](../example/README.md)，尚未迁移为 Windows 原生展示应用，不作为当前 UI 截图来源。

@@ -14,12 +14,10 @@
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/leaf-notes-dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/leaf-notes-light.png">
-    <img src="docs/screenshots/leaf-notes-light.png" width="960" alt="Leaf Notes 松石主题真实原生应用：左侧笔记导航、中间搜索列表、右侧多行编辑与 SQLite 保存，提供浅色和深色外观">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/leaf-notes-workbench-20261118-dark.png">
+    <img src="docs/screenshots/leaf-notes-workbench-20261118-light.png" alt="Leaf Notes 三栏写作工作台：左栏是笔记库和标签，中栏是搜索与笔记列表，右栏正在编辑一篇中文笔记，上方有收藏、归档和保存操作。">
   </picture>
-  <br><sub>Leaf Notes · 松石主题 · 真实 Windows 11 / 96 DPI 窗口实拍。</sub>
-  <br><sub><a href="docs/screenshots/leaf-notes-light.png">查看浅色原图</a> · <a href="docs/screenshots/leaf-notes-dark.png">查看深色原图</a> · <a href="examples/native_notes/README.md">运行这个 Demo</a> · <a href="docs/screenshots/README.md">截图来源</a></sub>
+  <br><sub>Leaf Notes · Windows 原生应用 · <a href="docs/screenshots/leaf-notes-workbench-20261118-light.png">浅色原图</a> / <a href="docs/screenshots/leaf-notes-workbench-20261118-dark.png">深色原图</a> / <a href="docs/screenshots/README.md">截图来源</a></sub>
 </p>
 
 **原生交互，也有自己的风格。** 松石主题以松绿强调色、圆角输入框和清晰的主次按钮，提供统一的浅色与深色外观；文本输入、选区和 IME 仍由系统 EDIT 控件处理。示例与新生成的应用默认使用浅色松石，框架默认保留系统外观，也可在启动时通过 `app.withNativeTheme(matsuLight)` 或 `app.withNativeTheme(matsuDark)` 显式选择主题。

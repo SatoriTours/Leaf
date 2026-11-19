@@ -1,5 +1,14 @@
 # README 截图来源
 
+## 三栏写作工作台（2026-11-18，当前 README 首图）
+
+- [浅色原图](leaf-notes-workbench-20261118-light.png) / [深色原图](leaf-notes-workbench-20261118-dark.png)：Windows 11 VM，96 DPI，**986 × 612** PNG（客户区 984 × 580 DIP）。按 DWM 可见窗口边界从实际交互桌面采集，无缩放、局部裁切或重绘。
+- 同一 EXE、同一 SQLite 演示库、同一篇选中的中文笔记。第一次用 `--demo --theme light` 播种，第二次用打印的 `--database` 路径和 `--theme dark` 重开；两图均在修改内容之前采集。
+- 源码基于 `9ce1949bfde5c2a2121d15383847806f2300103d` 工作树，未提交；来宾机逐文件核对 297 个构建输入，清单 `source.sha256` 的 SHA256 为 `96b3927183530de77eb94a3fe9f8d365ab470cc6d3916b484e5778726d74660f`。
+- Win32 x64 EXE（Nim 2.2.6 + MinGW）：SHA256 `5d70829d005bf11b08e849592d3f1e43679aa45715535fb780b048bb082999f6`，构建机与宿主下载副本一致。
+
+开发者另查看了 720 DIP 窄窗和深浅两色键盘焦点，并用真实键鼠搜索、清空、新建、输入两行中文、保存、关闭，按原数据库路径重开后搜索并选中，核对标题、两行正文和保存状态。探针日志、窄窗／焦点／重开截图及构建清单见本机证据 `~/.local/state/agent-artifacts/leaf/2026-11-18-notes-demo-example/windows/workbench-1118/final/`。不代表独立验收或已覆盖更窄窗口、实际 IME、高 DPI、系统高对比和读屏矩阵。
+
 `leaf-notes-light.png` 与 `leaf-notes-dark.png` 来自真实运行的 [Leaf Notes](../../examples/native_notes/README.md)，不是 HTML 原型或概念图。
 
 - 环境：Windows 11 VM，非提权交互 Session 1，实际 **96 DPI**。

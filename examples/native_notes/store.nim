@@ -12,6 +12,7 @@ type
     favorite*, archived*: bool
   NotesStore* = ref object
     db: Database
+    seeded*: bool ## True only when this open created the demo rows.
 
 proc close*(store: NotesStore) =
   if store != nil: store.db.close()
@@ -36,22 +37,24 @@ proc openNotesStore*(path: string): NotesStore =
       archived INTEGER NOT NULL CHECK(archived IN (0,1)));
       CREATE TABLE IF NOT EXISTS notes_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);""")
     db.executeScript("BEGIN IMMEDIATE")
+    var seeded = false
     try:
       if db.query("SELECT value FROM notes_meta WHERE key = 'seeded'").len == 0:
         let seeds = [
-          ("Leaf 的第一份笔记", "好的工具，让你专注于想法本身。\n不必复杂，也不必喧闹。打开它，写下此刻值得留下的事。\n\n用 Nim 描述界面，\n让状态驱动原生控件。\n\n从一个小小的想法开始\n\n✓ 创建第一份笔记\n✓ 给它一个喜欢的名字\n□ 记录下一个值得实现的点子\n\n想法不必完整，先写下来就好。", "灵感", true),
-          ("把周末留给自己", "去公园走走，读完手边的那本书。\n\n留一点时间，做没有截止日期的事。", "日常", false),
-          ("关于一个小工具的想法", "少一点打扰，多一点恰到好处。\n\n把复杂留给实现，把简单留给使用。", "项目", false),
-          ("最近读到的一句话", "在平常的事物里，发现新的可能。\n\n记录，是和未来的自己对话。", "灵感", true)]
+          ("Leaf 的第一份笔记", "周六早上去河边的旧书市。\n从南门进去，先找地图和地方志的摊位。\n\n想带回来的书\n一本有手写批注的游记；一本讲河流或桥梁的书。\n如果遇到旧地图，看看上面还有没有外婆住过的那条街。\n\n回来后写一段\n先别查资料，专注记下沿途听到的声音和看到的颜色。\n把当天最想记住的一句，留作游记的开头。", "灵感", true),
+          ("把周末留给自己", "图书馆十点开门，记得带上借书证。\n\n午后去河边绕一圈。下雨就去车站旁的咖啡馆，把上周借的书读完。", "日常", false),
+          ("街区地图小项目", "先画从地铁口到菜场的步行路线。\n\n标出有树荫的长椅和能避雨的屋檐；周三请小林试走一遍。", "项目", false),
+          ("最近读到的一句话", "桥的另一边，风先到了。\n\n抄在这里，或许可以作为雨天那篇短文的第一句。", "灵感", true)]
         for seed in seeds:
           discard db.execute("INSERT INTO notes(title,body,tag,updated,favorite,archived) VALUES(?,?,?,?,?,0)",
             @[dbValue(seed[0]), dbValue(seed[1]), dbValue(seed[2]), dbValue(stamp()), dbValue(seed[3])])
         discard db.execute("INSERT INTO notes_meta(key,value) VALUES('seeded','1')")
+        seeded = true
       db.executeScript("COMMIT")
     except:
       db.executeScript("ROLLBACK")
       raise
-    result = NotesStore(db: db)
+    result = NotesStore(db: db, seeded: seeded)
   except:
     db.close()
     raise
