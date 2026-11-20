@@ -261,8 +261,10 @@ suite "Win32 capability boundary":
   test "win32 declares the bounded supported set":
     let caps = win32Capabilities()
     check cfInputReset in caps.controls
-    check caps.kinds == {column, row, text, button, input, checkbox, toggle,
-      progress, tag, separator, spinner, virtualList, navigation, canvasHost}
+    check caps.kinds == {NodeKind.column, NodeKind.row, NodeKind.text,
+      NodeKind.button, NodeKind.input, NodeKind.checkbox, NodeKind.toggle,
+      NodeKind.progress, NodeKind.tag, NodeKind.separator, NodeKind.spinner,
+      NodeKind.virtualList, NodeKind.navigation, NodeKind.canvasHost}
     check NodeKind.virtualList in caps.kinds
     check NodeKind.navigation in caps.kinds
     check caps.layouts == {lfGap, lfPadding, lfWidth, lfHeight, lfFlexGrow,
