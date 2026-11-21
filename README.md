@@ -2,15 +2,51 @@
 
 # Leaf
 
-**用 Nim 描述界面，让状态驱动系统原生控件。**
-
-声明式 UI · 组件状态 · Win32 原生控件 · SQLite 应用脚手架
+**用 Nim 写原生桌面应用，不用嵌入浏览器。**
+界面和业务逻辑写在一起，按钮与输入框交给系统原生控件。
 
 [![CI](https://github.com/SatoriTours/Leaf/actions/workflows/ci.yml/badge.svg)](https://github.com/SatoriTours/Leaf/actions/workflows/ci.yml)
 
-[第一个应用](docs/getting-started.md) · [笔记 Demo](examples/native_notes/README.md) · [文档](docs/README.md)
+Windows x64 优先的 beta · [书架源码](examples/bookshelf/main.nim) · [第一个应用](docs/getting-started.md) · [文档](docs/README.md)
 
 </div>
+
+## 我的书架
+
+这是一个单栏书架：搜索框下面是书名和作者。输入 `设计`，只剩《设计心理学》和《写给大家看的设计书》；清空输入框，四本书全部回来。
+
+下面是[同一个窗口的 `view` 源码](examples/bookshelf/main.nim#L25)节选：
+
+~~~nim
+textField shelf.query, key = "search", placeholder = "搜索书名"
+list shelf.matchingBooks, key = "books", rowHeight = 58,
+     styles = style({"height": "full"}):
+  column:
+    gap: 3
+    text item.title
+    text item.author, variant = "secondary"
+~~~
+
+`textField shelf.query` 把输入写回状态，`shelf.matchingBooks` 用普通 Nim 代码按书名筛选。你只要描述一行里如何显示 `item`，Leaf 会用 `item.id` 识别每一行，按需创建可见行与预留行。
+
+## 在 Windows 跑起书架
+
+需要 **Windows x64、Nim 2.2.6+ 和 MinGW（含 windres）**。在仓库根目录打开 PowerShell：
+
+~~~powershell
+nim c -d:release --out:target/nim/leaf.exe src/leaf_cli.nim
+cd examples/bookshelf
+..\..\target\nim\leaf.exe build --output target\LeafBookshelf.exe
+.\target\LeafBookshelf.exe
+~~~
+
+在窗口的“搜索书名”输入框试试 `设计`，再清空它。示例不需要数据库；在最后一条命令末尾加 `--dark` 可用深色主题启动。[工具链与 SDK](docs/installation.md) · [截图采集说明](docs/screenshots/README.md#书架截图)
+
+## 更完整的应用示例
+
+- [预约](examples/booking/README.md)：绑定姓名和日期，用可复用的步进器限制人数。
+- [读书清单](examples/reading_list.nim)：把列表和编辑器拆成可复用组件；编辑草稿，点保存才更新内存中的清单。
+- [Leaf Notes](examples/native_notes/README.md)：在中栏搜索，在右栏编辑，点保存才写入 SQLite。
 
 <p align="center">
   <picture>
@@ -20,61 +56,29 @@
   <br><sub>Leaf Notes · Windows 原生应用 · <a href="docs/screenshots/leaf-notes-workbench-20261118-light.png">浅色原图</a> / <a href="docs/screenshots/leaf-notes-workbench-20261118-dark.png">深色原图</a> / <a href="docs/screenshots/README.md">截图来源</a></sub>
 </p>
 
-**原生交互，也有自己的风格。** 松石主题以松绿强调色、圆角输入框和清晰的主次按钮，提供统一的浅色与深色外观；文本输入、选区和 IME 仍由系统 EDIT 控件处理。示例与新生成的应用默认使用浅色松石，框架默认保留系统外观，也可在启动时通过 `app.withNativeTheme(matsuLight)` 或 `app.withNativeTheme(matsuDark)` 显式选择主题。
+## 能力与平台边界
 
-**从一个真正可用的小应用开始。** [Leaf Notes](examples/native_notes/README.md) 将导航、搜索、虚拟列表与多行编辑组合成一个本地笔记应用：新建、收藏、归档，点击保存后写入 SQLite，关闭重开仍在。不是控件拼图，也不是网页效果图。
-
-## 状态 → 界面 → 事件
-
-从[第一个应用](docs/getting-started.md)使用 `component / state / view / app` 开始。看[预约示例](examples/booking/README.md)如何把 `textField name`、`datePicker day, earliest = today()` 与可复用的 `stepper guests, maximum = 6` 绑定到同一份状态。按钮块直接写 Nim 动作，不需要写回调包装。
-
-[声明式组件指南](docs/declarative-components.md)说明 `model`、只读 `prop`、平台契约和本轮验证边界。下面的低层 API 仍然受支持。
-
-业务和组件状态留在 Nim；Windows 界面使用系统的按钮、输入框和其他原生控件，不依赖浏览器或 Rust 渲染桥接。
-
-```nim
-let n = ctx.value(count)
-componentView:
-  column:
-    text $n:
-      key: "count"
-    button "增加 +1":
-      key: "add"
-      onClick(e): discard count.update(proc(v: int): int = v + 1)
-```
-
-这是组件 render 中的**节选**；初始化、组件声明与启动见[完整入门代码](docs/getting-started.md)。
-
-| 你来描述 | Leaf 来处理 |
-| --- | --- |
-| **界面结构** | 编译期 DSL、类型检查、原生布局与控件 |
-| **状态变化** | 候选校验、受影响组件更新、稳定身份 |
-| **应用业务** | 页面路由、SQLite Model、迁移及 CRUD 生成 |
-
-## 先在 Windows 跑起来
-
-从源码需要 **Windows x64、Nim 2.2.6+ 和 MinGW（含 windres）**。在仓库根目录：
-
-```powershell
-nim c -d:release --out:target/nim/leaf.exe src/leaf_cli.nim
-.\target\nim\leaf.exe init my-app
-cd my-app
-..\target\nim\leaf.exe run
-```
-
-[SDK 安装与发布状态](docs/installation.md) · [源码开发](docs/development.md)
-
-## 从小界面，到完整应用
+Windows 优先的 beta：当前桌面 GUI 仅支持 Windows x64。Linux 和 macOS 会明确报不支持，没有备用 GUI；可用 headless 检查共享逻辑。Android 保留已有原生路径，未经设备矩阵验收。完整 beta 门尚未闭合，见[开发进度](docs/progress.md)。
 
 | 想做什么 | 从这里开始 |
 | --- | --- |
-| 学 State、布局和事件 | [第一个应用](docs/getting-started.md) → [Nim API](docs/nim-api.md) |
-| 看完整的原生应用 | [Leaf Notes 笔记 Demo](examples/native_notes/README.md) |
-| 学 Windows 原生交互 | [原生表单](examples/native_forms/README.md) · [万行 SQLite 列表](examples/native_list/README.md) |
+| 学状态、布局和事件 | [第一个应用](docs/getting-started.md) → [声明式组件](docs/declarative-components.md) → [Nim API](docs/nim-api.md) |
+| 学 Windows 原生交互 | [原生表单](examples/native_forms/README.md) · [万行 SQLite 列表](examples/native_list/README.md) · [低层计数器](examples/counter.nim) |
 | 生成带数据库的应用 | [脚手架](docs/scaffolding.md) → [Model](docs/models.md) → [迁移](docs/migrations.md) |
-| 理解设计与提交边界 | [架构](docs/architecture.md) |
-| 打包给别人 | [Windows 应用打包](docs/packaging.md) |
+| 构建、打包与理解架构 | [源码开发](docs/development.md) · [Windows 应用打包](docs/packaging.md) · [架构](docs/architecture.md) |
 
-> **当前阶段：beta，优先 Windows。** 默认桌面路径是 Win32；Linux/macOS GUI 尚未实现，明确报不支持，不使用备用渲染器。共享逻辑可做 headless 检查。Android 保留已有原生路径，不代表设备矩阵已验收。平台限制与历史未关闭项见[开发进度](docs/progress.md)。
+## 性能：10,000 个对象的 CPU 侧开销
 
-[MIT 许可](LICENSE) · 第三方清单随应用及 SDK 打包，详见 `licenses/inventory.json`。
+Leaf 按 key 更新受影响的组件，虚拟列表按需创建行，不需要浏览器运行时。
+
+| 10,000 个对象 | CPU 侧单次操作 p95 |
+| --- | ---: |
+| staticFrame（静态场景重绘） | 11.67 ms |
+| properties（每对象改属性） | 22.49 ms |
+| geometry（每对象改几何） | 19.94 ms |
+
+Windows VM · 软件渲染 · 10,000 对象 · 三次进程 p95 中位数（2026-10-29）。
+
+CPU 侧耗时，不代表显示 FPS；动态场景尚未达到稳定 60 FPS 目标。完整方法与结果见 [Canvas CPU 侧性能采集](benchmarks/CANVAS_PERFORMANCE.md)。
+
+[MIT 许可](LICENSE) · 第三方清单见打包产物内的 `licenses/inventory.json`。

@@ -67,6 +67,7 @@ leaf --headless --click add --click add
 
 | 想继续学 | 去哪里 |
 | --- | --- |
+| 搜索、选择、编辑与保存 | [读书清单源码](../examples/reading_list.nim) · [字段绑定、列表和事件](declarative-components.md#虚拟列表与命名事件) |
 | 声明可复用控件、绑定输入 | [声明式组件](declarative-components.md) · [预约示例](../examples/booking/README.md) |
 | 增加布局、输入框和列表 | [Nim API](nim-api.md) · [待办源码](../examples/todo.nim) |
 | 看完整应用可以长什么样 | [Windows 原生表单](../examples/native_forms/README.md) |

@@ -1,0 +1,8 @@
+{
+  "name": "LeafBookshelf",
+  "identifier": "org.leaf.bookshelf",
+  "version": "0.1.0",
+  "entry": "main.nim",
+  "include": ["main.nim"],
+  "backend": "native"
+}

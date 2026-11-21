@@ -46,6 +46,43 @@ component Stepper, exported:
 - `state` 初值在挂载时求值一次；`key` 保留为可选的组件身份参数。稳定的键和控件类型允许宿主差量更新，避免不必要的原生控件重建；这不是新的性能基准结论。
 - 需要事件对象时用旧 `onClick(e)`；需要路由、所有权或生命周期低层接口时可继续用 `defineComponent`、`componentView` 与 `componentApplication`。
 
+## 文本输入：绑定或显式处理
+
+- `textField book.query` 双向绑定 `state` 或 `model` 的字符串字段，也可写 `textField draft.details.title` 或沿用 `textField name`。Leaf 在输入事件中更新整个对象的草稿，只改目标字段；通知与写回随同一次 UI 提交接受或回滚。
+- 可省略通知，也可写 `onChange:` 或 `onChange(query):`。后者的参数是**输入字符串**，不是事件对象；回调读取绑定时已能看到新值。程序更新重新显示文本，但不触发输入通知。
+- `textField value = expr:` 显示任意字符串表达式。它的 `onChange(query):` 可以自行处理输入，但 Leaf 不会写回表达式。只读的 `prop`、计算属性、引用解引用和下标不能用在双向路径里。程序要修改对象状态时，仍需在事件中赋一个新对象；字段绑定并不放开普通 Nim 语句中的原地写入。
+
+## 虚拟列表与命名事件
+
+下面是[读书清单](../examples/reading_list.nim)的列表组件。每项只写一次布局；`item` 是该项，在列表块外不可见。
+
+```nim
+component NoteList:
+  prop shown: seq[Note]
+  event onSelect: int
+  view:
+    list shown, key = "notes", rowHeight = 36, styles = style({"height": "120", "width": "full"}):
+      text item.title:
+        key: "note-" & $item.id
+      button "打开", key = "open-" & $item.id:
+        onSelect(item.id)
+```
+
+- `list shown:` 接受 Nim 序列或数组；每项内的控件放在同一横行，只按虚拟视口构造所需的行。列表块里的 `key = item.code` 可覆盖默认的 `item.id`；键转成字符串，重复立即报错。
+- 没有 `id` 或显式键时用位置，只适合固定顺序的静态数据。排序、筛选及可编辑列表请用稳定业务键。重排时仍保留可见且键未变的行，事件会读取该键对应的最新行数据；因过滤或视口淘汰而卸载的行不保证保留本地状态。
+- 列表头的 `key = "notes"` 指列表控件本身，不是行身份。没有显式键时 Leaf 按代码位置生成；需要用 headless 命令操作列表，或在循环中重复生成同一处列表，请显式指定彼此不同的列表键。
+- `event onSelect: int` 声明一个带类型的事件，子组件在事件动作中调用 `onSelect(item.id)`；父组件写 `onSelect(id):` 处理。同理，`event onSave`、`onSave()` 与 `onSave:` 分别声明、发出和处理无参数事件。处理器可以省略；已连接的处理器与触发动作共用同一批 UI 草稿。常规 Nim 副作用不随 UI 回滚。
+
+从仓库根目录运行示例（不需要窗口）：
+
+```sh
+nim c -d:leafHeadlessOnly --out:target/nim/reading-list examples/reading_list.nim
+target/nim/reading-list --headless --list notes 0 2 --change search Nim \
+  --click open-2 --change title "Nim 📚" --click save
+```
+
+最终 JSON 包含列表标题 `Nim 📚` 和状态 `已保存：Nim 📚`。搜索、草稿和保存结果都在内存中；持久化参见 [Leaf Notes](../examples/native_notes/README.md)。
+
 ## 契约与平台实现
 
 契约声明调用方可见的参数；实现提供自己的 `state` 和 `view`，不重复声明参数：

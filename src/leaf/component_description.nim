@@ -56,6 +56,7 @@ type
     instance:ErasedComponent
     instanceKey:string
     rowFactory:proc(index:int):UiDescription {.closure.}
+    updateRowsByKey: bool
     outlet:PageOutletSpec
 
 var componentDeclarations {.compileTime.}:Table[string,string]
@@ -242,9 +243,16 @@ proc componentList*(key:string,keys:seq[string],builder:proc(index:int):UiDescri
     rowHeight,estimatedHeight,overscan,styles)
   result=hostShell(node,@[])
   result.rowFactory=builder
+proc keyedComponentListInternal*(key:string,keys:seq[string],
+    builder:proc(index:int):UiDescription {.closure.},rowHeight=0.0,
+    estimatedHeight=40.0,overscan=2,styles:Styles=default(Styles)):UiDescription =
+  result = componentList(key,keys,builder,rowHeight,estimatedHeight,overscan,styles)
+  result.updateRowsByKey = true
+proc updatesRowsByKeyInternal*(description:UiDescription):bool = description.updateRowsByKey
 proc buildDescriptionRow*(description:UiDescription,index:int):UiDescription=
   if description.rowFactory!=nil:description.rowFactory(index)
   else:host(description.hostNode.listSource.buildRow(index))
 proc hostOnly*(description:UiDescription):UiDescription=
   result=hostShell(description.hostNode,@[])
   result.rowFactory=description.rowFactory
+  result.updateRowsByKey=description.updateRowsByKey

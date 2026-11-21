@@ -25,10 +25,11 @@ proc app*[M](definition: ComponentDef[tuple[], M], title = "Leaf",
 type
   Parameter = object
     name, typ, fallback: NimNode
-    model: bool
+    model, event: bool
 
   Bindings=object
-    entries:Table[string,NimNode]
+    entries, events:Table[string,NimNode]
+    rowSamples: ref OrderedTable[string, (NimNode, NimNode)]
     animations, props:HashSet[string]
 proc spelling(node: NimNode): string = nimIdentNormalize(node.strVal)
 proc hasKey(slots:Bindings,name:string):bool=slots.entries.hasKey(name)
@@ -54,13 +55,23 @@ proc declareNames(node:NimNode,shadow:var HashSet[string])=
 
 # The generated signature travels with the constructor across module imports.
 # Lower only its model arguments to a binding; all other expressions stay values.
-proc modelSignatureName(node: NimNode): NimNode =
+proc signatureName(node: NimNode, prefix: string, suffix = ""): NimNode =
   case node.kind
-  of nnkIdent, nnkSym: ident("leafModels_" & node.strVal)
+  of nnkIdent, nnkSym: ident(prefix & node.strVal & suffix)
   of nnkDotExpr:
-    let member = modelSignatureName(node[1])
+    let member = signatureName(node[1], prefix, suffix)
     if member == nil: nil else: newDotExpr(node[0], member)
   else: nil
+
+proc modelSignatureName(node: NimNode): NimNode =
+  signatureName(node, "leafModels_")
+
+proc eventSignatureName(callee, name: NimNode): NimNode =
+  signatureName(callee, "leafEvent_", "_" & name.spelling)
+
+proc namedEvent(name: NimNode): bool =
+  name.named and name.strVal.len > 2 and name.strVal.startsWith("on") and
+    name.strVal[2].isUpperAscii
 
 type ModelBindingInternal*[T] = object
   slot*: State[T]
@@ -77,13 +88,188 @@ template modelArgumentInternal(signature, index, label, handle, current: untyped
   else:
     current
 
+macro checkFieldPathInternal(path: typed): untyped =
+  var current = path
+  while current.kind in {nnkDotExpr, nnkCheckedFieldExpr}:
+    if current.kind == nnkCheckedFieldExpr: current = current[0]
+    if current[1].kind != nnkSym or current[1].symKind != nskField:
+      error("textField requires a writable object field path", path)
+    current = current[0]
+  if current.kind != nnkSym:
+    error("textField requires a value-object field path (no references or computed properties)", path)
+  newEmptyNode()
+
+proc controlName(node: NimNode, name: string): bool =
+  node.eqIdent(name) or (node.kind == nnkDotExpr and node[1].eqIdent(name))
+
+proc replaceRoot(path, root: NimNode): NimNode =
+  if path.kind == nnkDotExpr:
+    newDotExpr(replaceRoot(path[0], root), path[1])
+  else: root
+
 const LayoutProperties=["padding","gap","width","height","align"]
 
 proc eventProperty(node:NimNode):bool=
   node.kind in {nnkCall,nnkCommand} and node.len>=2 and node[0].named and
     node[0].strVal in ["onClick","onChange","onSubmit","onEnter","onLeave","onDragStart","onDrag","onDragEnd","onDragCancel","onPointerDown","onPointerMove","onPointerUp","onWheel","onKeyDown"] and node[^1].kind==nnkStmtList
 
-proc lower(node,ctx:NimNode,slots:Bindings,shadow:HashSet[string],event:bool,insideCanvas=false):NimNode=
+proc lower(node,ctx:NimNode,slots:Bindings,shadow:HashSet[string],event:bool,
+    insideCanvas=false):NimNode
+
+proc handlerParameter(node: NimNode): NimNode =
+  if node.len notin {2, 3} or (node.len == 3 and not node[1].named):
+    error("an event takes at most one parameter name", node)
+  if node.len == 3: node[1] else: genSym(nskParam, "event")
+
+proc lowerNamedEvent(node,signature,ctx:NimNode,slots:Bindings,
+    shadow:HashSet[string]):NimNode =
+  let parameter = handlerParameter(node)
+  var nested = shadow.scoped
+  nested.incl(parameter.spelling)
+  let payload = newCall(signature)
+  let body = lower(node[^1],ctx,slots,nested,true)
+  var formals = @[newEmptyNode()]
+  if node.len == 3: formals.add(newIdentDefs(parameter,payload))
+  let handler = newProc(params=formals,body=body,procType=nnkLambda)
+  let takesPayload = newLit(node.len == 3)
+  let fallback = if node.eventProperty:
+      newProc(params = @[newEmptyNode(),newIdentDefs(parameter,bindSym"Event")],
+        body=body,procType=nnkLambda)
+    else:
+      let message = newLit("unknown component event: " & node[0].strVal)
+      quote do: {.error: `message`.}
+  result = quote do:
+    when declared(`signature`):
+      when `takesPayload` == (`payload` is void):
+        {.error: "event handler parameter does not match the declaration".}
+      else:
+        `handler`
+    else:
+      `fallback`
+
+proc lowerTextField(node,ctx:NimNode,slots:Bindings,shadow:HashSet[string]):NimNode =
+  let argument = node[1]
+  let controlled = argument.kind == nnkExprEqExpr and argument[0].eqIdent("value")
+  let value = if controlled: argument[1] else: argument
+  var slot: NimNode
+  if not controlled:
+    var root = value
+    while root.kind == nnkDotExpr and root[1].named: root = root[0]
+    if not root.stateName(slots, shadow) or root.spelling in slots.props or
+        root.spelling in slots.animations:
+      error("textField needs a writable state/model name or object field path; use value = expr for display", value)
+    slot = slots[root.spelling]
+  var body = newStmtList()
+  var notification: NimNode
+  let hasBody = node[^1].kind == nnkStmtList
+  if hasBody:
+    for child in node[^1]:
+      if child.eventProperty and child[0].eqIdent("onChange"):
+        if notification != nil: error("duplicate onChange", child)
+        notification = child
+      else: body.add(child)
+
+  result = newCall(node[0], lower(value,ctx,slots,shadow,false))
+  for i in 2 ..< node.len - ord(hasBody):
+    result.add(lower(node[i],ctx,slots,shadow,false))
+  if slot != nil or notification != nil:
+    let changed = genSym(nskParam, "changed")
+    var actions = newStmtList()
+    if slot != nil:
+      if value.kind == nnkDotExpr:
+        let updated = genSym(nskVar, "updated")
+        let field = replaceRoot(value, updated)
+        let read = newCall(bindSym"readDraft", slot)
+        let write = newCall(bindSym"writeDraft", slot, updated)
+        actions.add quote do:
+          var `updated` = `read`
+          when compiles(block: `field` = `changed`):
+            checkFieldPathInternal(`field`)
+            `field` = `changed`
+            `write`
+          else:
+            {.error: "textField needs a writable string field in a value-object path".}
+      else:
+        actions.add(newCall(bindSym"writeDraft",slot,changed))
+    if notification != nil:
+      var nested = shadow.scoped
+      let parameter = handlerParameter(notification)
+      if notification.len == 3:
+        nested.incl(parameter.spelling)
+        actions.add(newLetStmt(parameter,changed))
+      actions.add(lower(notification[^1],ctx,slots,nested,true))
+    let handler = newProc(params = @[newEmptyNode(),newIdentDefs(changed,bindSym"string")],
+      body = actions, procType = nnkLambda)
+    result.add(newTree(nnkExprEqExpr,ident"onChange",handler))
+  if body.len > 0: result.add(lower(body,ctx,slots,shadow,false))
+  result.copyLineInfo(node)
+
+proc normalizeView(node:NimNode):NimNode
+
+macro preferIdFieldInternal(id: typed, index: untyped): untyped =
+  let access = if id.kind == nnkCheckedFieldExpr: id[0] else: id
+  let key = if access.kind == nnkDotExpr and access[1].kind == nnkSym and
+      access[1].symKind == nskField: id else: index
+  newCall(bindSym"$",key)
+
+template itemKeyInternal(item, index: untyped): string =
+  when compiles(item.id): preferIdFieldInternal(item.id,index)
+  else: $index
+
+proc lowerList(node,ctx:NimNode,slots:Bindings,shadow:HashSet[string]):NimNode =
+  let source = genSym(nskLet, "items")
+  let index = genSym(nskParam, "index")
+  let keys = genSym(nskVar, "keys")
+  let item = ident"item"
+  var nested = shadow.scoped
+  nested.incl(item.spelling)
+
+  # Rows can be built after this render attempt; capture only the values they read.
+  var rowSlots = slots
+  new(rowSlots.rowSamples)
+  var identity: NimNode
+  var rowBody = newStmtList()
+  for child in node[^1]:
+    if child.kind == nnkAsgn and child[0].eqIdent("key"):
+      if identity != nil: error("duplicate list item key", child)
+      identity = lower(child[1],ctx,rowSlots,nested,false)
+    else: rowBody.add(child)
+  let row = normalizeView(lower(newCall(ident"row",rowBody),ctx,rowSlots,nested,false))
+  let rowDescription = newCall(bindSym"componentView",newStmtList(row))
+  let buildRow = newProc(params = @[bindSym"UiDescription",newIdentDefs(index,bindSym"int")],
+    body = newStmtList(newLetStmt(item,newTree(nnkBracketExpr,source,index)),rowDescription),
+    procType = nnkLambda)
+
+  let position = genSym(nskForVar, "position")
+  if identity == nil: identity = newCall(bindSym"itemKeyInternal",item,position)
+  else: identity = newCall(bindSym"$",identity)
+  let collection = lower(node[1],ctx,slots,shadow,false)
+  var setup = newStmtList()
+  for (original, sample) in rowSlots.rowSamples[].values:
+    setup.add(newLetStmt(sample,lower(original,ctx,slots,shadow,false)))
+  let prepareKeys = quote do:
+    let `source` = @(`collection`)
+    if `source`.len > MaxListItems: fail("list exceeds 100000 items")
+    var `keys` = newSeqOfCap[string](`source`.len)
+    for `position` in 0 ..< `source`.len:
+      let `item` = `source`[`position`]
+      `keys`.add(`identity`)
+  for statement in prepareKeys: setup.add(statement)
+  let call = newCall(bindSym"keyedComponentListInternal",
+    newTree(nnkExprEqExpr,ident"keys",keys),newTree(nnkExprEqExpr,ident"builder",buildRow))
+  var hasKey = false
+  for i in 2 ..< node.len-1:
+    if node[i].kind != nnkExprEqExpr: error("list options must be named", node[i])
+    hasKey = hasKey or node[i][0].eqIdent("key")
+    call.add(lower(node[i],ctx,slots,shadow,false))
+  if not hasKey:
+    let location = node.lineInfoObj
+    call.add(newTree(nnkExprEqExpr,ident"key",newLit("list@" & $location.line & ":" & $location.column)))
+  setup.add(call)
+  result = newTree(nnkBlockExpr,newEmptyNode(),setup)
+  result.copyLineInfo(node)
+
+proc lower(node,ctx:NimNode,slots:Bindings,shadow:HashSet[string],event:bool,insideCanvas:bool):NimNode=
   let insideCanvas = insideCanvas or (node.kind in {nnkCall,nnkCommand} and node.len > 1 and node[0].eqIdent("canvas"))
   if node.kind in {nnkCall,nnkCommand} and node.len>0 and
       node[0].kind==nnkDotExpr and node[0][0].stateName(slots,shadow) and
@@ -100,10 +286,31 @@ proc lower(node,ctx:NimNode,slots:Bindings,shadow:HashSet[string],event:bool,ins
     for i in 1..<node.len:result.add(lower(node[i],ctx,slots,shadow,event,insideCanvas))
     result.copyLineInfo(node)
     return
+  if not event and not insideCanvas and node.kind in {nnkCall,nnkCommand} and
+      node.len >= 3 and node[0].eqIdent("list") and node[^1].kind == nnkStmtList:
+    return lowerList(node,ctx,slots,shadow)
+  if not event and not insideCanvas and node.kind in {nnkCall,nnkCommand} and
+      node.len > 1 and node[1].kind != nnkStmtList and node[0].controlName("textField"):
+    return lowerTextField(node,ctx,slots,shadow)
+  if node.kind in {nnkCall,nnkCommand} and node.len > 0 and node[0].named and
+      node[0].spelling in slots.events and node[0].spelling notin shadow:
+    if not event: error("component events can only be triggered in event handlers", node)
+    let callback = slots.events[node[0].spelling]
+    let call = newCall(callback)
+    for i in 1 ..< node.len: call.add(lower(node[i],ctx,slots,shadow,true,insideCanvas))
+    return quote do:
+      if `callback` != nil: `call`
   if node.stateName(slots,shadow):
     if node.spelling in slots.props: return slots[node.spelling]
     if event:return newCall(bindSym"readDraft",slots[node.spelling])
-    let sample=newCall(bindSym"value",ctx,slots[node.spelling])
+    var sample: NimNode
+    if slots.rowSamples != nil:
+      let name = node.spelling
+      if not slots.rowSamples[].hasKey(name):
+        slots.rowSamples[][name] = (node,genSym(nskLet,"rowSample"))
+      sample = slots.rowSamples[][name][1]
+    else:
+      sample = newCall(bindSym"value",ctx,slots[node.spelling])
     if insideCanvas and node.spelling in slots.animations:
       return newCall(bindSym"canvasTweenValueInternal",sample)
     return sample
@@ -207,7 +414,25 @@ proc lower(node,ctx:NimNode,slots:Bindings,shadow:HashSet[string],event:bool,ins
         node[^1].kind==nnkStmtList and node[^1].len==1 and node[^1][0].eqIdent("fill"):
       return result
     let signature = if not event and not insideCanvas: modelSignatureName(node[0]) else: nil
+    var eventArguments: seq[NimNode]
     for i,child in node:
+      if i > 0 and i == node.len - 1 and child.kind == nnkStmtList and signature != nil:
+        var content = newStmtList()
+        for entry in child:
+          if entry.kind in {nnkCall,nnkCommand} and entry.len >= 2 and
+              entry[^1].kind == nnkStmtList and entry[0].namedEvent:
+            # Handler blocks are not children and go in the call's named arguments.
+            for existing in node:
+              if existing.kind == nnkExprEqExpr and existing[0].eqIdent(entry[0]):
+                error("duplicate event handler", entry)
+            for existing in eventArguments:
+              if existing[0].eqIdent(entry[0]): error("duplicate event handler", entry)
+            let eventType = eventSignatureName(node[0],entry[0])
+            eventArguments.add(newTree(nnkExprEqExpr,entry[0],
+              lowerNamedEvent(entry,eventType,ctx,slots,shadow)))
+          else: content.add(entry)
+        result[i] = lower(content,ctx,slots,shadow,false)
+        continue
       # The callee and argument labels are not value references.
       if i == 0 and not event and node[^1].kind == nnkStmtList: continue
       let argument = if child.kind == nnkExprEqExpr: child[1] else: child
@@ -222,6 +447,11 @@ proc lower(node,ctx:NimNode,slots:Bindings,shadow:HashSet[string],event:bool,ins
         else: result[i] = binding
       else:
         result[i]=lower(child,ctx,slots,shadow,event,insideCanvas)
+    if eventArguments.len > 0:
+      let content = result[^1]
+      result.del(result.len-1)
+      for argument in eventArguments: result.add(argument)
+      if content.len > 0: result.add(content)
   of nnkDotExpr:
     result[0]=lower(node[0],ctx,slots,shadow,event,insideCanvas)
   of nnkExprEqExpr,nnkExprColonExpr:
@@ -265,6 +495,13 @@ proc normalizeView(node:NimNode):NimNode=
   for i,child in node:result[i]=normalizeView(child)
 
 proc parseParameter(section: NimNode): Parameter =
+  if section[0].eqIdent("event"):
+    if section.len notin {2, 3} or not section[1].namedEvent or
+        (section.len == 3 and (section[2].kind != nnkStmtList or section[2].len != 1 or
+          section[2][0].kind == nnkAsgn)):
+      error("use event onAction or event onAction: PayloadType", section)
+    return Parameter(name: section[1], event: true, fallback: newNilLit(),
+      typ: if section.len == 2: bindSym"void" else: section[2][0])
   if section.len != 3 or not section[1].named or section[^1].kind != nnkStmtList or section[^1].len != 1:
     error("use model name: Type or prop name: Type = defaultValue", section)
   result.name = section[1]
@@ -281,6 +518,10 @@ proc publicName(name: NimNode): NimNode = newTree(nnkPostfix, ident"*", name)
 
 proc parameterType(param: Parameter): NimNode =
   if param.model: newTree(nnkBracketExpr, bindSym"ModelBindingInternal", param.typ)
+  elif param.event:
+    let formals = newTree(nnkFormalParams,newEmptyNode())
+    if not param.typ.eqIdent("void"): formals.add(newIdentDefs(ident"value",param.typ))
+    newTree(nnkProcTy,formals,newTree(nnkPragma,ident"closure"))
   else: param.typ
 
 proc instanceFormals(parameters: seq[Parameter], returns: NimNode): seq[NimNode] =
@@ -297,6 +538,14 @@ proc modelSignature(name: NimNode, parameters: seq[Parameter], exported: bool): 
     names.add(newLit(if param.model: param.name.spelling else: ""))
   newProc(declaration, @[ident"untyped"], newStmtList(names), nnkTemplateDef)
 
+proc signatures(name: NimNode, parameters: seq[Parameter], exported: bool): NimNode =
+  result = newStmtList(modelSignature(name, parameters, exported))
+  for param in parameters:
+    if param.event:
+      let signature = eventSignatureName(name,param.name)
+      result.add(newProc(if exported: publicName(signature) else: signature,
+        @[ident"typedesc"], newStmtList(param.typ), nnkTemplateDef))
+
 proc instanceFactory(name, definition: NimNode, parameters: seq[Parameter],
     exported: bool, declareSignature: bool): NimNode =
   var values = newTree(nnkTupleConstr)
@@ -305,7 +554,7 @@ proc instanceFactory(name, definition: NimNode, parameters: seq[Parameter],
   let callable = if exported: publicName(name) else: name
   result = newStmtList()
   if declareSignature:
-    result.add(modelSignature(name, parameters, exported))
+    result.add(signatures(name, parameters, exported))
   result.add(newProc(callable, instanceFormals(parameters, bindSym"UiDescription"),
     newStmtList(newCall(bindSym"componentInstanceInternal", definition, values, ident"key"))))
 
@@ -337,18 +586,18 @@ proc componentDeclaration(declaration, body: NimNode, inherited: seq[Parameter] 
   for section in body:
     if section.kind==nnkCommentStmt:continue
     if section.kind in {nnkCall, nnkCommand} and section.len > 0 and
-        (section[0].eqIdent("model") or section[0].eqIdent("prop")):
+        (section[0].eqIdent("model") or section[0].eqIdent("prop") or section[0].eqIdent("event")):
       if inherited.len > 0 or callName != nil:
         error("parameters of an implementation are declared by its contract", section)
       if declaration.kind in {nnkCall, nnkCommand, nnkObjConstr}:
-        error("use either typed props or model/prop declarations, not both", section)
+        error("use either typed props or model/prop/event declarations, not both", section)
       let param = parseParameter(section)
       if param.name.spelling in seen: error("duplicate component binding", param.name)
       seen.incl(param.name.spelling)
       parameters.add(param)
       continue
     if section.kind notin {nnkCall,nnkCommand} or section.len!=2 or section[^1].kind!=nnkStmtList:
-      error("component contains model, prop, state:, animation: and view: declarations",section)
+      error("component contains model, prop, event, state:, animation: and view: declarations",section)
     if section[0].eqIdent("state") or section[0].eqIdent("animation"):
       for entry in section[^1]:
         if entry.kind==nnkCommentStmt:continue
@@ -381,6 +630,9 @@ proc componentDeclaration(declaration, body: NimNode, inherited: seq[Parameter] 
   for param in parameters:
     let access = newDotExpr(props, param.name)
     let initialAccess = newDotExpr(initProps, param.name)
+    if param.event:
+      slots.events[param.name.spelling] = access
+      continue
     slots[param.name.spelling] = if param.model: newDotExpr(access, ident"slot") else: access
     initSlots[param.name.spelling] = if param.model: newDotExpr(initialAccess, ident"slot") else: initialAccess
     if param.model:
@@ -476,7 +728,7 @@ macro implementInternal(name: static[string], specification, platform,
   var parameters: seq[Parameter]
   for param in specification:
     parameters.add(Parameter(name: ident(param[1].strVal), typ: param[2],
-      model: param[0].eqIdent("model"),
+      model: param[0].eqIdent("model"), event: param[0].eqIdent("event"),
       fallback: if param.len == 4: param[3] else: newEmptyNode()))
   componentDeclaration(ident(name), body, parameters, implementationName(name, target),
     exported.eqIdent("true"))
@@ -492,8 +744,8 @@ macro contract*(declaration: untyped, arguments: varargs[untyped]): untyped =
   for section in arguments[^1]:
     if section.kind == nnkCommentStmt: continue
     if section.kind notin {nnkCall, nnkCommand} or section.len < 2 or
-        not (section[0].eqIdent("model") or section[0].eqIdent("prop")):
-      error("a contract declares only model and prop parameters", section)
+        not (section[0].eqIdent("model") or section[0].eqIdent("prop") or section[0].eqIdent("event")):
+      error("a contract declares only model, prop and event parameters", section)
     let param = parseParameter(section)
     if param.name.spelling in seen: error("duplicate contract binding", section)
     seen.incl(param.name.spelling)
@@ -531,7 +783,7 @@ macro contract*(declaration: untyped, arguments: varargs[untyped]): untyped =
   # or a platform-dependent branch in the running application.
   let dispatch = newStmtList(newTree(nnkMixinStmt, override, shared), choices)
   let name = instanceName(declaration)
-  result = newStmtList(spec, modelSignature(name, parameters, exported),
+  result = newStmtList(spec, signatures(name, parameters, exported),
     newProc(if exported: publicName(name) else: name,
       instanceFormals(parameters, bindSym"UiDescription"), dispatch, nnkTemplateDef))
 

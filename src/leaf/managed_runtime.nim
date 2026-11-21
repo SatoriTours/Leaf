@@ -185,7 +185,8 @@ proc descriptionBytes(desc:UiDescription,path:string):int=
 proc copyInstance(item:Instance):Instance=
   result=Instance()
   result[]=item[]
-proc materializeList(d:ManagedDriver,item:Instance,first,finish:int,protected:seq[int])
+proc materializeList(d:ManagedDriver,item:Instance,first,finish:int,protected:seq[int],
+    refreshRows=false)
 proc deactivate(d:ManagedDriver,id:uint64)
 proc erase(d:ManagedDriver,id:uint64)=
   let old=d.current(id)
@@ -331,18 +332,20 @@ proc reconcile(d:ManagedDriver,desc:UiDescription,oldId,parent,owner:uint64,
       if old!=nil and old.description.hostNode.listSource==node.listSource:
         item.rows=old.rows;item.children=old.children;item.rowClock=old.rowClock
       elif old!=nil:
-        var restoreKeys:seq[string]
-        for child in old.children:
-          let previous=d.current(child)
-          if previous!=nil and previous.rowIndex>=0:
-            restoreKeys.add(old.description.hostNode.listSource.itemKey(previous.rowIndex))
-        for slot in old.rows.values:d.erase(slot.id)
+        let refreshRows = desc.updatesRowsByKeyInternal and old.description.updatesRowsByKeyInternal
         var indices:seq[int]
         var lookup:Table[string,int]
         for i in 0..<node.listSource.len:lookup[node.listSource.itemKey(i)]=i
-        for key in restoreKeys:
-          if lookup.hasKey(key):indices.add(lookup.getOrDefault(key))
-        d.materializeList(item,0,0,indices)
+        for child in old.children:
+          let previous=d.current(child)
+          if previous!=nil and previous.rowIndex>=0:
+            let key=old.description.hostNode.listSource.itemKey(previous.rowIndex)
+            if lookup.hasKey(key):
+              indices.add(lookup.getOrDefault(key))
+              if refreshRows: item.rows[key]=old.rows[key]
+        for key,slot in old.rows:
+          if key notin item.rows:d.erase(slot.id)
+        d.materializeList(item,0,0,indices,refreshRows)
       return id
     var previous:Table[string,uint64]
     if old!=nil:
@@ -459,11 +462,14 @@ proc deactivate(d:ManagedDriver,id:uint64)=
     d.changes.boundaries.add(HostBoundary(id:id))
   of DescriptionKind.pageOutlet:discard
   d.edits[id]=item
-proc materializeList(d:ManagedDriver,item:Instance,first,finish:int,protected:seq[int])=
+proc materializeList(d:ManagedDriver,item:Instance,first,finish:int,protected:seq[int],
+    refreshRows:bool)=
   let source=item.description.hostNode.listSource
   if source==nil or first<0 or finish<first or finish>source.len:fail("invalid list viewport")
   var active:HashSet[int]
-  for i in max(0,first-source.overscan)..<min(source.len,finish+source.overscan):active.incl(i)
+  if not refreshRows:
+    for i in max(0,first-source.overscan)..<min(source.len,finish+source.overscan):active.incl(i)
+  # A keyed source refresh carries forward only the previous viewport's keys.
   for i in protected:
     if i<0 or i>=source.len:fail("invalid protected row")
     active.incl(i)
@@ -477,8 +483,9 @@ proc materializeList(d:ManagedDriver,item:Instance,first,finish:int,protected:se
     let key=source.itemKey(index)
     var slot=item.rows.getOrDefault(key)
     let old=d.current(slot.id)
-    if old==nil or not old.active:
-      let description=if old==nil:item.description.buildDescriptionRow(index) else:d.retainedDescription(old.id)
+    if refreshRows or old==nil or not old.active:
+      let description=if refreshRows or old==nil:item.description.buildDescriptionRow(index)
+        else:d.retainedDescription(old.id)
       slot.id=d.reconcile(description,slot.id,item.id,item.owner,item.handle,
         item.path & "/item/k:" & $key.len & ":" & key,item.depth+1,index)
     let row=d.current(slot.id).copyInstance()
